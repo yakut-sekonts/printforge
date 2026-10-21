@@ -1,0 +1,15 @@
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+node_modules/
+target/
+out/
+.taste-skill/
+.impeccable/
+npm.log
+tauri-build.log
+pyinstaller.log
+*.spec
+app/src-tauri/binaries/

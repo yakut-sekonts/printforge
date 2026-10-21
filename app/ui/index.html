@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>PrintForge — пробная сборка M0</title>
+<style>
+  body { font: 14px/1.5 -apple-system, sans-serif; margin: 24px; color: #111; }
+  button { padding: 6px 14px; }
+  pre { background: #f5f5f5; border: 1px solid #e5e5e5; padding: 12px;
+        max-width: 720px; overflow: auto; }
+</style>
+</head>
+<body>
+<h1>PrintForge — пробная сборка M0</h1>
+<p>Проверка: sidecar (упакованный геометрический backend) → построение пластины AC-01.</p>
+<button id="build">Построить пластину 80 × 40 × 6</button>
+<pre id="out">Результат появится здесь…</pre>
+<script>
+  document.getElementById("build").addEventListener("click", async () => {
+    const out = document.getElementById("out");
+    out.textContent = "Вычисление…";
+    try {
+      const r = await window.__TAURI__.core.invoke("build_plate", { length: 80.0 });
+      const s = r.stats;
+      out.textContent = JSON.stringify({
+        объём_мм3: s.volume.toFixed(6),
+        тел: s.solid_count,
+        граней: s.face_count,
+        валидно: s.is_valid,
+        габарит: s.bbox.map(v => v.toFixed(1)).join(" … "),
+        центры_отверстий: s.hole_centers,
+        треугольников: r.mesh.triangle_count
+      }, null, 2);
+    } catch (e) {
+      out.textContent = "Ошибка: " + String(e);
+    }
+  });
+</script>
+</body>
+</html>

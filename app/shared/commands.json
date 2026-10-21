@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "commands": [
+    {
+      "command_id": "app.help.open",
+      "title": "Открыть справочник",
+      "help_id": "spravochnik",
+      "shortcut": "CmdOrCtrl+/",
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "app.help.what_is_this",
+      "title": "Что это?",
+      "help_id": "rezhim-chto-eto",
+      "shortcut": "Shift+Escape",
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "part.create.plate",
+      "title": "Создать пластину",
+      "help_id": "shablon-plastina",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "length", "unit": "mm", "min": 0.1, "desc": "Длина по X"},
+        {"name": "width", "unit": "mm", "min": 0.1, "desc": "Ширина по Y"},
+        {"name": "height", "unit": "mm", "min": 0.1, "desc": "Толщина по Z"}
+      ]
+    },
+    {
+      "command_id": "op.hole.add",
+      "title": "Сделать отверстие",
+      "help_id": "sdelat-otverstie",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте или выберите деталь",
+      "params": [
+        {"name": "diameter", "unit": "mm", "min": 0.1, "desc": "Диаметр отверстия"},
+        {"name": "depth", "unit": "mm", "desc": "Глубина; «сквозное» проходит деталь насквозь"},
+        {"name": "offset", "unit": "mm", "min": 0, "desc": "Отступ центров от краёв"}
+      ]
+    },
+    {
+      "command_id": "parameter.set",
+      "title": "Изменить размер",
+      "help_id": "razmery-i-parametry",
+      "shortcut": null,
+      "availability": "requires_document",
+      "params": []
+    },
+    {
+      "command_id": "op.undo",
+      "title": "Отменить",
+      "help_id": "istoriya-i-otmena",
+      "shortcut": "CmdOrCtrl+Z",
+      "availability": "requires_undo",
+      "disabled_reason": "Пока нечего отменять",
+      "params": []
+    },
+    {
+      "command_id": "op.redo",
+      "title": "Повторить",
+      "help_id": "istoriya-i-otmena",
+      "shortcut": "Shift+CmdOrCtrl+Z",
+      "availability": "requires_redo",
+      "disabled_reason": "Пока нечего повторять",
+      "params": []
+    },
+    {
+      "command_id": "doc.save",
+      "title": "Сохранить проект",
+      "help_id": "format-proekta",
+      "shortcut": "CmdOrCtrl+S",
+      "availability": "requires_document",
+      "params": []
+    },
+    {
+      "command_id": "doc.open",
+      "title": "Открыть проект",
+      "help_id": "format-proekta",
+      "shortcut": "CmdOrCtrl+O",
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "export.stl",
+      "title": "Экспортировать STL",
+      "help_id": "eksport-stl",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": [
+        {"name": "linear_deflection", "unit": "mm", "min": 0.001, "desc": "Точность сетки (линейное отклонение)"}
+      ]
+    }
+  ]
+}
