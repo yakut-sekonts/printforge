@@ -95,10 +95,12 @@ def handle_build_plate(params):
     hole_d = float(params.get("hole_diameter", 4))
     hole_offset = float(params.get("hole_offset", 10))
     part, hx, hy = build_plate(length, width, height, hole_d, hole_offset)
+    return plate_result(part, hx, hy)
+
+
+def plate_result(part, hx, hy, with_mesh=True):
     bb = part.bounding_box()
-    mesh = mesh_resource(part, "plate")
-    return {
-        "mesh": mesh,
+    result = {
         "stats": {
             "volume": part.volume,
             "solid_count": len(part.solids()),
@@ -109,6 +111,28 @@ def handle_build_plate(params):
             "is_valid": bool(part.is_valid),
         },
     }
+    if with_mesh:
+        result["mesh"] = mesh_resource(part, "plate")
+    return result
+
+
+def handle_export_stl(params):
+    from build123d import export_stl
+    path = params.get("path")
+    if not path:
+        raise ValueError("не указан путь для STL")
+    tol = float(params.get("linear_deflection", 0.02))
+    part, hx, hy = build_plate(
+        float(params.get("length", 80)), float(params.get("width", 40)),
+        float(params.get("height", 6)), float(params.get("hole_diameter", 4)),
+        float(params.get("hole_offset", 10)))
+    export_stl(part, path, tolerance=tol)
+    size = Path(path).stat().st_size
+    result = plate_result(part, hx, hy, with_mesh=False)
+    result["path"] = str(path)
+    result["bytes"] = size
+    result["linear_deflection"] = tol
+    return result
 
 
 def main():
@@ -130,6 +154,9 @@ def main():
                 respond(rid, True, pid=os.getpid())
             elif method == "build_plate":
                 respond(rid, True, result=handle_build_plate(
+                    req.get("params") or {}))
+            elif method == "export_stl":
+                respond(rid, True, result=handle_export_stl(
                     req.get("params") or {}))
             elif method == "shutdown":
                 respond(rid, True)

@@ -4,7 +4,9 @@
   "version": "0.0.1",
   "identifier": "dev.printforge.app",
   "build": {
-    "frontendDist": "../ui"
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build --prefix ../ui"
   },
   "app": {
     "withGlobalTauri": true,
