@@ -103,6 +103,19 @@ def test_rebuild_length_100(worker):
         assert (abs(cx), abs(cy)) == (40.0, 10.0)
 
 
+def test_export_stl(worker, tmp_path):
+    out = tmp_path / "plate.stl"
+    resp = worker.call("export_stl", {"path": str(out)})
+    assert resp["ok"]
+    result = resp["result"]
+    assert result["bytes"] == out.stat().st_size > 0
+    assert abs(result["stats"]["volume"] - EXP_VOL_80) <= max(1e-3, 1e-6 * EXP_VOL_80)
+    # читаем STL: 80-байтовый заголовок + число треугольников
+    data = out.read_bytes()
+    ntri = struct.unpack_from("<I", data, 80)[0]
+    assert 80 + 4 + ntri * 50 == len(data)
+
+
 def test_unknown_method_is_managed_error(worker):
     resp = worker.call("no_such_method")
     assert resp["ok"] is False

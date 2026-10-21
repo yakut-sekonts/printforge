@@ -24,6 +24,9 @@ export interface DocState {
   error: GeoError | null;
   can_undo: boolean;
   can_redo: boolean;
+  history_len: number;
+  history_index: number;
+  doc_id: string | number;
 }
 
 export interface FaceRange {

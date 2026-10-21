@@ -100,6 +100,7 @@ struct DocParams {
 }
 
 struct Document {
+    doc_id: u64,
     params: DocParams,
     history: Vec<DocParams>,
     index: usize,
@@ -113,7 +114,9 @@ struct Document {
 
 impl Document {
     fn new() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Document {
+            doc_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             params: DocParams::default(),
             history: vec![DocParams::default()],
             index: 0,
@@ -128,6 +131,7 @@ impl Document {
 
     fn state(&self, slot: &str) -> Value {
         json!({
+            "doc_id": self.doc_id,
             "revision": self.revision,
             "dirty": self.dirty,
             "path": self.path.as_ref().map(|p| p.to_string_lossy()),
@@ -138,6 +142,8 @@ impl Document {
             "error": self.error,
             "can_undo": self.index > 0,
             "can_redo": self.index + 1 < self.history.len(),
+            "history_len": self.history.len(),
+            "history_index": self.index,
         })
     }
 }

@@ -49,7 +49,11 @@ def worker_call(method, params, revision=0):
 
 
 class Doc:
+    _ids = 0
+
     def __init__(self):
+        Doc._ids += 1
+        self.doc_id = f"doc-{Doc._ids}"
         self.params = {}
         self.expressions = {}
         self.history = [(dict(self.params), dict(self.expressions))]
@@ -63,12 +67,15 @@ class Doc:
 
     def state(self, slot):
         return {
+            "doc_id": self.doc_id,
             "revision": self.revision, "dirty": self.dirty, "path": self.path,
             "slot": slot, "params": self.params,
             "expressions": self.expressions, "stats": self.stats,
             "error": self.error,
             "can_undo": self.index > 0,
             "can_redo": self.index + 1 < len(self.history),
+            "history_len": len(self.history),
+            "history_index": self.index,
         }
 
     def commit(self, params, expressions):

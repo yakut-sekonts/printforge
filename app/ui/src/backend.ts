@@ -29,9 +29,9 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   const text = await resp.text();
   let data: unknown;
   try { data = JSON.parse(text); } catch { data = text; }
-  if (!resp.ok || (data && typeof data === "object" && "error" in (data as Record<string, unknown>))) {
-    const err = (data as Record<string, unknown>)?.error ?? `HTTP ${resp.status}`;
-    throw parseIpcError(err);
+  const errVal = data && typeof data === "object" ? (data as Record<string, unknown>).error : null;
+  if (!resp.ok || errVal) {
+    throw parseIpcError(errVal ?? `HTTP ${resp.status}`);
   }
   return data as T;
 }

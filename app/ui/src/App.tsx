@@ -90,8 +90,9 @@ export default function App() {
   // ---------- работа с документом ----------
   const applyDoc = useCallback((state: DocState) => {
     const cur = docRef.current;
-    // игнорируем устаревшие ответы (меньшая ревизия того же слота)
-    if (cur && cur.slot === state.slot && state.revision < cur.revision) return;
+    // игнорируем устаревшие ответы (та же идентичность документа, меньшая ревизия);
+    // у нового документа (open/new/tutorial) ревизия законно сбрасывается
+    if (cur && cur.doc_id === state.doc_id && cur.slot === state.slot && state.revision < cur.revision) return;
     setDoc(state);
     if (state.stats?.is_valid) {
       const token = ++meshToken.current;
@@ -237,21 +238,25 @@ export default function App() {
   }, [runBackend, lessonEvent]);
 
   const applyParams = useCallback(async (values: ParamValues) => {
-    const cur = docRef.current;
-    if (!cur) { await createPlate(values); return; }
-    const vars = { ...cur.params };
+    // Одно применение = одна транзакция истории (DOC-004): передаём все
+    // параметры разом через doc_create_plate, а не цепочку parameter.set.
+    if (!docRef.current) { await createPlate(values); return; }
+    const vars = { ...docRef.current.params };
+    const nums: Record<string, number> = {};
+    let changed = false;
     for (const k of Object.keys(values) as (keyof ParamValues)[]) {
       const raw = values[k].trim();
       let num: number;
       try { num = evalExpression(raw, vars); }
       catch (e) { setStatusMsg(`Ошибка выражения: ${(e as Error).message}`); return; }
-      if (Math.abs((cur.params?.[k] ?? NaN) - num) > 1e-9 || cur.expressions?.[k] !== raw) {
-        const state = await runBackend(() => backend.docSetParameter(k, num, raw));
-        if (!state) return;
-        vars[k] = num;
-      }
+      nums[k] = num;
+      if (Math.abs((docRef.current.params?.[k] ?? NaN) - num) > 1e-9
+          || (docRef.current.expressions?.[k] ?? raw) !== raw) changed = true;
+      vars[k] = num;
     }
-    if (docRef.current) lessonEvent({ type: "params", state: docRef.current });
+    if (!changed) return;
+    const state = await runBackend(() => backend.docCreatePlate(nums as unknown as Parameters<typeof backend.docCreatePlate>[0]));
+    if (state) lessonEvent({ type: "params", state });
   }, [runBackend, createPlate, lessonEvent]);
 
   const doSave = useCallback(async () => {

@@ -1,0 +1,17 @@
+THIRD_PARTY NOTICES — PrintForge
+
+Поставляемые компоненты (фактические версии — в backend/requirements.txt и app lockfiles):
+
+- Open CASCADE Technology (через пакеты cadquery-ocp-novtk / OCP) — LGPL-2.1 со специальным исключением (OCCT Exception 1.0). https://github.com/Open-Cascade-SAS/OCCT
+- build123d — Apache-2.0. https://github.com/gumyr/build123d
+- lib3mf — BSD-2-Clause. https://github.com/3MFConsortium/lib3mf
+- trimesh — MIT (только dev-проверки, в runtime backend не входит… уточнить при M2). https://github.com/mikedh/trimesh
+- Tauri — MIT/Apache-2.0. https://tauri.app
+- React — MIT. https://react.dev
+- Three.js — MIT. https://threejs.org
+- Onest (шрифт интерфейса) — SIL Open Font License 1.1. https://github.com/simpaud/Onest (дистрибутив через fontsource, woff2 самохостинг в app/ui/fonts)
+
+Инструменты разработки (НЕ входят в поставку приложения):
+- Impeccable — Apache-2.0 (design-sources/impeccable, проверки дизайна).
+- Taste Skill — MIT (design-sources/taste-skill, проверки дизайна).
+- PyInstaller, pytest, Vite — см. их лицензии в репозиториях.

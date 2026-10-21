@@ -44,33 +44,35 @@ export function TopBar({ commands, doc, docName, onCommand }: TopBarProps) {
           <circle cx="5" cy="8" r="1.4" /><circle cx="11" cy="8" r="1.4" />
         </svg>
         <span className="brand-name">PrintForge</span>
-        <span className="doc-name">
+        <h1 className="doc-name">
           {docName}
           {doc?.dirty && <span className="dirty-mark" title="Есть несохранённые изменения"> — изменено</span>}
-        </span>
+        </h1>
       </div>
       <nav className="topbar-actions" aria-label="Основные действия">
-        {TOPBAR_IDS.map((id) => {
-          const c = get(id);
-          if (!c) return null;
-          const enabled = cmdEnabled(c, doc);
-          const title = !enabled && c.disabled_reason ? `${c.title} — ${c.disabled_reason}` : c.title;
-          return (
-            <button
-              key={id}
-              className="btn"
-              data-cmd={id}
-              aria-label={c.title}
-              title={title}
-              disabled={!enabled}
-              onClick={() => onCommand(id)}
-            >
-              {TOPBAR_ICONS[id]}
-              <span>{c.title}</span>
-              {c.shortcut && <kbd>{c.shortcut.replace("CmdOrCtrl", "⌘").replace("Shift", "⇧").replaceAll("+", "")}</kbd>}
-            </button>
-          );
-        })}
+        <div className="topbar-scroll">
+          {TOPBAR_IDS.map((id) => {
+            const c = get(id);
+            if (!c) return null;
+            const enabled = cmdEnabled(c, doc);
+            const title = !enabled && c.disabled_reason ? `${c.title} — ${c.disabled_reason}` : c.title;
+            return (
+              <button
+                key={id}
+                className="btn"
+                data-cmd={id}
+                aria-label={c.title}
+                title={title}
+                disabled={!enabled}
+                onClick={() => onCommand(id)}
+              >
+                {TOPBAR_ICONS[id]}
+                <span>{c.title}</span>
+                {c.shortcut && <kbd>{c.shortcut.replace("CmdOrCtrl", "⌘").replace("Shift", "⇧").replaceAll("+", "")}</kbd>}
+              </button>
+            );
+          })}
+        </div>
         <span className="topbar-sep" aria-hidden />
         <button className="btn" data-cmd="app.help.what_is_this" aria-label="Что это?" title="Что это? (Shift+Escape)" onClick={() => onCommand("app.help.what_is_this")}>
           <IconCursorQuestion />
@@ -105,9 +107,9 @@ export function LeftPanel({ doc }: { doc: DocState | null }) {
         <h2 className="panel-section">История операций</h2>
         {doc ? (
           <ol className="history-list">
-            {Array.from({ length: doc.revision }, (_, i) => doc.revision - i).map((rev) => (
-              <li key={rev} className={rev === doc.revision ? "history-current" : ""}>
-                Ревизия {rev}{rev === doc.revision && <span className="history-badge">текущая</span>}
+            {Array.from({ length: doc.history_len }, (_, i) => doc.history_len - i).map((rev) => (
+              <li key={rev} className={rev === doc.history_index + 1 ? "history-current" : ""}>
+                Операция {rev}{rev === doc.history_index + 1 && <span className="history-badge">текущая</span>}
               </li>
             ))}
           </ol>

@@ -339,7 +339,7 @@ export class Viewport {
       s.position.set(...at);
       group.add(s);
     };
-    const gap = 12;
+    const gap = 16;
     const zLow = minZ;
     // длина (X) — перед деталью
     const yLine = minY - gap;
@@ -361,7 +361,7 @@ export class Viewport {
     const [, cy1] = docToThree(cx, cy, maxZ);
     seg([cx0, cy0, cz0], [cx0, cy1, cz0]);
     tick([cx0, cy0, cz0], [1, 0, 0]); tick([cx0, cy1, cz0], [1, 0, 0]);
-    label(fmt(maxZ - minZ), [cx0, (cy0 + cy1) / 2, cz0 + 6]);
+    label(fmt(maxZ - minZ), [cx0, (cy0 + cy1) / 2, cz0 + 10]);
 
     this.dimGroup = group;
     this.scene.add(group);
