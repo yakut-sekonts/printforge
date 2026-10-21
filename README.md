@@ -35,7 +35,9 @@ cd backend && .venv/bin/pyinstaller --onefile --name printforge-geo \
   --collect-all build123d --collect-all OCP --collect-all OCP_modules \
   --collect-all lib3mf --clean --noconfirm worker.py
 
-# Пробная .app
+# Пробная .app (sidecar не хранится в git — сначала восстановить)
+cp backend/dist/printforge-geo \
+  app/src-tauri/binaries/printforge-geo-aarch64-apple-darwin
 cd app && npm install && npx tauri build
 # Результат: app/src-tauri/target/release/bundle/macos/PrintForge.app
 ```
