@@ -386,6 +386,48 @@ def handle_print_check(params):
     return {"checks": checks}
 
 
+def handle_mesh_check(params):
+    """PRINT-001 для импортированной сетки: отдельный статус каждой проверки."""
+    import trimesh
+    path = params.get("path")
+    if not path:
+        raise GeometryError("bad_params", "не указан путь сетки")
+    mesh = trimesh.load(path)
+    checks = []
+    faces = mesh.faces
+    areas = mesh.area_faces
+    degen = int((areas <= 1e-12).sum())
+    checks.append({"id": "degenerate", "title": "Вырожденные треугольники",
+                   "status": "pass" if degen == 0 else "fail",
+                   "detail": f"{degen} шт."})
+    try:
+        import numpy as np
+        _, counts = np.unique(mesh.edges_sorted, axis=0, return_counts=True)
+        boundary = int((counts == 1).sum())
+    except Exception:  # noqa: BLE001
+        boundary = -1
+    checks.append({"id": "boundary", "title": "Открытые края (граничные рёбра)",
+                   "status": "pass" if boundary == 0 else "fail",
+                   "detail": f"{boundary} рёбер" if boundary >= 0 else "не удалось оценить"})
+    try:
+        wound = bool(mesh.is_winding_consistent)
+    except Exception:  # noqa: BLE001
+        wound = None
+    checks.append({"id": "winding", "title": "Согласованная ориентация",
+                   "status": ("pass" if wound else "fail") if wound is not None else "unknown"})
+    comps = int(mesh.body_count)
+    checks.append({"id": "components", "title": "Число компонент",
+                   "status": "pass" if comps == 1 else "fail",
+                   "detail": f"{comps} шт."})
+    checks.append({"id": "self_intersection", "title": "Самопересечения",
+                   "status": "unknown",
+                   "detail": "универсальный анализ не реализован (P2)"})
+    checks.append({"id": "watertight", "title": "Замкнутая оболочка",
+                   "status": "pass" if mesh.is_watertight else "fail"})
+    return {"checks": checks, "triangle_count": int(len(faces)),
+            "bbox_mesh": [float(x) for x in mesh.bounding_box.extents]}
+
+
 HANDLERS = {
     "ping": lambda p: {"pid": os.getpid()},
     "build_plate": lambda p: handle_build({"template": "plate_with_holes",
@@ -397,6 +439,7 @@ HANDLERS = {
                                            "params": p}),
     "import": handle_import,
     "print_check": handle_print_check,
+    "mesh_check": handle_mesh_check,
 }
 
 

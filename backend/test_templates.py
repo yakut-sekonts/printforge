@@ -193,3 +193,22 @@ def test_print_check(worker):
     checks2 = {c["id"]: c for c in r2["result"]["checks"]}
     assert checks2["bed_fit"]["status"] == "fail"
     assert "230" in checks2["bed_fit"]["detail"]
+
+
+def test_mesh_check_open_edge(worker, tmp_path):
+    import trimesh
+    from build123d import Box, Pos, export_stl
+    closed = tmp_path / "c.stl"
+    export_stl(Pos(0, 0, 3) * Box(80, 40, 6), str(closed), tolerance=0.02)
+    m = trimesh.load(str(closed))
+    open_p = tmp_path / "o.stl"
+    trimesh.Trimesh(vertices=m.vertices, faces=m.faces[5:], process=False).export(str(open_p))
+    r1 = worker.call("mesh_check", {"path": str(closed)})
+    c1 = {c["id"]: c for c in r1["result"]["checks"]}
+    assert c1["boundary"]["status"] == "pass"
+    assert c1["watertight"]["status"] == "pass"
+    assert c1["self_intersection"]["status"] == "unknown"
+    r2 = worker.call("mesh_check", {"path": str(open_p)})
+    c2 = {c["id"]: c for c in r2["result"]["checks"]}
+    assert c2["boundary"]["status"] == "fail"
+    assert c2["watertight"]["status"] == "fail"
