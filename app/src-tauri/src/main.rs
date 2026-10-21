@@ -336,18 +336,18 @@ async fn doc_fillet(
     if let Some(e) = err {
         let code = e.get("code").and_then(Value::as_str).unwrap_or("");
         if code == "fillet_failed" || code == "reselect_required" || code == "bad_ref" {
-            // откат транзакции: модель и история остаются прежними
+            // откат транзакции: история прежняя, ошибка остаётся видимой (DOC-005)
             with_store(|s| {
                 let doc = active_doc(s);
                 if doc.index > 0 {
                     doc.history.pop();
                     doc.index -= 1;
                     doc.snap = doc.history[doc.index].clone();
-                    doc.error = None;
+                    doc.error = Some(e.clone());
                 }
             })
             .await;
-            return Err(e.to_string());
+            return Ok(current_state().await);
         }
     }
     Ok(state)

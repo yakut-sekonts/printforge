@@ -180,14 +180,11 @@ def cmd_doc_fillet(a):
     d.commit()
     d.rebuild()
     if d.error:
-        # неудачная операция откатывается из истории транзакции
+        # неудачная операция откатывается из истории, но ошибка видна (DOC-005)
         d.history.pop()
         d.index -= 1
         d.restore(d.history[d.index])
         d.dirty = True
-        err = d.error
-        d.error = None
-        raise RuntimeError(json.dumps(err, ensure_ascii=False))
     return d.state(ACTIVE[0])
 
 

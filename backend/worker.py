@@ -147,13 +147,18 @@ def merged_params(template, params):
 # ---------- рёбра и скругление ----------
 
 def edge_signature(edge, solid_index):
-    from build123d import GeomType
     c = edge.center()
+    try:
+        p0 = tuple(round(v, 4) for v in edge.start_point())
+        p1 = tuple(round(v, 4) for v in edge.end_point())
+    except Exception:  # noqa: BLE001
+        p0 = p1 = None
     return {
         "solid_index": solid_index,
         "kind": str(edge.geom_type).split(".")[-1],
         "length": round(edge.length, 4),
         "midpoint": [round(c.X, 4), round(c.Y, 4), round(c.Z, 4)],
+        "p0": p0, "p1": p1,
     }
 
 

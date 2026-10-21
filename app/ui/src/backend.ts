@@ -30,7 +30,9 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   let data: unknown;
   try { data = JSON.parse(text); } catch { data = text; }
   const errVal = data && typeof data === "object" ? (data as Record<string, unknown>).error : null;
-  if (!resp.ok || errVal) {
+  // DocState.error — часть контракта (DOC-005), не транспортная ошибка;
+  // бросаем только HTTP-сбой или строковую ошибку shim'а
+  if (!resp.ok || typeof errVal === "string") {
     throw parseIpcError(errVal ?? `HTTP ${resp.status}`);
   }
   return data as T;

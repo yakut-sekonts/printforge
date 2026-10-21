@@ -255,8 +255,8 @@ export class Viewport {
     this.scene.add(this.hoverOverlay);
   }
 
-  // Подсветка выбранного ребра для op.fillet: маркер-крест в середине ребра
-  // (edge_ref отдаёт только kind/length/midpoint, направление ребра неизвестно)
+  // Подсветка выбранного ребра для op.fillet: линия вдоль ребра (--sel-edge)
+  // с маркерами концов; fallback — крест в середине.
   setEdgeMarker(edge: EdgeRef | null) {
     if (this.edgeMarker) {
       this.scene.remove(this.edgeMarker);
@@ -266,16 +266,35 @@ export class Viewport {
     const [x, y, z] = docToThree(...edge.midpoint);
     const group = new THREE.Group();
     const mat = new THREE.LineBasicMaterial({ color: COLOR.selEdge });
-    const r = Math.max(2, Math.min(edge.length / 2, 6));
-    for (const dir of [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const) {
+    if (edge.p0 && edge.p1) {
+      const [ax, ay, az] = docToThree(...edge.p0);
+      const [bx, by, bz] = docToThree(...edge.p1);
       const g = new THREE.BufferGeometry();
-      g.setAttribute("position", new THREE.Float32BufferAttribute([
-        x - dir[0] * r, y - dir[1] * r, z - dir[2] * r,
-        x + dir[0] * r, y + dir[1] * r, z + dir[2] * r,
-      ], 3));
+      g.setAttribute("position", new THREE.Float32BufferAttribute([ax, ay, az, bx, by, bz], 3));
       const line = new THREE.Line(g, mat);
       line.renderOrder = 18;
       group.add(line);
+      for (const [px, py, pz] of [[ax, ay, az], [bx, by, bz]]) {
+        const cap = new THREE.Mesh(
+          new THREE.SphereGeometry(1.6, 12, 12),
+          new THREE.MeshBasicMaterial({ color: COLOR.selEdge })
+        );
+        cap.position.set(px, py, pz);
+        cap.renderOrder = 19;
+        group.add(cap);
+      }
+    } else {
+      const r = Math.max(2, Math.min(edge.length / 2, 6));
+      for (const dir of [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.Float32BufferAttribute([
+          x - dir[0] * r, y - dir[1] * r, z - dir[2] * r,
+          x + dir[0] * r, y + dir[1] * r, z + dir[2] * r,
+        ], 3));
+        const line = new THREE.Line(g, mat);
+        line.renderOrder = 18;
+        group.add(line);
+      }
     }
     const dot = new THREE.Mesh(
       new THREE.SphereGeometry(1.2, 12, 12),

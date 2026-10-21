@@ -152,6 +152,7 @@ export default function App() {
   }, []);
 
   const checkParams = useCallback((check: LessonCheck, state: DocState): boolean => {
+    if (check.template && state.template !== check.template) return false;
     if (!check.params) return true;
     for (const [k, v] of Object.entries(check.params)) {
       const actual = state.params?.[k];
@@ -165,7 +166,11 @@ export default function App() {
     return true;
   }, []);
 
-  const lessonEvent = useCallback((ev: { type: string; command_id?: string; state?: DocState }) => {
+  const lessonEvent = useCallback((ev: {
+    type: string; command_id?: string; state?: DocState;
+    op?: string; radius?: number; code?: string; mode?: string;
+    checks?: { id: string; status: string }[];
+  }) => {
     const run = lessonRef.current;
     if (!run || run.paused || run.stepIndex >= run.lesson.steps.length) return;
     const step = run.lesson.steps[run.stepIndex];
@@ -180,6 +185,16 @@ export default function App() {
       case "saved": ok = ev.type === "saved"; break;
       case "reopened": ok = ev.type === "reopened" && (!check.params || (ev.state != null && checkParams(check, ev.state))); break;
       case "exported": ok = ev.type === "exported"; break;
+      case "operation":
+        ok = ev.type === "operation" && ev.op === check.op
+          && (check.radius == null || Math.abs((ev.radius ?? -1) - check.radius) < 1e-9);
+        break;
+      case "error_shown": ok = ev.type === "error_shown" && (!check.code || ev.code === check.code); break;
+      case "imported": ok = ev.type === "imported" && (!check.mode || ev.mode === check.mode); break;
+      case "check_result":
+        ok = ev.type === "check_result"
+          && (ev.checks ?? []).some((c) => c.id === check.id && c.status === check.status);
+        break;
     }
     if (ok) {
       const statuses = [...run.statuses];
@@ -193,6 +208,7 @@ export default function App() {
     if (!run || run.stepIndex >= run.lesson.steps.length) return;
     const check = run.lesson.steps[run.stepIndex].check;
     if (check.type === "params" && doc) lessonEvent({ type: "params", state: doc });
+    if (check.type === "error_shown" && doc?.error) lessonEvent({ type: "error_shown", code: doc.error.code });
   }, [doc, lessonRun, lessonEvent]);
 
   const startLesson = useCallback(async (lessonId: string) => {
@@ -284,8 +300,11 @@ export default function App() {
       return;
     }
     const state = await runBackend(() => backend.docFillet(f.selected!, radius));
-    if (state && !state.error) cancelFillet();
-  }, [runBackend, cancelFillet]);
+    if (state && !state.error) {
+      cancelFillet();
+      lessonEvent({ type: "operation", op: "fillet", radius });
+    }
+  }, [runBackend, cancelFillet, lessonEvent]);
 
   const clearErrorOrUndo = useCallback(() => {
     const code = docRef.current?.error?.code;
@@ -302,6 +321,7 @@ export default function App() {
     try {
       const res = await backend.printCheck(printer);
       setPrintChecks(res.checks ?? []);
+      lessonEvent({ type: "check_result", checks: res.checks ?? [] });
     } catch (e) {
       setStatusMsg(`Ошибка проверки: ${parseIpcError(e).message}`);
     } finally {
@@ -324,6 +344,7 @@ export default function App() {
         setSelectedFace(null);
         const tris = res.mesh.triangle_count;
         setStatusMsg(`Импортировано: ${expandTilde(path)} — ${tris} треугольников`);
+        lessonEvent({ type: "imported", mode: res.mode });
       }
     } catch (e) {
       setStatusMsg(`Ошибка импорта: ${parseIpcError(e).message}`);

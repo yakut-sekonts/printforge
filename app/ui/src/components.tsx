@@ -44,10 +44,10 @@ export function TopBar({ commands, doc, docName, onCommand }: TopBarProps) {
           <circle cx="5" cy="8" r="1.4" /><circle cx="11" cy="8" r="1.4" />
         </svg>
         <span className="brand-name">PrintForge</span>
-        <span className="doc-name">
+        <h1 className="doc-name">
           {docName}
           {doc?.dirty && <span className="dirty-mark" title="Есть несохранённые изменения"> — изменено</span>}
-        </span>
+        </h1>
       </div>
       <nav className="topbar-actions" aria-label="Основные действия">
         {TOPBAR_IDS.map((id) => {
@@ -168,8 +168,8 @@ export function LeftPanel({ doc, templates, importedStats, onCreateTemplate }: L
         {doc ? (
           <ol className="history-list">
             {Array.from({ length: doc.history_len ?? doc.revision }, (_, i) => (doc.history_len ?? doc.revision) - i).map((rev) => (
-              <li key={rev} className={rev === (doc.history_index ?? doc.revision) ? "history-current" : ""}>
-                Ревизия {rev}{rev === (doc.history_index ?? doc.revision) && <span className="history-badge">текущая</span>}
+              <li key={rev} className={rev === (doc.history_index ?? doc.revision) + 1 ? "history-current" : ""}>
+                Операция {rev}{rev === (doc.history_index ?? doc.revision) + 1 && <span className="history-badge">текущая</span>}
               </li>
             ))}
           </ol>

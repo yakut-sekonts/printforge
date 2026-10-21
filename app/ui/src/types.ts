@@ -9,6 +9,8 @@ export interface EdgeRef {
   kind: string;
   length: number;
   midpoint: [number, number, number];
+  p0?: [number, number, number] | null;
+  p1?: [number, number, number] | null;
 }
 
 export interface Operation {
@@ -130,8 +132,15 @@ export interface HelpIndex {
 export interface LessonCheck {
   type: string;
   command_id?: string;
+  template?: string;
   params?: Record<string, number>;
   hole_centers_abs_x?: number;
+  op?: string;
+  radius?: number;
+  code?: string;
+  id?: string;
+  status?: string;
+  mode?: string;
 }
 
 export interface LessonStep {
