@@ -88,6 +88,8 @@ interface LeftPanelProps {
   doc: DocState | null;
   templates: TemplateDef[];
   importedStats: DocStats | null;
+  selectedPartId: string | null;
+  onSelectPart: (partId: string) => void;
   onCreateTemplate: (t: TemplateDef) => void;
 }
 

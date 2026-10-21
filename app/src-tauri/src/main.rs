@@ -11,7 +11,7 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const APP_VERSION: &str = "0.1.0-m2";
 
 // ---------- геометрический worker ----------
@@ -95,10 +95,10 @@ async fn worker_call(
 
 #[derive(Clone, Default)]
 struct Snapshot {
-    template: Option<String>,
-    params: BTreeMap<String, f64>,
+    parts: Vec<Value>, // [{part_id, name, template, params}]
     expressions: BTreeMap<String, String>,
     operations: Vec<Value>,
+    part_n: u64,
 }
 
 struct Document {
@@ -140,9 +140,21 @@ impl Document {
     }
 
     fn build_params(&self) -> Value {
+        if self.snap.parts.is_empty() {
+            return json!({"template": null, "params": {}, "operations": []});
+        }
+        let only_fillet = self.snap.operations.iter()
+            .all(|op| op.get("op") == Some(&json!("fillet")));
+        if self.snap.parts.len() == 1 && only_fillet {
+            let p = &self.snap.parts[0];
+            return json!({
+                "template": p.get("template"),
+                "params": p.get("params").cloned().unwrap_or(json!({})),
+                "operations": self.snap.operations,
+            });
+        }
         json!({
-            "template": self.snap.template,
-            "params": self.snap.params,
+            "parts": self.snap.parts,
             "operations": self.snap.operations,
         })
     }
@@ -154,8 +166,9 @@ impl Document {
             "dirty": self.dirty,
             "path": self.path.as_ref().map(|p| p.to_string_lossy()),
             "slot": slot,
-            "template": self.snap.template,
-            "params": self.snap.params,
+            "template": self.snap.parts.first().and_then(|p| p.get("template")),
+            "params": self.snap.parts.first().and_then(|p| p.get("params")).cloned().unwrap_or(json!({})),
+            "parts": self.snap.parts,
             "expressions": self.snap.expressions,
             "operations": self.snap.operations,
             "stats": self.stats,
@@ -201,7 +214,7 @@ async fn current_state() -> Value {
 }
 
 async fn rebuild(app: &tauri::AppHandle, doc: &mut Document) {
-    if doc.snap.template.is_none() {
+    if doc.snap.parts.is_empty() {
         return;
     }
     doc.revision += 1;
@@ -231,28 +244,133 @@ async fn rebuild_active(app: &tauri::AppHandle) {
 
 // ---------- команды IPC ----------
 
+const TEMPLATES: [&str; 4] = ["plate_with_holes", "washer", "bracket_l", "case_with_lid"];
+
+fn make_part(part_n: u64, template: &str, params: BTreeMap<String, f64>) -> Value {
+    let title = match template {
+        "plate_with_holes" => "Пластина",
+        "washer" => "Шайба",
+        "bracket_l" => "Кронштейн",
+        "case_with_lid" => "Корпус",
+        _ => template,
+    };
+    json!({
+        "part_id": format!("part-{part_n}"),
+        "name": title,
+        "template": template,
+        "params": params,
+    })
+}
+
 #[tauri::command]
 async fn doc_create(
     app: tauri::AppHandle,
     template: String,
     params: Option<BTreeMap<String, f64>>,
 ) -> Result<Value, String> {
-    const TEMPLATES: [&str; 4] = ["plate_with_holes", "washer", "bracket_l", "case_with_lid"];
     if !TEMPLATES.contains(&template.as_str()) {
         return Err(geo_err("unknown_template", format!("Неизвестный шаблон: {template}")));
     }
+    let part = make_part(1, &template, params.unwrap_or_default());
     with_store(|s| {
         let doc = active_doc(s);
         doc.commit(Snapshot {
-            template: Some(template.clone()),
-            params: params.clone().unwrap_or_default(),
+            parts: vec![part],
             expressions: BTreeMap::new(),
             operations: vec![],
+            part_n: 1,
         });
     })
     .await;
     rebuild_active(&app).await;
     Ok(current_state().await)
+}
+
+#[tauri::command]
+async fn doc_add_part(
+    app: tauri::AppHandle,
+    template: String,
+    params: Option<BTreeMap<String, f64>>,
+) -> Result<Value, String> {
+    if !TEMPLATES.contains(&template.as_str()) {
+        return Err(geo_err("unknown_template", format!("Неизвестный шаблон: {template}")));
+    }
+    let has_model = with_store(|s| !active_doc(s).snap.parts.is_empty()).await;
+    if !has_model {
+        return Err(geo_err("no_model", "Сначала создайте деталь из шаблона."));
+    }
+    with_store(|s| {
+        let doc = active_doc(s);
+        let mut next = doc.snap.clone();
+        next.part_n += 1;
+        next.parts.push(make_part(next.part_n, &template, params.clone().unwrap_or_default()));
+        doc.commit(next);
+    })
+    .await;
+    rebuild_active(&app).await;
+    Ok(current_state().await)
+}
+
+async fn apply_op(app: &tauri::AppHandle, op: Value) -> Result<Value, String> {
+    with_store(|s| {
+        let doc = active_doc(s);
+        let mut next = doc.snap.clone();
+        if op.get("op") == Some(&json!("fillet")) {
+            next.operations.retain(|o| o.get("op") != Some(&json!("fillet")));
+        }
+        next.operations.push(op);
+        doc.commit(next);
+    })
+    .await;
+    rebuild_active(app).await;
+    // откат транзакции при ошибке операции, ошибка остаётся видимой (DOC-005)
+    with_store(|s| {
+        let doc = active_doc(s);
+        if doc.error.is_some() && doc.index > 0 {
+            let err = doc.error.clone();
+            doc.history.pop();
+            doc.index -= 1;
+            doc.snap = doc.history[doc.index].clone();
+            doc.error = err;
+        }
+    })
+    .await;
+    Ok(current_state().await)
+}
+
+#[tauri::command]
+async fn doc_boolean(
+    app: tauri::AppHandle,
+    boolean: String,
+    target_id: String,
+    tool_id: String,
+    keep_tool: Option<bool>,
+) -> Result<Value, String> {
+    apply_op(&app, json!({
+        "op": "boolean", "boolean": boolean,
+        "target_id": target_id, "tool_id": tool_id,
+        "keep_tool": keep_tool.unwrap_or(false),
+    })).await
+}
+
+#[tauri::command]
+async fn doc_array(app: tauri::AppHandle, part_id: String, count: u32, step: Vec<f64>) -> Result<Value, String> {
+    apply_op(&app, json!({"op": "array_linear", "part_id": part_id, "count": count, "step": step})).await
+}
+
+#[tauri::command]
+async fn doc_mirror(app: tauri::AppHandle, part_id: String, plane: String) -> Result<Value, String> {
+    apply_op(&app, json!({"op": "mirror", "part_id": part_id, "plane": plane})).await
+}
+
+#[tauri::command]
+async fn doc_split(app: tauri::AppHandle, part_id: String, plane: String, offset: f64) -> Result<Value, String> {
+    apply_op(&app, json!({"op": "split", "part_id": part_id, "plane": plane, "offset": offset})).await
+}
+
+#[tauri::command]
+async fn doc_transform(app: tauri::AppHandle, part_id: String, translate: Vec<f64>) -> Result<Value, String> {
+    apply_op(&app, json!({"op": "transform", "part_id": part_id, "translate": translate})).await
 }
 
 #[tauri::command]
@@ -279,25 +397,36 @@ async fn doc_set_parameter(
     name: String,
     value: f64,
     expression: Option<String>,
+    part_id: Option<String>,
 ) -> Result<Value, String> {
     if !value.is_finite() || value <= 0.0 {
         return Err(geo_err("bad_value",
             format!("Значение параметра «{name}» должно быть положительным числом.")));
     }
-    let has_model = with_store(|s| active_doc(s).snap.template.is_some()).await;
+    let has_model = with_store(|s| !active_doc(s).snap.parts.is_empty()).await;
     if !has_model {
         return Err(geo_err("no_model", "Сначала создайте деталь."));
     }
     with_store(|s| {
         let doc = active_doc(s);
         let mut next = doc.snap.clone();
-        next.params.insert(name.clone(), value);
+        let pid = part_id.clone().or_else(|| {
+            next.parts.first().and_then(|p| p.get("part_id")).and_then(Value::as_str).map(String::from)
+        });
+        if let Some(part) = next.parts.iter_mut().find(|p| {
+            p.get("part_id").and_then(Value::as_str) == pid.as_deref()
+        }) {
+            part["params"][&name] = json!(value);
+        } else {
+            return;
+        }
+        let key = format!("{}.{}", pid.unwrap_or_default(), name);
         match &expression {
             Some(e) if !e.trim().is_empty() => {
-                next.expressions.insert(name.clone(), e.clone());
+                next.expressions.insert(key, e.clone());
             }
             _ => {
-                next.expressions.remove(&name);
+                next.expressions.remove(&key);
             }
         }
         doc.commit(next);
@@ -312,45 +441,15 @@ async fn doc_fillet(
     app: tauri::AppHandle,
     edge_ref: Value,
     radius: f64,
+    part_id: Option<String>,
 ) -> Result<Value, String> {
     if !radius.is_finite() || radius <= 0.0 {
         return Err(geo_err("bad_value", "Радиус скругления должен быть больше нуля."));
     }
-    with_store(|s| {
-        let doc = active_doc(s);
-        let mut next = doc.snap.clone();
-        next.operations.retain(|op| op.get("op") != Some(&json!("fillet")));
-        next.operations.push(json!({
-            "op": "fillet", "radius": radius, "edge_ref": edge_ref,
-        }));
-        doc.commit(next);
-    })
-    .await;
-    rebuild_active(&app).await;
-    let (err, state) = with_store(|s| {
-        let slot = s.active.clone();
-        let doc = active_doc(s);
-        (doc.error.clone(), doc.state(&slot))
-    })
-    .await;
-    if let Some(e) = err {
-        let code = e.get("code").and_then(Value::as_str).unwrap_or("");
-        if code == "fillet_failed" || code == "reselect_required" || code == "bad_ref" {
-            // откат транзакции: история прежняя, ошибка остаётся видимой (DOC-005)
-            with_store(|s| {
-                let doc = active_doc(s);
-                if doc.index > 0 {
-                    doc.history.pop();
-                    doc.index -= 1;
-                    doc.snap = doc.history[doc.index].clone();
-                    doc.error = Some(e.clone());
-                }
-            })
-            .await;
-            return Ok(current_state().await);
-        }
-    }
-    Ok(state)
+    let pid = part_id.or_else(|| None);
+    apply_op(&app, json!({
+        "op": "fillet", "radius": radius, "edge_ref": edge_ref, "part_id": pid,
+    })).await
 }
 
 #[tauri::command]
@@ -456,8 +555,9 @@ fn save_document(doc: &Document, target: &PathBuf) -> Result<(), String> {
     });
     let document = json!({
         "schema_version": SCHEMA_VERSION, "units": "mm",
-        "template": doc.snap.template,
-        "parameters": doc.snap.params,
+        "template": doc.snap.parts.first().and_then(|p| p.get("template")),
+        "parts": doc.snap.parts,
+        "parameters": doc.snap.parts.first().and_then(|p| p.get("params")).cloned().unwrap_or(json!({})),
         "expressions": doc.snap.expressions,
         "operations": doc.snap.operations,
     });
@@ -512,17 +612,26 @@ async fn doc_open(app: tauri::AppHandle, path: String) -> Result<Value, String> 
         return Err(geo_err("bad_file", format!("Неизвестный шаблон в проекте: {template}")));
     }
     let mut snap = Snapshot {
-        template: Some(template),
-        params: BTreeMap::new(),
+        parts: vec![],
         expressions: BTreeMap::new(),
         operations: doc_json.get("operations").and_then(Value::as_array).cloned().unwrap_or_default(),
+        part_n: 0,
     };
-    if let Some(obj) = doc_json.get("parameters").and_then(Value::as_object) {
-        for (k, v) in obj {
-            if let Some(n) = v.as_f64() {
-                snap.params.insert(k.clone(), n);
+    if let Some(parts) = doc_json.get("parts").and_then(Value::as_array) {
+        snap.parts = parts.clone();
+        snap.part_n = parts.len() as u64;
+    }
+    if snap.parts.is_empty() {
+        let mut params = BTreeMap::new();
+        if let Some(obj) = doc_json.get("parameters").and_then(Value::as_object) {
+            for (k, v) in obj {
+                if let Some(n) = v.as_f64() {
+                    params.insert(k.clone(), n);
+                }
             }
         }
+        snap.part_n = 1;
+        snap.parts.push(make_part(1, &template, params));
     }
     if let Some(obj) = doc_json.get("expressions").and_then(Value::as_object) {
         for (k, v) in obj {
@@ -556,7 +665,7 @@ async fn doc_export(
         (doc.build_params(), doc.revision)
     })
     .await;
-    if params.get("template").is_none() || params["template"].is_null() {
+    if params["template"].is_null() && params["parts"].is_null() {
         return Err(geo_err("no_model", "нет модели для экспорта"));
     }
     let mut call = params;
@@ -599,7 +708,7 @@ async fn print_check(app: tauri::AppHandle, printer: Value) -> Result<Value, Str
         (doc.build_params(), doc.revision)
     })
     .await;
-    if params["template"].is_null() {
+    if params["template"].is_null() && params["parts"].is_null() {
         return Err(geo_err("no_model", "Сначала создайте деталь."));
     }
     let mut call = params;
@@ -694,6 +803,12 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             doc_create,
             doc_create_plate,
+            doc_add_part,
+            doc_boolean,
+            doc_array,
+            doc_mirror,
+            doc_split,
+            doc_transform,
             doc_set_parameter,
             doc_fillet,
             doc_clear_error,

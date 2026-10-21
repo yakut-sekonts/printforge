@@ -19,6 +19,20 @@ export interface Operation {
   edge_ref?: EdgeRef;
 }
 
+export interface PartDef {
+  part_id: string;
+  name: string;
+  template: string;
+  params: Record<string, number>;
+}
+
+export interface PartStats {
+  part_id: string;
+  name: string;
+  volume: number;
+  solid_count: number;
+}
+
 export interface DocStats {
   volume: number;
   solid_count: number;
@@ -30,6 +44,7 @@ export interface DocStats {
   case_volume?: number;
   lid_volume?: number;
   intersection_volume?: number;
+  parts?: PartStats[];
 }
 
 export interface DocState {
@@ -40,6 +55,7 @@ export interface DocState {
   slot: "main" | "tutorial";
   template?: string | null;
   params: Record<string, number>;
+  parts?: PartDef[];
   expressions: Record<string, string>;
   operations?: Operation[];
   stats: DocStats | null;

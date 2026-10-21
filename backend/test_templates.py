@@ -212,3 +212,64 @@ def test_mesh_check_open_edge(worker, tmp_path):
     c2 = {c["id"]: c for c in r2["result"]["checks"]}
     assert c2["boundary"]["status"] == "fail"
     assert c2["watertight"]["status"] == "fail"
+
+
+# --- документ v3: несколько деталей и операции ---
+
+def test_v3_boolean_subtract(worker):
+    doc = {"parts": [
+        {"part_id": "base", "template": "plate_with_holes", "params": {}},
+        {"part_id": "tool", "template": "washer", "params": {}}],
+        "operations": []}
+    r = build(worker, "v3", doc) if False else None
+    resp = worker.call("build", doc)
+    assert resp["ok"]
+    st = resp["result"]["stats"]
+    assert len(st["parts"]) == 2 and st["solid_count"] == 2
+    doc["operations"] = [{"op": "boolean", "boolean": "subtract",
+                          "target_id": "base", "tool_id": "tool"}]
+    r2 = worker.call("build", doc)
+    st2 = r2["result"]["stats"]
+    washer_vol = math.pi * (100 - 9) * 4
+    plate_vol = 80 * 40 * 6 - 4 * math.pi * 4 * 6
+    # шайба (кольцо Ø20/Ø6, Z 0…4) целиком внутри пластины по X/Y;
+    # отверстия пластины на (±30; ±10) с ней не пересекаются
+    assert abs(st2["volume"] - (plate_vol - washer_vol)) <= 1
+    assert len(st2["parts"]) == 1  # инструмент удалён
+
+
+def test_v3_array_and_mirror(worker):
+    doc = {"parts": [{"part_id": "a", "template": "plate_with_holes",
+                      "params": {"length": 20, "width": 20, "hole_diameter": 0}}],
+           "operations": [{"op": "array_linear", "part_id": "a",
+                           "count": 3, "step": [30, 0, 0]}]}
+    r = worker.call("build", doc)
+    st = r["result"]["stats"]
+    assert st["solid_count"] == 3
+    assert st["bbox"][3] - st["bbox"][0] == pytest.approx(80, abs=1e-3)
+    doc2 = {"parts": [{"part_id": "a", "template": "bracket_l", "params": {}}],
+            "operations": [{"op": "mirror", "part_id": "a", "plane": "YZ"}]}
+    r2 = worker.call("build", doc2)
+    st2 = r2["result"]["stats"]
+    assert abs(st2["volume"] - 11000) <= 1
+    assert st2["bbox"][3] == pytest.approx(0, abs=1e-3)
+    assert st2["bbox"][0] == pytest.approx(-40, abs=1e-3)
+
+
+def test_v3_split(worker):
+    doc = {"parts": [{"part_id": "a", "template": "bracket_l", "params": {}}],
+           "operations": [{"op": "split", "part_id": "a", "plane": "YZ", "offset": 20}]}
+    r = worker.call("build", doc)
+    st = r["result"]["stats"]
+    assert len(st["parts"]) == 2
+    assert abs(st["volume"] - 11000) <= 1
+    vols = sorted(p["volume"] for p in st["parts"])
+    assert vols == pytest.approx([5500, 5500], abs=1)
+
+
+def test_v3_split_fail_is_managed(worker):
+    doc = {"parts": [{"part_id": "a", "template": "bracket_l", "params": {}}],
+           "operations": [{"op": "split", "part_id": "a", "plane": "YZ", "offset": 200}]}
+    r = worker.call("build", doc)
+    assert r["ok"] is False
+    assert r["error"]["code"] == "split_failed"

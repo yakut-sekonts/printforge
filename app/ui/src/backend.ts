@@ -56,10 +56,22 @@ export function parseIpcError(e: unknown): GeoError {
 export const backend = {
   docCreate: (template: string, params?: Record<string, number>) =>
     call<DocState>("doc_create", { template, params }),
-  docSetParameter: (name: string, value: number, expression?: string) =>
-    call<DocState>("doc_set_parameter", { name, value, expression }),
-  docFillet: (edge_ref: EdgeRef, radius: number) =>
-    call<DocState>("doc_fillet", { edge_ref, radius }),
+  docAddPart: (template: string, params?: Record<string, number>) =>
+    call<DocState>("doc_add_part", { template, params }),
+  docSetParameter: (name: string, value: number, expression?: string, partId?: string) =>
+    call<DocState>("doc_set_parameter", { name, value, expression, part_id: partId }),
+  docBoolean: (kind: "union" | "subtract" | "intersect", targetId: string, toolId: string, keepTool?: boolean) =>
+    call<DocState>("doc_boolean", { boolean: kind, target_id: targetId, tool_id: toolId, keep_tool: keepTool }),
+  docArray: (partId: string, count: number, step: [number, number, number]) =>
+    call<DocState>("doc_array", { part_id: partId, count, step }),
+  docMirror: (partId: string, plane: "XY" | "XZ" | "YZ") =>
+    call<DocState>("doc_mirror", { part_id: partId, plane }),
+  docSplit: (partId: string, plane: "XY" | "XZ" | "YZ", offset: number) =>
+    call<DocState>("doc_split", { part_id: partId, plane, offset }),
+  docTransform: (partId: string, translate: [number, number, number]) =>
+    call<DocState>("doc_transform", { part_id: partId, translate }),
+  docFillet: (edge_ref: EdgeRef, radius: number, partId?: string) =>
+    call<DocState>("doc_fillet", { edge_ref, radius, part_id: partId }),
   docClearError: () => call<DocState>("doc_clear_error"),
   docUndo: () => call<DocState>("doc_undo"),
   docRedo: () => call<DocState>("doc_redo"),

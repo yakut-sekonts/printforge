@@ -67,10 +67,9 @@ class Doc:
     def __init__(self):
         Doc._ids += 1
         self.doc_id = f"doc-{Doc._ids}"
-        self.template = None
-        self.params = {}
+        self.parts = []          # [{part_id, name, template, params}]
         self.expressions = {}
-        self.operations = []
+        self.operations = []     # v3-операции (boolean/fillet/array/mirror/split/transform)
         self.history = []
         self.index = -1
         self.dirty = False
@@ -79,18 +78,28 @@ class Doc:
         self.stats = None
         self.mesh = None
         self.error = None
+        self._part_n = 0
         self.commit()
 
+    @property
+    def template(self):
+        return self.parts[0]["template"] if self.parts else None
+
+    @property
+    def params(self):
+        return self.parts[0]["params"] if self.parts else {}
+
     def snapshot(self):
-        return {"template": self.template, "params": copy.deepcopy(self.params),
+        return {"parts": copy.deepcopy(self.parts),
                 "expressions": dict(self.expressions),
-                "operations": copy.deepcopy(self.operations)}
+                "operations": copy.deepcopy(self.operations),
+                "part_n": self._part_n}
 
     def restore(self, snap):
-        self.template = snap["template"]
-        self.params = copy.deepcopy(snap["params"])
+        self.parts = copy.deepcopy(snap["parts"])
         self.expressions = dict(snap["expressions"])
         self.operations = copy.deepcopy(snap["operations"])
+        self._part_n = snap.get("part_n", len(self.parts))
 
     def commit(self):
         del self.history[self.index + 1:]
@@ -98,11 +107,22 @@ class Doc:
         self.index += 1
         self.dirty = True
 
+    def add_part(self, template, params, name=None):
+        self._part_n += 1
+        pid = f"part-{self._part_n}"
+        titles = {"plate_with_holes": "Пластина", "washer": "Шайба",
+                  "bracket_l": "Кронштейн", "case_with_lid": "Корпус"}
+        self.parts.append({"part_id": pid, "name": name or titles.get(template, template),
+                           "template": template,
+                           "params": dict(DEFAULTS[template]) | {k: float(v) for k, v in params.items()}})
+        return pid
+
     def state(self, slot):
         return {
             "doc_id": self.doc_id, "revision": self.revision,
             "dirty": self.dirty, "path": self.path, "slot": slot,
             "template": self.template, "params": self.params,
+            "parts": self.parts,
             "expressions": self.expressions, "operations": self.operations,
             "stats": self.stats, "error": self.error,
             "can_undo": self.index > 0,
@@ -111,8 +131,15 @@ class Doc:
         }
 
     def build_params(self):
-        return {"template": self.template, "params": self.params,
-                "operations": self.operations}
+        if not self.parts:
+            return {"template": None, "params": {}, "operations": []}
+        if len(self.parts) == 1 and not any(
+                o.get("op") not in ("fillet",) for o in self.operations):
+            # совместимость с одиночным шаблоном (фаска той же схемой)
+            return {"template": self.parts[0]["template"],
+                    "params": self.parts[0]["params"],
+                    "operations": self.operations}
+        return {"parts": self.parts, "operations": self.operations}
 
     def rebuild(self):
         if not self.template:
@@ -142,11 +169,10 @@ def cmd_doc_create(a):
     if template not in DEFAULTS:
         raise geo_error("unknown_template", f"Неизвестный шаблон: {template}")
     d = doc()
-    d.template = template
-    d.params = dict(DEFAULTS[template])
-    d.params.update({k: float(v) for k, v in (a.get("params") or {}).items()})
+    d.parts = []
     d.expressions = {}
     d.operations = []
+    d.add_part(template, a.get("params") or {})
     d.commit()
     d.rebuild()
     return d.state(ACTIVE[0])
@@ -154,38 +180,94 @@ def cmd_doc_create(a):
 
 def cmd_doc_set_parameter(a):
     d = doc()
-    if not d.template:
+    if not d.parts:
         raise geo_error("no_model", "Сначала создайте деталь")
     if not isinstance(a.get("value"), (int, float)) or a["value"] <= 0:
         raise geo_error("bad_value",
                         f"Значение параметра «{a['name']}» должно быть положительным числом.")
-    d.params[a["name"]] = a["value"]
+    pid = a.get("part_id") or d.parts[0]["part_id"]
+    part = next((p for p in d.parts if p["part_id"] == pid), None)
+    if not part:
+        raise geo_error("bad_params", f"Деталь не найдена: {pid}")
+    part["params"][a["name"]] = a["value"]
+    key = f"{pid}.{a['name']}"
     if a.get("expression"):
-        d.expressions[a["name"]] = a["expression"]
+        d.expressions[key] = a["expression"]
     else:
-        d.expressions.pop(a["name"], None)
+        d.expressions.pop(key, None)
     d.commit()
     d.rebuild()
     return d.state(ACTIVE[0])
 
 
-def cmd_doc_fillet(a):
+def _apply_op(a, op):
     d = doc()
-    radius = a.get("radius")
-    if not isinstance(radius, (int, float)) or radius <= 0:
-        raise geo_error("bad_value", "Радиус скругления должен быть больше нуля.")
-    d.operations = [op for op in d.operations if op.get("op") != "fillet"]
-    d.operations.append({"op": "fillet", "radius": radius,
-                         "edge_ref": a["edge_ref"]})
+    d.operations = [o for o in d.operations if o.get("op") != op["op"] or op["op"] != "fillet"]
+    d.operations.append(op)
     d.commit()
     d.rebuild()
     if d.error:
-        # неудачная операция откатывается из истории, но ошибка видна (DOC-005)
         d.history.pop()
         d.index -= 1
         d.restore(d.history[d.index])
         d.dirty = True
     return d.state(ACTIVE[0])
+
+
+def cmd_doc_add_part(a):
+    d = doc()
+    if not d.parts:
+        raise geo_error("no_model", "Сначала создайте деталь из шаблона")
+    template = a.get("template", "plate_with_holes")
+    if template not in DEFAULTS:
+        raise geo_error("unknown_template", f"Неизвестный шаблон: {template}")
+    d.add_part(template, a.get("params") or {})
+    d.commit()
+    d.rebuild()
+    return d.state(ACTIVE[0])
+
+
+def cmd_doc_boolean(a):
+    # документ хранит определения обеих деталей; worker при повторении
+    # детерминированно применяет операцию (инструмент поглощается в построении)
+    return _apply_op(a, {"op": "boolean", "boolean": a.get("boolean", "union"),
+                         "target_id": a["target_id"], "tool_id": a["tool_id"],
+                         "keep_tool": bool(a.get("keep_tool", False))})
+
+
+def cmd_doc_array(a):
+    return _apply_op(a, {"op": "array_linear", "part_id": a["part_id"],
+                         "count": int(a["count"]),
+                         "step": a.get("step") or [0, 0, 0]})
+
+
+def cmd_doc_mirror(a):
+    return _apply_op(a, {"op": "mirror", "part_id": a["part_id"],
+                         "plane": a.get("plane", "YZ")})
+
+
+def cmd_doc_split(a):
+    return _apply_op(a, {"op": "split", "part_id": a["part_id"],
+                         "plane": a.get("plane", "XZ"),
+                         "offset": float(a.get("offset", 0))})
+
+
+def cmd_doc_transform(a):
+    return _apply_op(a, {"op": "transform", "part_id": a["part_id"],
+                         "translate": a.get("translate") or [0, 0, 0]})
+
+
+def cmd_doc_fillet(a):
+    radius = a.get("radius")
+    if not isinstance(radius, (int, float)) or radius <= 0:
+        raise geo_error("bad_value", "Радиус скругления должен быть больше нуля.")
+    op = {"op": "fillet", "radius": radius, "edge_ref": a["edge_ref"]}
+    d = doc()
+    if a.get("part_id"):
+        op["part_id"] = a["part_id"]
+    elif d.parts:
+        op["part_id"] = d.parts[0]["part_id"]
+    return _apply_op(a, op)
 
 
 def cmd_doc_clear_error(a):
@@ -230,10 +312,11 @@ def cmd_doc_get_mesh(a):
 
 def save_doc(d, path):
     tmp = path.with_suffix(".printforge.tmp")
-    manifest = {"schema_version": 2, "app": "PrintForge",
+    manifest = {"schema_version": 3, "app": "PrintForge",
                 "app_version": "0.1.0-m2", "units": "mm",
                 "kernel": "build123d/OCP"}
-    document = {"schema_version": 2, "units": "mm", "template": d.template,
+    document = {"schema_version": 3, "units": "mm", "template": d.template,
+                "parts": d.parts,
                 "parameters": d.params, "expressions": d.expressions,
                 "operations": d.operations}
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
@@ -263,8 +346,11 @@ def cmd_doc_open(a):
     if template not in DEFAULTS:
         raise geo_error("bad_file", f"Неизвестный шаблон в проекте: {template}")
     d.__init__()
-    d.template = template
-    d.params = {k: float(v) for k, v in (document.get("parameters") or {}).items()}
+    if document.get("parts"):
+        d.parts = document["parts"]
+        d._part_n = len(d.parts)
+    else:
+        d.add_part(template, {k: float(v) for k, v in (document.get("parameters") or {}).items()})
     d.expressions = document.get("expressions") or {}
     d.operations = document.get("operations") or []
     d.commit()
@@ -344,6 +430,12 @@ HANDLERS = {
     "doc_export_stl": cmd_doc_export_stl,
     "doc_import": cmd_doc_import,
     "print_check": cmd_print_check,
+    "doc_add_part": cmd_doc_add_part,
+    "doc_boolean": cmd_doc_boolean,
+    "doc_array": cmd_doc_array,
+    "doc_mirror": cmd_doc_mirror,
+    "doc_split": cmd_doc_split,
+    "doc_transform": cmd_doc_transform,
     "doc_new_tutorial": cmd_doc_new_tutorial,
     "doc_switch_slot": cmd_doc_switch_slot,
 }

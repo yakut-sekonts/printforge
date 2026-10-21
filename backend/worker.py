@@ -283,10 +283,117 @@ def build_document(params):
     return part, extra
 
 
+# ---------- многодетальный документ (v3) ----------
+
+def apply_part_operations(parts, operations):
+    """Операции над деталями документа v3. parts: {part_id: {"shape": Shape,
+    "name": str}}. Возвращает изменённый словарь."""
+    from build123d import Compound, Pos
+    from build123d import Plane
+    for op in operations or []:
+        kind = op.get("op")
+        pid = op.get("part_id")
+        if kind == "boolean":
+            target = parts[op["target_id"]]["shape"]
+            tool = parts[op["tool_id"]]["shape"]
+            bt = op.get("boolean", "union")
+            if bt == "union":
+                parts[op["target_id"]]["shape"] = target + tool
+            elif bt == "subtract":
+                parts[op["target_id"]]["shape"] = target - tool
+            elif bt == "intersect":
+                parts[op["target_id"]]["shape"] = target & tool
+            else:
+                raise GeometryError("bad_params", f"неизвестная булева операция: {bt}")
+            if not op.get("keep_tool", False):
+                del parts[op["tool_id"]]
+        elif kind == "fillet":
+            r = float(op["radius"])
+            edge = match_edge(parts[pid]["shape"], op["edge_ref"])
+            try:
+                parts[pid]["shape"] = parts[pid]["shape"].fillet(radius=r, edge_list=[edge])
+            except Exception as e:  # noqa: BLE001
+                raise GeometryError(
+                    "fillet_failed",
+                    f"Радиус {r:g} мм слишком велик для выбранного ребра. "
+                    "Уменьшите радиус или выберите другое ребро.",
+                    detail=str(e).split("\n")[0]) from e
+        elif kind == "transform":
+            t = op.get("translate") or [0, 0, 0]
+            parts[pid]["shape"] = Pos(*t) * parts[pid]["shape"]
+        elif kind == "array_linear":
+            n = int(op["count"])
+            step = op.get("step") or [0, 0, 0]
+            if n < 2:
+                raise GeometryError("bad_params", "В массиве должно быть хотя бы 2 элемента.")
+            base = parts[pid]["shape"]
+            copies = [Pos(step[0] * i, step[1] * i, step[2] * i) * base
+                      for i in range(n)]
+            parts[pid]["shape"] = Compound(children=copies)
+        elif kind == "mirror":
+            plane = op.get("plane", "YZ")
+            base = parts[pid]["shape"]
+            pl = {"XY": Plane.XY, "XZ": Plane.XZ, "YZ": Plane.YZ}.get(plane)
+            if pl is None:
+                raise GeometryError("bad_params", f"неизвестная плоскость: {plane}")
+            parts[pid]["shape"] = base.mirror(pl)
+        elif kind == "split":
+            plane = op.get("plane", "XZ")
+            off = float(op.get("offset", 0))
+            pl = {"XY": Plane.XY, "XZ": Plane.XZ, "YZ": Plane.YZ}.get(plane)
+            if pl is None:
+                raise GeometryError("bad_params", f"неизвестная плоскость: {plane}")
+            base = parts[pid]["shape"]
+            from build123d import Keep
+            cut = base.split(pl.offset(off), keep=Keep.BOTH)
+            if isinstance(cut, tuple):
+                halves = [s for part_ in cut if part_ is not None
+                          for s in part_.solids()]
+            else:
+                halves = cut.solids()
+            if len(halves) < 2:
+                raise GeometryError(
+                    "split_failed",
+                    "Плоскость не разделяет деталь на две части. Сместите плоскость внутрь тела.")
+            name = parts[pid]["name"]
+            parts[pid]["shape"] = halves[0]
+            parts[pid]["name"] = f"{name} (часть 1)"
+            new_id = f"{pid}-part2"
+            parts[new_id] = {"shape": halves[1], "name": f"{name} (часть 2)"}
+        else:
+            raise GeometryError("unknown_op", f"Неизвестная операция: {kind}")
+    return parts
+
+
+def handle_build_v3(params):
+    from build123d import Compound
+    parts = {}
+    for p in params.get("parts") or []:
+        template = p.get("template")
+        if template not in TEMPLATES:
+            raise GeometryError("unknown_template", f"Неизвестный шаблон: {template}")
+        tp = merged_params(template, p.get("params"))
+        shape, _ = TEMPLATES[template][0](tp)
+        parts[p["part_id"]] = {"shape": shape, "name": p.get("name", template)}
+    parts = apply_part_operations(parts, params.get("operations"))
+    compound = Compound(children=[p["shape"] for p in parts.values()])
+    extra = {"parts": [{"part_id": pid, "name": p["name"],
+                        "volume": p["shape"].volume,
+                        "solid_count": len(p["shape"].solids())}
+                       for pid, p in parts.items()]}
+    return compound, extra
+
+
 # ---------- методы ----------
 
+def build_any(params):
+    if params.get("parts"):
+        return handle_build_v3(params)
+    return build_document(params)
+
+
 def handle_build(params):
-    part, extra = build_document(params)
+    part, extra = build_any(params)
     return {"stats": stats_of(part, extra),
             "mesh": mesh_resource(part, "model")}
 
@@ -296,7 +403,7 @@ def handle_export(params):
     path = params.get("path")
     if not path:
         raise GeometryError("bad_params", "не указан путь экспорта")
-    part, extra = build_document(params)
+    part, extra = build_any(params)
     if fmt == "stl":
         from build123d import export_stl
         export_stl(part, path, tolerance=float(params.get("linear_deflection", 0.02)))
@@ -356,7 +463,7 @@ def handle_import(params):
 
 def handle_print_check(params):
     """PRINT-001/002: отдельный результат каждой проверки."""
-    part, _ = build_document(params)
+    part, _ = build_any(params)
     checks = []
     bb = part.bounding_box()
     solids = part.solids()
