@@ -1,110 +1,146 @@
-import React, { useEffect, useState } from "react";
-import type { DocState, GeoError } from "./types";
+import React, { useEffect, useMemo, useState } from "react";
+import type {
+  DocState, GeoError, TemplateDef, EdgeRef, PrintCheck, ImportResult,
+} from "./types";
 import { evalExpression } from "./expr";
 
-export interface ParamValues {
-  length: string;
-  width: string;
-  height: string;
-  hole_diameter: string;
-  hole_offset: string;
+export interface FilletUi {
+  active: boolean;
+  selected: EdgeRef | null;
+  radius: string;
 }
-
-export const PARAM_LABELS: Record<keyof ParamValues, string> = {
-  length: "Длина",
-  width: "Ширина",
-  height: "Толщина",
-  hole_diameter: "Диаметр отверстия",
-  hole_offset: "Отступ от краёв",
-};
-
-const PARAM_ORDER: (keyof ParamValues)[] = ["length", "width", "height", "hole_diameter", "hole_offset"];
-const PARAM_CMD: Record<keyof ParamValues, string> = {
-  length: "parameter.set", width: "parameter.set", height: "parameter.set",
-  hole_diameter: "op.hole.add", hole_offset: "op.hole.add",
-};
 
 interface Props {
   doc: DocState | null;
+  templates: TemplateDef[];
   selectedFace: number | null;
   faceArea: number | null;
-  onApply: (values: ParamValues) => void;
-  onUndoFromError: () => void;
+  onApplyField: (name: string, raw: string) => void;
+  // скругление
+  fillet: FilletUi;
+  onStartFillet: () => void;
+  onSelectEdge: (e: EdgeRef) => void;
+  onFilletRadius: (v: string) => void;
+  onApplyFillet: () => void;
+  onCancelFillet: () => void;
+  onClearError: () => void;
+  // проверка печати
+  printChecks: PrintCheck[] | null;
+  printBusy: boolean;
+  onPrintCheck: (printer: { x: number; y: number; z: number }) => void;
+  // импорт
+  importPreview: ImportResult | null;
+  importBusy: boolean;
+  onImport: (path: string, format: "step" | "stl", unitScale?: number) => void;
+  onCancelImportPreview: () => void;
+  // файлы
   savePath: string; setSavePath: (v: string) => void;
   openPath: string; setOpenPath: (v: string) => void;
   exportPath: string; setExportPath: (v: string) => void;
-  onSave: () => void; onOpen: () => void; onExport: () => void;
+  onSave: () => void; onOpen: () => void;
+  onExport: (format: "stl" | "step" | "3mf") => void;
+}
+
+const PRINTER_KEY = "pf-printer";
+
+function loadPrinter(): { x: string; y: string; z: string } {
+  try {
+    const raw = localStorage.getItem(PRINTER_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch { /* игнор */ }
+  return { x: "220", y: "220", z: "250" };
+}
+
+function fmtNum(v: number): string {
+  return String(Math.round(v * 100) / 100);
+}
+
+function sameEdge(a: EdgeRef, b: EdgeRef): boolean {
+  return a.kind === b.kind && a.solid_index === b.solid_index &&
+    a.midpoint.every((v, i) => Math.abs(v - b.midpoint[i]) < 1e-6);
 }
 
 export function ParamsPanel(props: Props) {
-  const { doc } = props;
-  const [values, setValues] = useState<ParamValues>({
-    length: "80", width: "40", height: "6", hole_diameter: "4", hole_offset: "10",
-  });
+  const { doc, templates } = props;
+  const template = templates.find((t) => t.template_id === doc?.template) ?? null;
+  const [values, setValues] = useState<Record<string, string>>({});
   const [exprError, setExprError] = useState<string | null>(null);
+  const [multiHint, setMultiHint] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [printer, setPrinter] = useState(loadPrinter);
+  const [importPath, setImportPath] = useState("~/model.step");
+  const [importFormat, setImportFormat] = useState<"step" | "stl">("step");
 
+  // значения полей из документа
   useEffect(() => {
-    if (!doc) return;
-    setValues((prev) => {
-      const next = { ...prev };
-      for (const k of PARAM_ORDER) {
-        const expr = doc.expressions?.[k];
-        const v = doc.params?.[k];
-        next[k] = expr ?? (v != null ? String(v) : prev[k]);
-      }
-      return next;
-    });
-  }, [doc]);
+    if (!doc || !template) return;
+    const next: Record<string, string> = {};
+    for (const p of template.params) {
+      next[p.name] = doc.expressions?.[p.name] ??
+        (doc.params?.[p.name] != null ? String(doc.params[p.name]) : String(p.default));
+    }
+    setValues(next);
+    setMultiHint(false);
+  }, [doc, template]);
 
-  const evaluateAll = (): Record<string, number> | null => {
+  const changedFields = useMemo(() => {
+    if (!doc || !template) return [];
+    return template.params.filter((p) => {
+      const cur = doc.expressions?.[p.name] ??
+        (doc.params?.[p.name] != null ? String(doc.params[p.name]) : String(p.default));
+      return (values[p.name] ?? cur).trim() !== cur;
+    }).map((p) => p.name);
+  }, [values, doc, template]);
+
+  const applyOne = (name: string, raw: string) => {
     const vars: Record<string, number> = { ...(doc?.params ?? {}) };
-    // сначала подставляем новые значения простых чисел, чтобы выражения видели их
-    for (const k of PARAM_ORDER) {
-      const raw = values[k].trim().replace(",", ".");
-      if (/^-?\d+(\.\d+)?$/.test(raw)) vars[k] = Number(raw);
+    try {
+      const v = evalExpression(raw.trim(), vars);
+      if (v <= 0) { setExprError(`Значение должно быть больше нуля`); return; }
+      setExprError(null);
+      setMultiHint(false);
+      props.onApplyField(name, raw.trim());
+    } catch (e) {
+      setExprError(e instanceof Error ? e.message : String(e));
     }
-    const out: Record<string, number> = {};
-    for (const k of PARAM_ORDER) {
-      const raw = values[k].trim();
-      if (!raw) { setExprError(`Поле «${PARAM_LABELS[k]}» пустое`); return null; }
-      try {
-        const v = evalExpression(raw, vars);
-        if (v <= 0) { setExprError(`«${PARAM_LABELS[k]}» должно быть больше нуля`); return null; }
-        out[k] = v;
-        vars[k] = v;
-      } catch (e) {
-        setExprError(`«${PARAM_LABELS[k]}»: ${e instanceof Error ? e.message : String(e)}`);
-        return null;
-      }
-    }
-    setExprError(null);
-    return out;
   };
 
-  const apply = () => {
-    const nums = evaluateAll();
-    if (!nums) return;
-    props.onApply(values);
+  const applyButton = () => {
+    if (changedFields.length === 1) {
+      applyOne(changedFields[0], values[changedFields[0]]);
+    } else if (changedFields.length > 1) {
+      setMultiHint(true);
+    }
   };
 
-  const computedHint = (k: keyof ParamValues): string | null => {
-    const raw = values[k].trim();
+  const computedHint = (name: string): string | null => {
+    const raw = (values[name] ?? "").trim();
     if (!raw || /^-?\d+([.,]\d+)?$/.test(raw)) return null;
     try {
-      const vars: Record<string, number> = { ...(doc?.params ?? {}) };
-      const v = evalExpression(raw, vars);
-      return `= ${Math.round(v * 100) / 100} мм`;
+      const v = evalExpression(raw, { ...(doc?.params ?? {}) });
+      return `= ${fmtNum(v)} мм`;
     } catch {
       return "ошибка в выражении";
     }
   };
 
   const err: GeoError | null = doc?.error ?? null;
+  const isFilletError = err?.code === "fillet_failed" || err?.code === "reselect_required";
+  const edges = doc?.stats?.edges ?? [];
+  const filletedEdges = (doc?.operations ?? [])
+    .filter((o) => o.op === "fillet" && o.edge_ref)
+    .map((o) => o.edge_ref!);
+
+  const savePrinter = (p: { x: string; y: string; z: string }) => {
+    setPrinter(p);
+    localStorage.setItem(PRINTER_KEY, JSON.stringify(p));
+  };
+
+  const previewBbox = props.importPreview?.stats?.bbox;
 
   return (
-    <aside className="right-panel" aria-label="Параметры">
-      <h2 className="panel-section">Параметры</h2>
+    <aside className="right-panel" aria-label="Параметры и инструменты">
+      <h2 className="panel-section">Параметры{template ? ` — ${template.title}` : ""}</h2>
 
       {err && (
         <div className="error-box" role="alert">
@@ -118,42 +154,213 @@ export function ParamsPanel(props: Props) {
               {detailOpen && <pre className="error-detail">{err.detail}</pre>}
             </>
           )}
-          <button className="btn" data-cmd="op.undo" aria-label="Отменить изменение" onClick={props.onUndoFromError}>
-            Отменить изменение
-          </button>
+          {isFilletError ? (
+            <button className="btn" data-cmd="error.close" aria-label="Закрыть ошибку" onClick={props.onClearError}>
+              Закрыть
+            </button>
+          ) : (
+            <button className="btn" data-cmd="op.undo" aria-label="Отменить изменение" onClick={props.onClearError}>
+              Отменить изменение
+            </button>
+          )}
         </div>
       )}
 
-      <div className="params-form">
-        {PARAM_ORDER.map((k) => (
-          <div className="param-field" key={k}>
-            <label htmlFor={`param-${k}`}>{PARAM_LABELS[k]}</label>
-            <div className="param-input" data-cmd={PARAM_CMD[k]}>
-              <input
-                id={`param-${k}`}
-                inputMode="decimal"
-                value={values[k]}
-                aria-label={`${PARAM_LABELS[k]}, мм`}
-                onChange={(e) => setValues({ ...values, [k]: e.target.value })}
-                onKeyDown={(e) => { if (e.key === "Enter") apply(); }}
-              />
-              <span className="param-unit">мм</span>
+      {doc && template ? (
+        <div className="params-form">
+          {template.params.map((p) => (
+            <div className="param-field" key={p.name}>
+              <label htmlFor={`param-${p.name}`}>{p.label}</label>
+              <div className="param-input" data-cmd="parameter.set">
+                <input
+                  id={`param-${p.name}`}
+                  inputMode="decimal"
+                  value={values[p.name] ?? ""}
+                  aria-label={`${p.label}, ${p.unit}`}
+                  onChange={(e) => setValues({ ...values, [p.name]: e.target.value })}
+                  onKeyDown={(e) => { if (e.key === "Enter") applyOne(p.name, values[p.name] ?? ""); }}
+                />
+                <span className="param-unit">
+                  {p.name === "gap" ? "мм, на одну сторону" : p.unit}
+                </span>
+              </div>
+              {computedHint(p.name) && <div className="param-hint">{computedHint(p.name)}</div>}
             </div>
-            {computedHint(k) && <div className="param-hint">{computedHint(k)}</div>}
-          </div>
-        ))}
-        {exprError && <div className="error-inline" role="alert">{exprError}</div>}
-        <button className="btn btn-primary" data-cmd={doc ? "parameter.set" : "part.create.plate"} aria-label="Применить параметры" onClick={apply}>
-          Применить
-        </button>
-      </div>
+          ))}
+          {exprError && <div className="error-inline" role="alert">{exprError}</div>}
+          {multiHint && <div className="param-hint">Изменено несколько полей — применяйте каждое поле клавишей Enter.</div>}
+          <button
+            className="btn btn-primary"
+            data-cmd="parameter.set"
+            aria-label="Применить параметр"
+            disabled={changedFields.length !== 1}
+            onClick={applyButton}
+          >
+            Применить
+          </button>
+        </div>
+      ) : (
+        <p className="panel-empty">Выберите шаблон слева, чтобы создать деталь.</p>
+      )}
 
       {props.selectedFace != null && props.faceArea != null && (
         <section className="face-info">
           <h3 className="panel-section">Выбранная грань</h3>
-          <p>Грань {props.selectedFace} — площадь <strong>{Math.round(props.faceArea * 100) / 100} мм²</strong></p>
+          <p>Грань {props.selectedFace} — площадь <strong>{fmtNum(props.faceArea)} мм²</strong></p>
         </section>
       )}
+
+      <section className="tool-section">
+        <h3 className="panel-section">Скругление</h3>
+        {!props.fillet.active ? (
+          <button
+            className="btn" data-cmd="op.fillet" aria-label="Скруглить ребро"
+            disabled={!doc?.stats?.is_valid || !!doc?.error}
+            onClick={props.onStartFillet}
+          >
+            Скруглить
+          </button>
+        ) : (
+          <div className="fillet-panel">
+            {edges.length === 0 && <p className="panel-empty">Рёбра не найдены.</p>}
+            <ul className="edge-list">
+              {edges.map((e, i) => {
+                const done = filletedEdges.some((f) => sameEdge(f, e));
+                const sel = props.fillet.selected && sameEdge(props.fillet.selected, e);
+                return (
+                  <li key={i}>
+                    <button
+                      className={`edge-row ${sel ? "edge-selected" : ""}`}
+                      data-cmd="op.fillet"
+                      aria-label={`Ребро ${e.kind}, длина ${fmtNum(e.length)} мм${done ? ", уже скруглено" : ""}`}
+                      onClick={() => props.onSelectEdge(e)}
+                    >
+                      <span className="edge-kind">{e.kind}</span>
+                      <span className="edge-len">{fmtNum(e.length)} мм</span>
+                      <span className="edge-mid">
+                        ({e.midpoint.map((v) => fmtNum(v)).join("; ")})
+                      </span>
+                      {done && <span className="history-badge">скруглено</span>}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="param-field">
+              <label htmlFor="fillet-radius">Радиус</label>
+              <div className="param-input">
+                <input
+                  id="fillet-radius" inputMode="decimal"
+                  value={props.fillet.radius}
+                  aria-label="Радиус скругления, мм"
+                  onChange={(e) => props.onFilletRadius(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") props.onApplyFillet(); }}
+                />
+                <span className="param-unit">мм</span>
+              </div>
+            </div>
+            <div className="fillet-actions">
+              <button
+                className="btn btn-primary" data-cmd="op.fillet"
+                aria-label="Применить скругление"
+                disabled={!props.fillet.selected}
+                onClick={props.onApplyFillet}
+              >
+                Применить скругление
+              </button>
+              <button className="btn" aria-label="Отменить выбор ребра" onClick={props.onCancelFillet}>Отмена</button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="tool-section">
+        <h3 className="panel-section">Проверка перед печатью</h3>
+        <div className="printer-row">
+          {(["x", "y", "z"] as const).map((axis) => (
+            <div className="param-input printer-field" key={axis}>
+              <input
+                inputMode="decimal" value={printer[axis]}
+                aria-label={`Габарит принтера ${axis.toUpperCase()}, мм`}
+                onChange={(e) => savePrinter({ ...printer, [axis]: e.target.value })}
+              />
+              <span className="param-unit">{axis.toUpperCase()}, мм</span>
+            </div>
+          ))}
+        </div>
+        <button
+          className="btn" data-cmd="check.print" aria-label="Проверить перед печатью"
+          disabled={!doc?.stats?.is_valid || props.printBusy}
+          onClick={() => props.onPrintCheck({
+            x: Number(printer.x.replace(",", ".")) || 220,
+            y: Number(printer.y.replace(",", ".")) || 220,
+            z: Number(printer.z.replace(",", ".")) || 250,
+          })}
+        >
+          {props.printBusy ? "Проверка…" : "Проверить"}
+        </button>
+        {props.printChecks && (
+          <>
+            <ul className="check-list">
+              {props.printChecks.map((c) => (
+                <li key={c.id} className={`check-row check-${c.status}`}>
+                  <span className="check-status">
+                    {c.status === "pass" ? "Пройдено" : c.status === "fail" ? "Ошибка" : "Не проверено"}
+                  </span>
+                  <span className="check-title">{c.title}</span>
+                  {c.detail && <span className="check-detail">{c.detail}</span>}
+                </li>
+              ))}
+            </ul>
+            <p className="check-note">«Проверки пройдены» означает только перечисленные проверки.</p>
+          </>
+        )}
+      </section>
+
+      <section className="tool-section">
+        <h3 className="panel-section">Импорт</h3>
+        <div className="io-row">
+          <input value={importPath} aria-label="Путь к импортируемой модели" onChange={(e) => setImportPath(e.target.value)} />
+          <select
+            value={importFormat} aria-label="Формат импорта"
+            onChange={(e) => setImportFormat(e.target.value as "step" | "stl")}
+          >
+            <option value="step">STEP</option>
+            <option value="stl">STL</option>
+          </select>
+        </div>
+        {!props.importPreview ? (
+          <button
+            className="btn" data-cmd="io.import" aria-label="Импортировать модель"
+            disabled={props.importBusy}
+            onClick={() => props.onImport(importPath, importFormat, importFormat === "step" ? undefined : undefined)}
+          >
+            {props.importBusy ? "Импорт…" : "Импортировать"}
+          </button>
+        ) : (
+          <div className="import-preview">
+            {importFormat === "stl" && previewBbox ? (
+              <>
+                <p>
+                  Габарит сетки: {fmtNum(previewBbox[3] - previewBbox[0])} × {fmtNum(previewBbox[4] - previewBbox[1])} × {fmtNum(previewBbox[5] - previewBbox[2])}.
+                  Выберите единицы исходного файла:
+                </p>
+                <div className="fillet-actions">
+                  <button className="btn btn-primary" data-cmd="io.import" aria-label="Единицы — миллиметры" onClick={() => props.onImport(importPath, "stl", 1)}>
+                    мм (×1)
+                  </button>
+                  <button className="btn" data-cmd="io.import" aria-label="Единицы — дюймы" onClick={() => props.onImport(importPath, "stl", 25.4)}>
+                    дюймы (×25,4)
+                  </button>
+                  <button className="btn" aria-label="Отменить импорт" onClick={props.onCancelImportPreview}>Отмена</button>
+                </div>
+              </>
+            ) : (
+              <p>Модель импортирована.</p>
+            )}
+          </div>
+        )}
+      </section>
 
       <section className="io-forms">
         <h3 className="panel-section">Файл проекта</h3>
@@ -167,10 +374,19 @@ export function ParamsPanel(props: Props) {
         </div>
         <h3 className="panel-section">Экспорт</h3>
         <div className="io-row">
-          <input value={props.exportPath} aria-label="Путь экспорта STL" onChange={(e) => props.setExportPath(e.target.value)} />
-          <button className="btn" data-cmd="export.stl" aria-label="Экспортировать STL" disabled={!doc?.stats?.is_valid} onClick={props.onExport}>
-            Экспорт STL
-          </button>
+          <input value={props.exportPath} aria-label="Путь экспорта" onChange={(e) => props.setExportPath(e.target.value)} />
+        </div>
+        <div className="export-formats">
+          {(["stl", "step", "3mf"] as const).map((f) => (
+            <button
+              key={f} className="btn" data-cmd={`export.${f}`}
+              aria-label={`Экспортировать ${f.toUpperCase()}`}
+              disabled={!doc?.stats?.is_valid}
+              onClick={() => props.onExport(f)}
+            >
+              {f.toUpperCase()}
+            </button>
+          ))}
         </div>
       </section>
     </aside>

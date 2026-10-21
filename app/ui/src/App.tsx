@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { CommandDef, DocState, Lesson, MeshData, LessonCheck, GeoError } from "./types";
+import type {
+  CommandDef, DocState, Lesson, MeshData, LessonCheck, GeoError,
+  TemplateDef, EdgeRef, PrintCheck, ImportResult, DocStats,
+} from "./types";
 import { backend, expandTilde, parseIpcError } from "./backend";
 import { evalExpression } from "./expr";
 import { Viewport, faceArea, ViewName } from "./viewport";
 import { TopBar, LeftPanel, StatusBar, EmptyState, cmdEnabled } from "./components";
-import { ParamsPanel, ParamValues } from "./ParamsPanel";
+import { ParamsPanel, FilletUi } from "./ParamsPanel";
 import { HelpPanel, TooltipMode } from "./HelpPanel";
 import { Tooltips } from "./Tooltips";
 import { LessonBar, LessonRun, StepStatus } from "./LessonBar";
@@ -25,6 +28,7 @@ function loadLessonProgress(id: string, len: number): StepStatus[] {
 
 export default function App() {
   const [commands, setCommands] = useState<CommandDef[]>([]);
+  const [templates, setTemplates] = useState<TemplateDef[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [doc, setDoc] = useState<DocState | null>(null);
   const [mesh, setMesh] = useState<MeshData | null>(null);
@@ -41,19 +45,27 @@ export default function App() {
   const [savePath, setSavePath] = useState("~/plate.printforge");
   const [openPath, setOpenPath] = useState("~/plate.printforge");
   const [exportPath, setExportPath] = useState("~/plate.stl");
-  const [backendError, setBackendError] = useState<string | null>(null);
+  const [fillet, setFillet] = useState<FilletUi>({ active: false, selected: null, radius: "2" });
+  const [printChecks, setPrintChecks] = useState<PrintCheck[] | null>(null);
+  const [printBusy, setPrintBusy] = useState(false);
+  const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importedStats, setImportedStats] = useState<DocStats | null>(null);
 
   const viewportRef = useRef<Viewport | null>(null);
   const viewportEl = useRef<HTMLDivElement>(null);
   const meshToken = useRef(0);
   const docRef = useRef<DocState | null>(null);
   const lessonRef = useRef<LessonRun | null>(null);
+  const filletRef = useRef(fillet);
   docRef.current = doc;
   lessonRef.current = lessonRun;
+  filletRef.current = fillet;
 
   // ---------- загрузка реестров ----------
   useEffect(() => {
     fetch("/commands.json").then((r) => r.json()).then((d) => setCommands(d.commands ?? [])).catch(() => {});
+    fetch("/templates.json").then((r) => r.json()).then((d) => setTemplates(d.templates ?? [])).catch(() => {});
     fetch("/lessons.json").then((r) => r.json()).then((d) => setLessons(d.lessons ?? [])).catch(() => {});
     backend.docGetState()
       .then((s) => { if (s && s.stats) applyDoc(s); })
@@ -90,15 +102,19 @@ export default function App() {
   // ---------- работа с документом ----------
   const applyDoc = useCallback((state: DocState) => {
     const cur = docRef.current;
-    // игнорируем устаревшие ответы (та же идентичность документа, меньшая ревизия);
-    // у нового документа (open/new/tutorial) ревизия законно сбрасывается
-    if (cur && cur.doc_id === state.doc_id && cur.slot === state.slot && state.revision < cur.revision) return;
+    // страж устаревших ответов: та же пара doc_id+slot, но меньшая ревизия
+    if (cur && cur.slot === state.slot && cur.doc_id === state.doc_id && state.revision < cur.revision) return;
     setDoc(state);
     if (state.stats?.is_valid) {
       const token = ++meshToken.current;
       setComputing(true);
       backend.docGetMesh()
-        .then((m) => { if (token === meshToken.current) setMesh(m); })
+        .then((m) => {
+          if (token === meshToken.current) {
+            setMesh(m);
+            setImportedStats(null); // снова показываем параметрическую модель
+          }
+        })
         .catch(() => {})
         .finally(() => { if (token === meshToken.current) setComputing(false); });
     } else {
@@ -172,7 +188,6 @@ export default function App() {
     }
   }, [advanceIfDone, checkParams]);
 
-  // после каждого обновления документа проверяем params-шаги
   useEffect(() => {
     const run = lessonRun;
     if (!run || run.stepIndex >= run.lesson.steps.length) return;
@@ -188,7 +203,6 @@ export default function App() {
       let state = await backend.docNewTutorial();
       applyDoc(state);
       const idx = lessons.indexOf(lesson);
-      // уроки 1 («Навигация») и 3 («Сохранение…») — с готовой учебной моделью
       if (idx === 0 || idx === 2) {
         state = await backend.docCreatePlate({ length: 80, width: 40, height: 6, hole_diameter: 4, hole_offset: 10 });
         applyDoc(state);
@@ -224,41 +238,102 @@ export default function App() {
     return statuses.every((s) => s !== "pending");
   }, [lessons]);
 
-  // ---------- команды ----------
-  const createPlate = useCallback(async (values?: ParamValues) => {
-    const v = values ?? { length: "80", width: "40", height: "6", hole_diameter: "4", hole_offset: "10" };
-    const nums: Record<string, number> = {};
-    const vars: Record<string, number> = { length: 80, width: 40, height: 6, hole_diameter: 4, hole_offset: 10 };
-    for (const k of Object.keys(v) as (keyof ParamValues)[]) {
-      try { nums[k] = evalExpression(v[k], vars); vars[k] = nums[k]; }
-      catch (e) { setStatusMsg(`Ошибка выражения: ${(e as Error).message}`); return; }
-    }
-    const state = await runBackend(() => backend.docCreatePlate(nums as unknown as Parameters<typeof backend.docCreatePlate>[0]));
+  // ---------- команды документа ----------
+  const createFromTemplate = useCallback(async (t: TemplateDef, params?: Record<string, number>) => {
+    const state = await runBackend(() => backend.docCreate(t.template_id, params));
     if (state) lessonEvent({ type: "params", state });
   }, [runBackend, lessonEvent]);
 
-  const applyParams = useCallback(async (values: ParamValues) => {
-    // Одно применение = одна транзакция истории (DOC-004): передаём все
-    // параметры разом через doc_create_plate, а не цепочку parameter.set.
-    if (!docRef.current) { await createPlate(values); return; }
-    const vars = { ...docRef.current.params };
-    const nums: Record<string, number> = {};
-    let changed = false;
-    for (const k of Object.keys(values) as (keyof ParamValues)[]) {
-      const raw = values[k].trim();
-      let num: number;
-      try { num = evalExpression(raw, vars); }
-      catch (e) { setStatusMsg(`Ошибка выражения: ${(e as Error).message}`); return; }
-      nums[k] = num;
-      if (Math.abs((docRef.current.params?.[k] ?? NaN) - num) > 1e-9
-          || (docRef.current.expressions?.[k] ?? raw) !== raw) changed = true;
-      vars[k] = num;
-    }
-    if (!changed) return;
-    const state = await runBackend(() => backend.docCreatePlate(nums as unknown as Parameters<typeof backend.docCreatePlate>[0]));
+  // совместимость с уроком «Первая деталь»: создание учебной пластины
+  const createPlate = useCallback(async () => {
+    const state = await runBackend(() => backend.docCreatePlate({ length: 80, width: 40, height: 6, hole_diameter: 4, hole_offset: 10 }));
     if (state) lessonEvent({ type: "params", state });
-  }, [runBackend, createPlate, lessonEvent]);
+  }, [runBackend, lessonEvent]);
 
+  const applyField = useCallback(async (name: string, raw: string) => {
+    const cur = docRef.current;
+    if (!cur) return;
+    let num: number;
+    try { num = evalExpression(raw, { ...cur.params }); }
+    catch (e) { setStatusMsg(`Ошибка выражения: ${(e as Error).message}`); return; }
+    const state = await runBackend(() => backend.docSetParameter(name, num, raw));
+    if (state) lessonEvent({ type: "params", state });
+  }, [runBackend, lessonEvent]);
+
+  // ---------- скругление ----------
+  const startFillet = useCallback(() => {
+    setFillet({ active: true, selected: null, radius: filletRef.current.radius });
+  }, []);
+
+  const cancelFillet = useCallback(() => {
+    setFillet((f) => ({ ...f, active: false, selected: null }));
+    viewportRef.current?.setEdgeMarker(null);
+  }, []);
+
+  const selectEdge = useCallback((e: EdgeRef) => {
+    setFillet((f) => ({ ...f, selected: e }));
+    viewportRef.current?.setEdgeMarker(e);
+  }, []);
+
+  const applyFillet = useCallback(async () => {
+    const f = filletRef.current;
+    if (!f.selected) return;
+    const radius = Number(f.radius.replace(",", "."));
+    if (!Number.isFinite(radius) || radius <= 0) {
+      setStatusMsg("Радиус должен быть положительным числом");
+      return;
+    }
+    const state = await runBackend(() => backend.docFillet(f.selected!, radius));
+    if (state && !state.error) cancelFillet();
+  }, [runBackend, cancelFillet]);
+
+  const clearErrorOrUndo = useCallback(() => {
+    const code = docRef.current?.error?.code;
+    if (code === "fillet_failed" || code === "reselect_required") {
+      void runBackend(() => backend.docClearError());
+    } else {
+      void runBackend(() => backend.docUndo());
+    }
+  }, [runBackend]);
+
+  // ---------- проверка печати ----------
+  const runPrintCheck = useCallback(async (printer: { x: number; y: number; z: number }) => {
+    setPrintBusy(true);
+    try {
+      const res = await backend.printCheck(printer);
+      setPrintChecks(res.checks ?? []);
+    } catch (e) {
+      setStatusMsg(`Ошибка проверки: ${parseIpcError(e).message}`);
+    } finally {
+      setPrintBusy(false);
+    }
+  }, []);
+
+  // ---------- импорт ----------
+  const runImport = useCallback(async (path: string, format: "step" | "stl", unitScale?: number) => {
+    setImportBusy(true);
+    try {
+      const res = await backend.docImport(expandTilde(path), format, unitScale);
+      if (format === "stl" && unitScale === undefined) {
+        // первый проход: показываем габарит и спрашиваем единицы
+        setImportPreview(res);
+      } else {
+        setMesh(res.mesh);
+        setImportedStats(res.stats);
+        setImportPreview(null);
+        setSelectedFace(null);
+        const tris = res.mesh.triangle_count;
+        setStatusMsg(`Импортировано: ${expandTilde(path)} — ${tris} треугольников`);
+      }
+    } catch (e) {
+      setStatusMsg(`Ошибка импорта: ${parseIpcError(e).message}`);
+      setImportPreview(null);
+    } finally {
+      setImportBusy(false);
+    }
+  }, []);
+
+  // ---------- файлы ----------
   const doSave = useCallback(async () => {
     const state = await runBackend(() => backend.docSave(expandTilde(savePath)));
     if (state) {
@@ -275,10 +350,11 @@ export default function App() {
     }
   }, [openPath, runBackend, lessonEvent]);
 
-  const doExport = useCallback(async () => {
+  const doExport = useCallback(async (format: "stl" | "step" | "3mf") => {
+    const path = expandTilde(exportPath).replace(/\.(stl|step|stp|3mf)$/i, "") + "." + format;
     setComputing(true);
     try {
-      const res = await backend.docExportStl(expandTilde(exportPath));
+      const res = await backend.docExport(path, format);
       const kb = (res.bytes / 1024).toFixed(1);
       const vol = Math.round(res.stats.volume * 10) / 10;
       setStatusMsg(`Экспортировано: ${res.path} — ${kb} КБ, объём ${vol} мм³`);
@@ -315,17 +391,21 @@ export default function App() {
   const runCommand = useCallback((id: string) => {
     const cmd = commands.find((c) => c.command_id === id);
     if (cmd && !cmdEnabled(cmd, docRef.current)) return;
+    const template = templates.find((t) => t.command_id === id);
+    if (template) { void createFromTemplate(template); return; }
     switch (id) {
-      case "part.create.plate": void createPlate(); break;
       case "op.undo": void runBackend(() => backend.docUndo()); break;
       case "op.redo": void runBackend(() => backend.docRedo()); break;
       case "doc.save": void doSave(); break;
       case "doc.open": void doOpen(); break;
-      case "export.stl": void doExport(); break;
+      case "export.stl": void doExport("stl"); break;
+      case "export.step": void doExport("step"); break;
+      case "export.3mf": void doExport("3mf"); break;
+      case "op.fillet": startFillet(); break;
       case "app.help.open": setHelpOpen((v) => !v); break;
       case "app.help.what_is_this": setWhatIsThis((v) => !v); break;
     }
-  }, [commands, createPlate, runBackend, doSave, doOpen, doExport]);
+  }, [commands, templates, createFromTemplate, runBackend, doSave, doOpen, doExport, startFillet]);
 
   // ---------- режим «Что это?» ----------
   useEffect(() => {
@@ -338,11 +418,15 @@ export default function App() {
       const cmd = commands.find((c) => c.command_id === el.dataset.cmd);
       setWhatIsThis(false);
       if (cmd) openHelpArticle(cmd.help_id);
-      else setHelpOpen(true);
+      else {
+        const t = templates.find((x) => x.command_id === el.dataset.cmd);
+        if (t) openHelpArticle(t.help_id);
+        else setHelpOpen(true);
+      }
     };
     document.addEventListener("click", handler, true);
     return () => document.removeEventListener("click", handler, true);
-  }, [whatIsThis, commands, openHelpArticle]);
+  }, [whatIsThis, commands, templates, openHelpArticle]);
 
   // ---------- клавиатура ----------
   useEffect(() => {
@@ -368,23 +452,29 @@ export default function App() {
         e.preventDefault();
         setWhatIsThis((v) => !v);
       } else if (e.key === "Escape") {
-        if (whatIsThis) setWhatIsThis(false);
+        if (filletRef.current.active) cancelFillet();
+        else if (whatIsThis) setWhatIsThis(false);
         else if (helpOpen) setHelpOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [whatIsThis, helpOpen, runBackend, doSave, doOpen]);
+  }, [whatIsThis, helpOpen, runBackend, doSave, doOpen, cancelFillet]);
 
   const faceAreaValue = mesh && selectedFace != null ? faceArea(mesh, selectedFace) : null;
   const docName = doc?.path ? doc.path.split("/").pop()! : "Без названия";
-  const hasBody = !!doc?.stats?.is_valid && !!mesh;
+  const hasBody = (!!doc?.stats?.is_valid || !!importedStats) && !!mesh;
 
   return (
     <div className="app-shell">
       <TopBar commands={commands} doc={doc} docName={docName} onCommand={runCommand} />
       <div className="app-main">
-        <LeftPanel doc={doc} />
+        <LeftPanel
+          doc={doc}
+          templates={templates}
+          importedStats={importedStats}
+          onCreateTemplate={(t) => void createFromTemplate(t)}
+        />
         <main className="scene-area">
           <div className="viewport" ref={viewportEl} aria-label="Сцена 3D" />
           <div className="view-toolbar" role="toolbar" aria-label="Виды">
@@ -399,7 +489,8 @@ export default function App() {
           </div>
           {!hasBody && !computing && (
             <EmptyState
-              onCreate={() => void createPlate()}
+              templates={templates}
+              onCreateTemplate={(t) => void createFromTemplate(t)}
               onLesson={() => void startLesson("first-part")}
             />
           )}
@@ -419,16 +510,30 @@ export default function App() {
         </main>
         <ParamsPanel
           doc={doc}
+          templates={templates}
           selectedFace={selectedFace}
           faceArea={faceAreaValue}
-          onApply={(v) => void applyParams(v)}
-          onUndoFromError={() => void runBackend(() => backend.docUndo())}
+          onApplyField={(n, r) => void applyField(n, r)}
+          fillet={fillet}
+          onStartFillet={startFillet}
+          onSelectEdge={selectEdge}
+          onFilletRadius={(v) => setFillet((f) => ({ ...f, radius: v }))}
+          onApplyFillet={() => void applyFillet()}
+          onCancelFillet={cancelFillet}
+          onClearError={clearErrorOrUndo}
+          printChecks={printChecks}
+          printBusy={printBusy}
+          onPrintCheck={(p) => void runPrintCheck(p)}
+          importPreview={importPreview}
+          importBusy={importBusy}
+          onImport={(p, f, s) => void runImport(p, f, s)}
+          onCancelImportPreview={() => setImportPreview(null)}
           savePath={savePath} setSavePath={setSavePath}
           openPath={openPath} setOpenPath={setOpenPath}
           exportPath={exportPath} setExportPath={setExportPath}
           onSave={() => void doSave()}
           onOpen={() => void doOpen()}
-          onExport={() => void doExport()}
+          onExport={(f) => void doExport(f)}
         />
         {helpOpen && (
           <HelpPanel
@@ -447,7 +552,7 @@ export default function App() {
       <StatusBar
         doc={doc}
         computing={computing}
-        message={statusMsg ?? backendError}
+        message={statusMsg}
         selectedFace={selectedFace}
         faceArea={faceAreaValue}
       />

@@ -72,7 +72,7 @@ def worker():
 
 def test_ping(worker):
     resp = worker.call("ping")
-    assert resp["ok"] is True and resp["pid"] == worker.proc.pid
+    assert resp["ok"] is True and resp["result"]["pid"] == worker.proc.pid
 
 
 def test_build_plate_default(worker):

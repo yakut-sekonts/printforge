@@ -1,19 +1,18 @@
-"""PrintForge: геометрический worker (M0).
+"""PrintForge: геометрический worker (M2).
 
-Отдельный процесс. Протокол: JSON Lines в stdout (одна строка = один ответ),
-запросы — JSON Lines из stdin. Диагностика — только stderr.
-Большие сетки не идут через JSON: worker пишет бинарный ресурс во временный
-каталог сессии и возвращает handle (путь + размер + sha256).
+Отдельный процесс. Протокол: JSON Lines в stdout, запросы из stdin,
+диагностика — stderr. Сетки — бинарным ресурсом (файл + sha256).
 
-Методы M0:
-- ping: проверка живости.
-- build_plate: построить пластину с отверстиями (AC-01), вернуть статистику
-  и handle бинарной сетки (positions+indices, float32/uint32, little-endian).
-- shutdown: завершиться.
+Шаблоны (точная BRep через build123d/OCP):
+- plate_with_holes: пластина L×W×H, 4 сквозных отверстия ØD, отступ O (AC-01).
+- washer: шайба OD×ID×H (AC-02).
+- bracket_l: L-кронштейн из двух блоков с общим началом координат (AC-04).
+- case_with_lid: корпус со стенкой/дном + крышка с бортиком и зазором (AC-03).
 
-Формат запроса:
-  {"request_id": "...", "schema_version": 1, "document_id": "...",
-   "revision": 0, "method": "build_plate", "params": {...}}
+Операции поверх шаблона: fillet (выбор ребра мягкой геометрической
+ссылкой; честная ошибка OCC, без молчаливого подбора другого значения).
+
+Прочее: export_stl/step/3mf, import_step/stl, print_check.
 """
 import hashlib
 import json
@@ -26,7 +25,6 @@ import traceback
 from pathlib import Path
 
 SCHEMA_VERSION = 1
-
 _session_dir = Path(tempfile.mkdtemp(prefix="printforge-geo-"))
 
 
@@ -35,104 +33,366 @@ def log(*args):
 
 
 def respond(request_id, ok, **payload):
-    out = {"request_id": request_id, "schema_version": SCHEMA_VERSION,
-           "ok": ok}
+    out = {"request_id": request_id, "schema_version": SCHEMA_VERSION, "ok": ok}
     out.update(payload)
     sys.stdout.write(json.dumps(out) + "\n")
     sys.stdout.flush()
 
 
-def build_plate(length, width, height, hole_d, hole_offset):
-    from build123d import Box, Cylinder, GeomType, Pos
-    hx = length / 2 - hole_offset
-    hy = width / 2 - hole_offset
-    part = Pos(0, 0, height / 2) * Box(length, width, height)
-    for sx in (-hx, hx):
-        for sy in (-hy, hy):
-            part -= Pos(sx, sy, height / 2) * Cylinder(
-                radius=hole_d / 2, height=height * 2)
-    return part, hx, hy
+class GeometryError(Exception):
+    """Понятная пользователю ошибка операции."""
 
+    def __init__(self, code, message, detail=""):
+        super().__init__(message)
+        self.code, self.message, self.detail = code, message, detail
+
+
+# ---------- шаблоны ----------
+
+def build_plate(p):
+    from build123d import Box, Cylinder, Pos
+    L, W, H = p["length"], p["width"], p["height"]
+    d, off = p["hole_diameter"], p["hole_offset"]
+    part = Pos(0, 0, H / 2) * Box(L, W, H)
+    if d > 0:
+        hx, hy = L / 2 - off, W / 2 - off
+        if hx <= 0 or hy <= 0:
+            raise GeometryError(
+                "bad_params",
+                f"Отступ {off} мм не помещается при размерах {L} × {W} мм. "
+                "Увеличьте деталь или уменьшите отступ.")
+        for sx in (-hx, hx):
+            for sy in (-hy, hy):
+                part -= Pos(sx, sy, H / 2) * Cylinder(radius=d / 2, height=H * 2)
+    return part, {"hole_centers": [[-L / 2 + off, -W / 2 + off],
+                                   [L / 2 - off, -W / 2 + off],
+                                   [-L / 2 + off, W / 2 - off],
+                                   [L / 2 - off, W / 2 - off]] if d > 0 else []}
+
+
+def build_washer(p):
+    from build123d import Cylinder, Pos
+    od, id_, h = p["outer_diameter"], p["inner_diameter"], p["height"]
+    if id_ >= od:
+        raise GeometryError(
+            "bad_params",
+            f"Внутренний диаметр {id_} мм должен быть меньше наружного {od} мм.")
+    part = Pos(0, 0, h / 2) * Cylinder(radius=od / 2, height=h)
+    part -= Pos(0, 0, h / 2) * Cylinder(radius=id_ / 2, height=h * 2)
+    return part, {}
+
+
+def build_bracket(p):
+    from build123d import Box, Pos
+    al, aw, at, bh = p["a_length"], p["a_width"], p["a_thickness"], p["b_height"]
+    a = Pos(al / 2, aw / 2, at / 2) * Box(al, aw, at)
+    b = Pos(al / 2, at / 2, bh / 2) * Box(al, at, bh)
+    return a + b, {}
+
+
+def build_case(p):
+    from build123d import Box, Pos
+    L, W, H = p["length"], p["width"], p["height"]
+    wall, bottom = p["wall"], p["bottom"]
+    gap, lid_t = p["gap"], p["lid_thickness"]
+    lip_h, lip_w = p["lip_height"], p["lip_wall"]
+    ci_x, ci_y, ci_z = L - 2 * wall, W - 2 * wall, H - bottom
+    if min(ci_x, ci_y, ci_z) <= 0:
+        raise GeometryError(
+            "bad_params",
+            "Стенка или дно слишком толстые: полость исчезает. "
+            "Уменьшите толщину или увеличьте корпус.")
+    case = Pos(0, 0, H / 2) * Box(L, W, H)
+    case -= Pos(0, 0, bottom + ci_z / 2) * Box(ci_x, ci_y, ci_z)
+    # крышка: пластина + центрированный бортик (рамка)
+    lid = Pos(0, 0, H + lid_t / 2) * Box(L, W, lid_t)
+    ro_x, ro_y = ci_x - 2 * gap, ci_y - 2 * gap
+    ri_x, ri_y = ro_x - 2 * lip_w, ro_y - 2 * lip_w
+    if min(ro_x, ro_y, ri_x, ri_y) <= 0:
+        raise GeometryError(
+            "bad_params", "Бортик крышки не помещается при заданном зазоре.")
+    rim = Pos(0, 0, H - lip_h / 2) * Box(ro_x, ro_y, lip_h)
+    rim -= Pos(0, 0, H - lip_h / 2) * Box(ri_x, ri_y, lip_h * 1.2)
+    lid += rim
+    from build123d import Compound
+    # корпус и крышка — раздельные тела (контакт по плоскости не объединять)
+    return Compound(children=[case, lid]), {
+        "case_volume": case.volume, "lid_volume": lid.volume,
+        "intersection_volume": (case & lid).volume}
+
+
+TEMPLATES = {
+    "plate_with_holes": (build_plate, {
+        "length": 80.0, "width": 40.0, "height": 6.0,
+        "hole_diameter": 4.0, "hole_offset": 10.0}),
+    "washer": (build_washer, {
+        "outer_diameter": 20.0, "inner_diameter": 6.0, "height": 4.0}),
+    "bracket_l": (build_bracket, {
+        "a_length": 40.0, "a_width": 30.0, "a_thickness": 5.0, "b_height": 30.0}),
+    "case_with_lid": (build_case, {
+        "length": 100.0, "width": 60.0, "height": 30.0, "wall": 2.0,
+        "bottom": 2.0, "gap": 0.2, "lid_thickness": 2.0,
+        "lip_height": 4.0, "lip_wall": 2.0}),
+}
+
+
+def merged_params(template, params):
+    out = dict(TEMPLATES[template][1])
+    for k, v in (params or {}).items():
+        if k in out:
+            out[k] = float(v)
+    return out
+
+
+# ---------- рёбра и скругление ----------
+
+def edge_signature(edge, solid_index):
+    from build123d import GeomType
+    c = edge.center()
+    return {
+        "solid_index": solid_index,
+        "kind": str(edge.geom_type).split(".")[-1],
+        "length": round(edge.length, 4),
+        "midpoint": [round(c.X, 4), round(c.Y, 4), round(c.Z, 4)],
+    }
+
+
+def list_edges(part):
+    edges = []
+    for si, solid in enumerate(part.solids()):
+        for edge in solid.edges():
+            edges.append(edge_signature(edge, si))
+    return edges
+
+
+def match_edge(part, ref):
+    """Повторный поиск ребра по мягкой ссылке (DOC-003). Не Face17/Edge8."""
+    from build123d import GeomType
+    kind, mp, ln = ref.get("kind"), ref.get("midpoint"), ref.get("length")
+    if not kind or not mp:
+        raise GeometryError("bad_ref", "Ссылка на ребро повреждена. Выберите ребро заново.")
+    try:
+        gt = getattr(GeomType, kind)
+    except AttributeError:
+        gt = None
+    candidates = []
+    for solid in part.solids():
+        for e in solid.edges():
+            if gt is not None and e.geom_type != gt:
+                continue
+            if abs(e.length - ln) > max(0.5, 0.05 * ln):
+                continue
+            c = e.center()
+            dist = math.dist((c.X, c.Y, c.Z), mp)
+            candidates.append((dist, e))
+    if not candidates:
+        raise GeometryError(
+            "reselect_required",
+            "Ребро не найдено после перестроения модели. Выберите ребро заново.")
+    candidates.sort(key=lambda t: t[0])
+    if len(candidates) > 1 and candidates[1][0] - candidates[0][0] < 1e-3:
+        raise GeometryError(
+            "reselect_required",
+            "После перестроения несколько одинаковых рёбер. Уточните выбор.")
+    if candidates[0][0] > 2.0:
+        raise GeometryError(
+            "reselect_required",
+            "Ребро сместилось после перестроения. Выберите его заново.")
+    return candidates[0][1]
+
+
+def apply_operations(part, operations):
+    for op in operations or []:
+        if op.get("op") == "fillet":
+            r = float(op["radius"])
+            if r <= 0:
+                raise GeometryError("bad_params", "Радиус скругления должен быть больше нуля.")
+            edge = match_edge(part, op["edge_ref"])
+            try:
+                part = part.fillet(radius=r, edge_list=[edge])
+            except Exception as e:  # noqa: BLE001
+                raise GeometryError(
+                    "fillet_failed",
+                    f"Радиус {r:g} мм слишком велик для выбранного ребра. "
+                    "Уменьшите радиус или выберите другое ребро.",
+                    detail=str(e).split("\n")[0]) from e
+        else:
+            raise GeometryError("unknown_op", f"Неизвестная операция: {op.get('op')}")
+    return part
+
+
+# ---------- сетка и статистика ----------
 
 def mesh_resource(part, name, tol=0.1):
-    """Тесселяция по граням: positions float32, indices uint32,
-    face_ranges для мэппинга треугольник -> грань."""
-    positions = []
-    indices = []
-    face_ranges = []
+    positions, indices, face_ranges = [], [], []
     v_off = 0
-    for fi, face in enumerate(part.faces()):
-        verts, tris = face.tessellate(tol)
-        for v in verts:
-            x, y, z = tuple(v)
-            positions.extend((float(x), float(y), float(z)))
-        for a, b, c in tris:
-            indices.extend((int(a) + v_off, int(b) + v_off, int(c) + v_off))
-        face_ranges.append({"face_index": fi,
-                            "tri_start": (len(indices) // 3)
-                            - len(tris),
-                            "tri_count": len(tris)})
-        v_off += len(verts)
+    fi = 0
+    for si, solid in enumerate(part.solids()):
+        for face in solid.faces():
+            verts, tris = face.tessellate(tol)
+            for v in verts:
+                x, y, z = tuple(v)
+                positions.extend((float(x), float(y), float(z)))
+            for a, b, c in tris:
+                indices.extend((int(a) + v_off, int(b) + v_off, int(c) + v_off))
+            face_ranges.append({"face_index": fi, "solid_index": si,
+                                "tri_start": len(indices) // 3 - len(tris),
+                                "tri_count": len(tris)})
+            fi += 1
+            v_off += len(verts)
     blob = struct.pack("<II", len(positions) // 3, len(indices) // 3)
     blob += struct.pack(f"<{len(positions)}f", *positions)
     blob += struct.pack(f"<{len(indices)}I", *indices)
     path = _session_dir / f"{name}.bin"
     path.write_bytes(blob)
-    return {
-        "path": str(path),
-        "bytes": len(blob),
-        "sha256": hashlib.sha256(blob).hexdigest(),
-        "vertex_count": len(positions) // 3,
-        "triangle_count": len(indices) // 3,
-        "face_ranges": face_ranges,
-    }
+    return {"path": str(path), "bytes": len(blob),
+            "sha256": hashlib.sha256(blob).hexdigest(),
+            "vertex_count": len(positions) // 3,
+            "triangle_count": len(indices) // 3,
+            "face_ranges": face_ranges}
 
 
-def handle_build_plate(params):
-    length = float(params.get("length", 80))
-    width = float(params.get("width", 40))
-    height = float(params.get("height", 6))
-    hole_d = float(params.get("hole_diameter", 4))
-    hole_offset = float(params.get("hole_offset", 10))
-    part, hx, hy = build_plate(length, width, height, hole_d, hole_offset)
-    return plate_result(part, hx, hy)
-
-
-def plate_result(part, hx, hy, with_mesh=True):
+def stats_of(part, extra=None, with_edges=True):
     bb = part.bounding_box()
-    result = {
-        "stats": {
-            "volume": part.volume,
-            "solid_count": len(part.solids()),
-            "face_count": len(part.faces()),
-            "bbox": [bb.min.X, bb.min.Y, bb.min.Z,
-                     bb.max.X, bb.max.Y, bb.max.Z],
-            "hole_centers": [[-hx, -hy], [hx, -hy], [-hx, hy], [hx, hy]],
-            "is_valid": bool(part.is_valid),
-        },
+    st = {
+        "volume": part.volume,
+        "solid_count": len(part.solids()),
+        "face_count": len(part.faces()),
+        "bbox": [bb.min.X, bb.min.Y, bb.min.Z, bb.max.X, bb.max.Y, bb.max.Z],
+        "is_valid": bool(part.is_valid),
     }
-    if with_mesh:
-        result["mesh"] = mesh_resource(part, "plate")
-    return result
+    if with_edges:
+        st["edges"] = list_edges(part)
+    if extra:
+        st.update(extra)
+    return st
 
 
-def handle_export_stl(params):
-    from build123d import export_stl
+def build_document(params):
+    template = (params or {}).get("template", "plate_with_holes")
+    if template not in TEMPLATES:
+        raise GeometryError("unknown_template", f"Неизвестный шаблон: {template}")
+    tp = merged_params(template, params.get("params"))
+    part, extra = TEMPLATES[template][0](tp)
+    part = apply_operations(part, params.get("operations"))
+    return part, extra
+
+
+# ---------- методы ----------
+
+def handle_build(params):
+    part, extra = build_document(params)
+    return {"stats": stats_of(part, extra),
+            "mesh": mesh_resource(part, "model")}
+
+
+def handle_export(params):
+    fmt = params.get("format", "stl")
     path = params.get("path")
     if not path:
-        raise ValueError("не указан путь для STL")
-    tol = float(params.get("linear_deflection", 0.02))
-    part, hx, hy = build_plate(
-        float(params.get("length", 80)), float(params.get("width", 40)),
-        float(params.get("height", 6)), float(params.get("hole_diameter", 4)),
-        float(params.get("hole_offset", 10)))
-    export_stl(part, path, tolerance=tol)
-    size = Path(path).stat().st_size
-    result = plate_result(part, hx, hy, with_mesh=False)
-    result["path"] = str(path)
-    result["bytes"] = size
-    result["linear_deflection"] = tol
-    return result
+        raise GeometryError("bad_params", "не указан путь экспорта")
+    part, extra = build_document(params)
+    if fmt == "stl":
+        from build123d import export_stl
+        export_stl(part, path, tolerance=float(params.get("linear_deflection", 0.02)))
+    elif fmt == "step":
+        from build123d import export_step
+        export_step(part, path)
+    elif fmt == "3mf":
+        from build123d import Mesher
+        m = Mesher()
+        m.add_shape(part)
+        m.write(path)
+    else:
+        raise GeometryError("bad_params", f"неизвестный формат: {fmt}")
+    return {"path": path, "bytes": Path(path).stat().st_size,
+            "format": fmt, "stats": stats_of(part, extra, with_edges=False)}
+
+
+def handle_import(params):
+    fmt = params.get("format")
+    path = params.get("path")
+    if not path:
+        raise GeometryError("bad_params", "не указан путь импорта")
+    if fmt == "step":
+        from build123d import import_step
+        part = import_step(path)
+        return {"stats": stats_of(part, with_edges=False),
+                "mesh": mesh_resource(part, "import"),
+                "mode": "brep"}
+    if fmt == "stl":
+        import trimesh
+        scale = float(params.get("unit_scale", 1.0))
+        mesh = trimesh.load(path)
+        positions = (mesh.vertices * scale).astype("float32")
+        indices = mesh.faces.astype("uint32")
+        blob = struct.pack("<II", len(positions), len(indices))
+        blob += positions.tobytes() + indices.tobytes()
+        rpath = _session_dir / "import.bin"
+        rpath.write_bytes(blob)
+        ext = mesh.bounding_box.extents * scale
+        return {"stats": {
+                    "volume": float(mesh.volume) * scale ** 3 if mesh.is_watertight else None,
+                    "solid_count": int(mesh.body_count),
+                    "face_count": None,
+                    "bbox": None,
+                    "bbox_mesh": [float(x) for x in ext],
+                    "is_valid": bool(mesh.is_watertight),
+                    "triangle_count": int(len(indices)),
+                },
+                "mesh": {"path": str(rpath), "bytes": len(blob),
+                         "sha256": hashlib.sha256(blob).hexdigest(),
+                         "vertex_count": len(positions),
+                         "triangle_count": len(indices),
+                         "face_ranges": []},
+                "mode": "mesh"}
+    raise GeometryError("bad_params", f"неизвестный формат импорта: {fmt}")
+
+
+def handle_print_check(params):
+    """PRINT-001/002: отдельный результат каждой проверки."""
+    part, _ = build_document(params)
+    checks = []
+    bb = part.bounding_box()
+    solids = part.solids()
+    checks.append({"id": "brep_valid", "title": "Валидность BRep",
+                   "status": "pass" if part.is_valid else "fail"})
+    checks.append({"id": "solids", "title": "Замкнутые тела",
+                   "status": "pass" if len(solids) >= 1 else "fail",
+                   "detail": f"{len(solids)} шт."})
+    checks.append({"id": "volume", "title": "Положительный объём",
+                   "status": "pass" if part.volume > 0 else "fail",
+                   "detail": f"{part.volume:.1f} мм³"})
+    profile = params.get("printer") or {}
+    bx = (bb.max.X - bb.min.X, bb.max.Y - bb.min.Y, bb.max.Z - bb.min.Z)
+    limits = (profile.get("x"), profile.get("y"), profile.get("z"))
+    if all(limits):
+        over = [d for d, lim in zip(bx, limits) if d > lim]
+        checks.append({"id": "bed_fit", "title": "Габарит в рабочей области",
+                       "status": "pass" if not over else "fail",
+                       "detail": f"деталь {bx[0]:.0f} × {bx[1]:.0f} × {bx[2]:.0f} мм, "
+                                 f"стол {limits[0]} × {limits[1]} × {limits[2]} мм"})
+    else:
+        checks.append({"id": "bed_fit", "title": "Габарит в рабочей области",
+                       "status": "unknown", "detail": "профиль принтера не задан"})
+    checks.append({"id": "wall_thickness", "title": "Минимальная стенка",
+                   "status": "unknown",
+                   "detail": "универсальный анализ не реализован (P2)"})
+    return {"checks": checks}
+
+
+HANDLERS = {
+    "ping": lambda p: {"pid": os.getpid()},
+    "build_plate": lambda p: handle_build({"template": "plate_with_holes",
+                                           "params": p}),
+    "build": handle_build,
+    "export": handle_export,
+    "export_stl": lambda p: handle_export({**p, "format": "stl",
+                                           "template": "plate_with_holes",
+                                           "params": p}),
+    "import": handle_import,
+    "print_check": handle_print_check,
+}
 
 
 def main():
@@ -144,33 +404,27 @@ def main():
         try:
             req = json.loads(line)
         except json.JSONDecodeError as e:
-            respond(None, False, error={"code": "bad_json",
-                                        "message": str(e)})
+            respond(None, False, error={"code": "bad_json", "message": str(e)})
             continue
-        rid = req.get("request_id")
-        method = req.get("method")
+        rid, method = req.get("request_id"), req.get("method")
         try:
-            if method == "ping":
-                respond(rid, True, pid=os.getpid())
-            elif method == "build_plate":
-                respond(rid, True, result=handle_build_plate(
-                    req.get("params") or {}))
-            elif method == "export_stl":
-                respond(rid, True, result=handle_export_stl(
-                    req.get("params") or {}))
-            elif method == "shutdown":
+            if method == "shutdown":
                 respond(rid, True)
                 return 0
-            else:
+            handler = HANDLERS.get(method)
+            if not handler:
                 respond(rid, False, error={"code": "unknown_method",
                                            "message": str(method)})
+                continue
+            respond(rid, True, result=handler(req.get("params") or {}))
+        except GeometryError as e:
+            respond(rid, False, error={"code": e.code, "message": e.message,
+                                       "detail": e.detail})
         except Exception as e:  # noqa: BLE001
             traceback.print_exc(file=sys.stderr)
-            respond(rid, False, error={
-                "code": "geometry_error",
-                "message": str(e),
-                "detail": traceback.format_exc(limit=5),
-            })
+            respond(rid, False, error={"code": "geometry_error",
+                                       "message": str(e),
+                                       "detail": traceback.format_exc(limit=5)})
     return 0
 
 

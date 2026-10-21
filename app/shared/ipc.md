@@ -1,43 +1,49 @@
-# IPC-контракт PrintForge M1 (Tauri commands ↔ frontend)
+# IPC-контракт PrintForge M2 (Tauri commands ↔ frontend)
 
-Все вызовы: `invoke(name, args)` из `@tauri-apps/api/core`. Ошибки приходят как `Promise.reject(string)` — строка содержит JSON `{"code","message","detail"}` (нужен JSON.parse с fallback на сам текст).
+Все вызовы: `invoke(name, args)` из `@tauri-apps/api/core`, либо HTTP POST `http://localhost:8787/api/<command>` (dev-shim). Ошибки — `Promise.reject`/HTTP 500 со строкой JSON `{"code","message","detail"}`.
 
-## DocState (возвращают большинство команд)
+## DocState
 
 ```jsonc
 {
-  "revision": 3,
-  "dirty": true,
-  "path": "/Users/…/plate.printforge" | null,
+  "doc_id": "doc-3",           // меняется при open/new (страж устаревших ответов — по паре doc_id+revision)
+  "revision": 3, "dirty": true,
+  "path": "/…/case.printforge" | null,
   "slot": "main" | "tutorial",
-  "params": { "length": 80, "width": 40, "height": 6, "hole_diameter": 4, "hole_offset": 10 },
+  "template": "plate_with_holes" | "washer" | "bracket_l" | "case_with_lid" | null,
+  "params": { "length": 80 },  // числа
   "expressions": { "length": "80" },
+  "operations": [ {"op": "fillet", "radius": 2, "edge_ref": {"solid_index":0,"kind":"LINE","length":30.0,"midpoint":[x,y,z]}} ],
   "stats": {
-    "volume": 18898.407, "solid_count": 1, "face_count": 10,
-    "bbox": [-40,-20,0, 40,20,6],
-    "hole_centers": [[-30,-10],[30,-10],[-30,10],[30,10]],
-    "is_valid": true
+    "volume": 18898.4, "solid_count": 1, "face_count": 10,
+    "bbox": [-40,-20,0, 40,20,6], "is_valid": true,
+    "edges": [ {"solid_index":0,"kind":"LINE","length":30.0,"midpoint":[…]} ],  // для выбора ребра
+    "hole_centers": [[-30,-10],…],          // plate
+    "case_volume": 29472, "lid_volume": 14355.2, "intersection_volume": 0  // case_with_lid
   } | null,
   "error": { "code": "…", "message": "…", "detail": "…" } | null,
-  "can_undo": true, "can_redo": false
+  "can_undo": true, "can_redo": false,
+  "history_len": 3, "history_index": 2
 }
 ```
 
-`stats`/`error`: при ошибке пересчёта `stats` остаётся последним подтверждённым, `error` заполнен (DOC-005) — UI показывает старую модель + ошибку.
+Коды ошибок: `bad_value`, `bad_params`, `no_model`, `fillet_failed`, `reselect_required` (нужен повторный выбор ребра), `bad_file`, `worker_terminated`, `geometry_error`.
 
 ## Команды
 
-- `doc_create_plate({length, width, height, hole_diameter, hole_offset})` → DocState. Создаёт/заменяет параметры текущего документа (одна транзакция истории).
-- `doc_set_parameter({name, value, expression?})` → DocState. value > 0, конечное число; expression — исходная строка выражения для хранения в документе.
-- `doc_undo()` / `doc_redo()` → DocState.
-- `doc_get_state()` → DocState.
-- `doc_get_mesh()` → `{vertex_count, triangle_count, positions: number[], indices: number[], face_ranges: [{face_index, tri_start, tri_count}]}`. Координаты в мм, Z вверх.
-- `doc_save({path})` → DocState. Атомарная запись .printforge (zip).
-- `doc_open({path})` → DocState.
-- `doc_export_stl({path, linear_deflection?})` → `{path, bytes, linear_deflection, stats}`.
-- `doc_new_tutorial()` → DocState. Создаёт пустой учебный документ в слоте tutorial и переключается на него (рабочий документ main не трогается, HELP-009).
-- `doc_switch_slot({slot})` → DocState ("main" | "tutorial").
+- `doc_create({template, params?})` → DocState. Новая деталь из шаблона (одна транзакция). Шаблоны и поля — `app/shared/templates.json`.
+- `doc_set_parameter({name, value, expression?})` → DocState.
+- `doc_fillet({edge_ref, radius})` → DocState. Одна транзакция; при `fillet_failed` история откатывается, модель остаётся прежней.
+- `doc_clear_error()` → DocState.
+- `doc_undo()` / `doc_redo()` / `doc_get_state()` / `doc_get_mesh()` → как в M1 (`doc_get_mesh` отдаёт positions/indices/face_ranges c `solid_index`).
+- `doc_save({path})` / `doc_open({path})` → DocState. Формат v2 (template+operations), читает и v1.
+- `doc_export({path, format: "stl"|"step"|"3mf", linear_deflection?})` → `{path, bytes, format, stats}`.
+- `doc_import({path, format: "step"|"stl", unit_scale?})` → `{stats, mesh, mode: "brep"|"mesh"}`. Для STL `unit_scale` задаётся после показа габарита пользователю.
+- `print_check({printer: {x, y, z}})` → `{checks: [{id, title, status: "pass"|"fail"|"unknown", detail?}]}`.
+- `doc_new_tutorial()` / `doc_switch_slot({slot})` → DocState.
 
-## Диалоги файлов
+Обратная совместимость M1: `doc_create_plate`, `doc_export_stl` работают.
 
-Плагин dialog не подключён; для M1 используем явный ввод пути в UI (поле с путём по умолчанию `~/plate.printforge`, `~/plate.stl`). Это задокументированное ограничение M1.
+## Файловые диалоги
+
+В .app используется `tauri-plugin-dialog` (save/open с фильтрами). В браузерном dev-режиме — ручной ввод пути (как в M1).

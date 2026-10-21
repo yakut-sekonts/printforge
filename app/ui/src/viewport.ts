@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { MeshData, FaceRange } from "./types";
+import type { MeshData, FaceRange, EdgeRef } from "./types";
 
 export type ViewName = "top" | "front" | "side" | "iso";
 
@@ -19,6 +19,7 @@ const COLOR = {
   bodyEdge: 0xb8b3ac,
   selFace: 0xd97706,
   selBody: 0xb45309,
+  selEdge: 0x1d4ed8,
   hover: 0xa8a29e,
   axisX: 0x9c4a3d,
   axisY: 0x4a7a52,
@@ -78,6 +79,7 @@ export class Viewport {
   private faceRanges: FaceRange[] = [];
   private hoverOverlay: THREE.Object3D | null = null;
   private selOverlay: THREE.Object3D | null = null;
+  private edgeMarker: THREE.Group | null = null;
   private dimGroup: THREE.Group | null = null;
   private resizeObs!: ResizeObserver;
   private downPos = { x: 0, y: 0 };
@@ -251,6 +253,39 @@ export class Viewport {
       edges, new THREE.LineBasicMaterial({ color: COLOR.hover })
     );
     this.scene.add(this.hoverOverlay);
+  }
+
+  // Подсветка выбранного ребра для op.fillet: маркер-крест в середине ребра
+  // (edge_ref отдаёт только kind/length/midpoint, направление ребра неизвестно)
+  setEdgeMarker(edge: EdgeRef | null) {
+    if (this.edgeMarker) {
+      this.scene.remove(this.edgeMarker);
+      this.edgeMarker = null;
+    }
+    if (!edge) return;
+    const [x, y, z] = docToThree(...edge.midpoint);
+    const group = new THREE.Group();
+    const mat = new THREE.LineBasicMaterial({ color: COLOR.selEdge });
+    const r = Math.max(2, Math.min(edge.length / 2, 6));
+    for (const dir of [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as const) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute([
+        x - dir[0] * r, y - dir[1] * r, z - dir[2] * r,
+        x + dir[0] * r, y + dir[1] * r, z + dir[2] * r,
+      ], 3));
+      const line = new THREE.Line(g, mat);
+      line.renderOrder = 18;
+      group.add(line);
+    }
+    const dot = new THREE.Mesh(
+      new THREE.SphereGeometry(1.2, 12, 12),
+      new THREE.MeshBasicMaterial({ color: COLOR.selEdge })
+    );
+    dot.position.set(x, y, z);
+    dot.renderOrder = 18;
+    group.add(dot);
+    this.edgeMarker = group;
+    this.scene.add(group);
   }
 
   setSelectedFace(face: number | null) {

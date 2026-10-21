@@ -24,9 +24,24 @@
       "shortcut": null,
       "availability": "always",
       "params": [
-        {"name": "length", "unit": "mm", "min": 0.1, "desc": "Длина по X"},
-        {"name": "width", "unit": "mm", "min": 0.1, "desc": "Ширина по Y"},
-        {"name": "height", "unit": "mm", "min": 0.1, "desc": "Толщина по Z"}
+        {
+          "name": "length",
+          "unit": "mm",
+          "min": 0.1,
+          "desc": "Длина по X"
+        },
+        {
+          "name": "width",
+          "unit": "mm",
+          "min": 0.1,
+          "desc": "Ширина по Y"
+        },
+        {
+          "name": "height",
+          "unit": "mm",
+          "min": 0.1,
+          "desc": "Толщина по Z"
+        }
       ]
     },
     {
@@ -37,9 +52,23 @@
       "availability": "requires_body",
       "disabled_reason": "Сначала создайте или выберите деталь",
       "params": [
-        {"name": "diameter", "unit": "mm", "min": 0.1, "desc": "Диаметр отверстия"},
-        {"name": "depth", "unit": "mm", "desc": "Глубина; «сквозное» проходит деталь насквозь"},
-        {"name": "offset", "unit": "mm", "min": 0, "desc": "Отступ центров от краёв"}
+        {
+          "name": "diameter",
+          "unit": "mm",
+          "min": 0.1,
+          "desc": "Диаметр отверстия"
+        },
+        {
+          "name": "depth",
+          "unit": "mm",
+          "desc": "Глубина; «сквозное» проходит деталь насквозь"
+        },
+        {
+          "name": "offset",
+          "unit": "mm",
+          "min": 0,
+          "desc": "Отступ центров от краёв"
+        }
       ]
     },
     {
@@ -92,8 +121,88 @@
       "availability": "requires_body",
       "disabled_reason": "Сначала создайте деталь",
       "params": [
-        {"name": "linear_deflection", "unit": "mm", "min": 0.001, "desc": "Точность сетки (линейное отклонение)"}
+        {
+          "name": "linear_deflection",
+          "unit": "mm",
+          "min": 0.001,
+          "desc": "Точность сетки (линейное отклонение)"
+        }
       ]
+    },
+    {
+      "command_id": "part.create.washer",
+      "title": "Создать шайбу",
+      "help_id": "shablon-shayba",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "part.create.bracket",
+      "title": "Создать кронштейн",
+      "help_id": "shablon-kronshteyn",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "part.create.case",
+      "title": "Создать корпус с крышкой",
+      "help_id": "shablon-korpus",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "op.fillet",
+      "title": "Скруглить",
+      "help_id": "skruglenie",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте или выберите деталь",
+      "params": [
+        {
+          "name": "radius",
+          "unit": "mm",
+          "min": 0.01,
+          "desc": "Радиус скругления"
+        }
+      ]
+    },
+    {
+      "command_id": "io.import",
+      "title": "Импортировать модель",
+      "help_id": "import-modeley",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "check.print",
+      "title": "Проверить перед печатью",
+      "help_id": "proverka-pechati",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": []
+    },
+    {
+      "command_id": "export.step",
+      "title": "Экспортировать STEP",
+      "help_id": "eksport-formats",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": []
+    },
+    {
+      "command_id": "export.3mf",
+      "title": "Экспортировать 3MF",
+      "help_id": "eksport-formats",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": []
     }
   ]
 }

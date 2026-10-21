@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "templates": [
+    {
+      "template_id": "plate_with_holes",
+      "title": "Пластина с отверстиями",
+      "command_id": "part.create.plate",
+      "help_id": "shablon-plastina",
+      "params": [
+        {"name": "length", "label": "Длина", "unit": "мм", "min": 0.1, "default": 80},
+        {"name": "width", "label": "Ширина", "unit": "мм", "min": 0.1, "default": 40},
+        {"name": "height", "label": "Толщина", "unit": "мм", "min": 0.1, "default": 6},
+        {"name": "hole_diameter", "label": "Диаметр отверстия", "unit": "мм", "min": 0, "default": 4},
+        {"name": "hole_offset", "label": "Отступ от краёв", "unit": "мм", "min": 0, "default": 10}
+      ]
+    },
+    {
+      "template_id": "washer",
+      "title": "Шайба / втулка",
+      "command_id": "part.create.washer",
+      "help_id": "shablon-shayba",
+      "params": [
+        {"name": "outer_diameter", "label": "Наружный диаметр", "unit": "мм", "min": 0.1, "default": 20},
+        {"name": "inner_diameter", "label": "Внутренний диаметр", "unit": "мм", "min": 0, "default": 6},
+        {"name": "height", "label": "Высота", "unit": "мм", "min": 0.1, "default": 4}
+      ]
+    },
+    {
+      "template_id": "bracket_l",
+      "title": "L-кронштейн",
+      "command_id": "part.create.bracket",
+      "help_id": "shablon-kronshteyn",
+      "params": [
+        {"name": "a_length", "label": "Длина полки", "unit": "мм", "min": 0.1, "default": 40},
+        {"name": "a_width", "label": "Ширина полки", "unit": "мм", "min": 0.1, "default": 30},
+        {"name": "a_thickness", "label": "Толщина полки", "unit": "мм", "min": 0.1, "default": 5},
+        {"name": "b_height", "label": "Высота стойки", "unit": "мм", "min": 0.1, "default": 30}
+      ]
+    },
+    {
+      "template_id": "case_with_lid",
+      "title": "Корпус с крышкой",
+      "command_id": "part.create.case",
+      "help_id": "shablon-korpus",
+      "params": [
+        {"name": "length", "label": "Длина корпуса", "unit": "мм", "min": 1, "default": 100},
+        {"name": "width", "label": "Ширина корпуса", "unit": "мм", "min": 1, "default": 60},
+        {"name": "height", "label": "Высота корпуса", "unit": "мм", "min": 1, "default": 30},
+        {"name": "wall", "label": "Толщина стенки", "unit": "мм", "min": 0.4, "default": 2},
+        {"name": "bottom", "label": "Толщина дна", "unit": "мм", "min": 0.4, "default": 2},
+        {"name": "gap", "label": "Зазор крышки (на одну сторону)", "unit": "мм", "min": 0, "default": 0.2},
+        {"name": "lid_thickness", "label": "Толщина крышки", "unit": "мм", "min": 0.4, "default": 2},
+        {"name": "lip_height", "label": "Высота бортика", "unit": "мм", "min": 0, "default": 4},
+        {"name": "lip_wall", "label": "Толщина бортика", "unit": "мм", "min": 0.4, "default": 2}
+      ]
+    }
+  ]
+}

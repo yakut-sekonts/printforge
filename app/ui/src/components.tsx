@@ -1,5 +1,5 @@
 import React from "react";
-import type { CommandDef, DocState } from "./types";
+import type { CommandDef, DocState, TemplateDef, DocStats } from "./types";
 import {
   IconPlate, IconUndo, IconRedo, IconSave, IconOpen, IconExport,
   IconQuestion, IconCursorQuestion, IconBook,
@@ -35,7 +35,7 @@ const TOPBAR_ICONS: Record<string, React.ReactNode> = {
 };
 
 export function TopBar({ commands, doc, docName, onCommand }: TopBarProps) {
-  const get = (id: string) => commands.find((c) => c.command_id === id)!;
+  const get = (id: string) => commands.find((c) => c.command_id === id);
   return (
     <header className="topbar">
       <div className="brand">
@@ -44,35 +44,33 @@ export function TopBar({ commands, doc, docName, onCommand }: TopBarProps) {
           <circle cx="5" cy="8" r="1.4" /><circle cx="11" cy="8" r="1.4" />
         </svg>
         <span className="brand-name">PrintForge</span>
-        <h1 className="doc-name">
+        <span className="doc-name">
           {docName}
           {doc?.dirty && <span className="dirty-mark" title="Есть несохранённые изменения"> — изменено</span>}
-        </h1>
+        </span>
       </div>
       <nav className="topbar-actions" aria-label="Основные действия">
-        <div className="topbar-scroll">
-          {TOPBAR_IDS.map((id) => {
-            const c = get(id);
-            if (!c) return null;
-            const enabled = cmdEnabled(c, doc);
-            const title = !enabled && c.disabled_reason ? `${c.title} — ${c.disabled_reason}` : c.title;
-            return (
-              <button
-                key={id}
-                className="btn"
-                data-cmd={id}
-                aria-label={c.title}
-                title={title}
-                disabled={!enabled}
-                onClick={() => onCommand(id)}
-              >
-                {TOPBAR_ICONS[id]}
-                <span>{c.title}</span>
-                {c.shortcut && <kbd>{c.shortcut.replace("CmdOrCtrl", "⌘").replace("Shift", "⇧").replaceAll("+", "")}</kbd>}
-              </button>
-            );
-          })}
-        </div>
+        {TOPBAR_IDS.map((id) => {
+          const c = get(id);
+          if (!c) return null;
+          const enabled = cmdEnabled(c, doc);
+          const title = !enabled && c.disabled_reason ? `${c.title} — ${c.disabled_reason}` : c.title;
+          return (
+            <button
+              key={id}
+              className="btn"
+              data-cmd={id}
+              aria-label={c.title}
+              title={title}
+              disabled={!enabled}
+              onClick={() => onCommand(id)}
+            >
+              {TOPBAR_ICONS[id]}
+              <span>{c.title}</span>
+              {c.shortcut && <kbd>{c.shortcut.replace("CmdOrCtrl", "⌘").replace("Shift", "⇧").replaceAll("+", "")}</kbd>}
+            </button>
+          );
+        })}
         <span className="topbar-sep" aria-hidden />
         <button className="btn" data-cmd="app.help.what_is_this" aria-label="Что это?" title="Что это? (Shift+Escape)" onClick={() => onCommand("app.help.what_is_this")}>
           <IconCursorQuestion />
@@ -86,30 +84,92 @@ export function TopBar({ commands, doc, docName, onCommand }: TopBarProps) {
   );
 }
 
-export function LeftPanel({ doc }: { doc: DocState | null }) {
+interface LeftPanelProps {
+  doc: DocState | null;
+  templates: TemplateDef[];
+  importedStats: DocStats | null;
+  onCreateTemplate: (t: TemplateDef) => void;
+}
+
+const TEMPLATE_BLURBS: Record<string, string> = {
+  plate_with_holes: "Прямоугольная пластина с четырьмя отверстиями по углам.",
+  washer: "Кольцевая шайба или втулка по диаметрам и высоте.",
+  bracket_l: "Г-образный кронштейн: полка и стойка.",
+  case_with_lid: "Корпус со съёмной крышкой и регулируемым зазором.",
+};
+
+export function LeftPanel({ doc, templates, importedStats, onCreateTemplate }: LeftPanelProps) {
   const p = doc?.params;
+  const s = doc?.stats;
+  const template = templates.find((t) => t.template_id === doc?.template);
+  const isCase = doc?.template === "case_with_lid";
   return (
     <aside className="left-panel" aria-label="Детали и история">
       <section>
+        <h2 className="panel-section">Создать</h2>
+        <ul className="template-list">
+          {templates.map((t) => (
+            <li key={t.template_id}>
+              <button
+                className="template-row"
+                data-cmd={t.command_id}
+                aria-label={t.title}
+                onClick={() => onCreateTemplate(t)}
+              >
+                <span className="template-title">{t.title}</span>
+                <span className="template-blurb">{TEMPLATE_BLURBS[t.template_id] ?? ""}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+      <section>
         <h2 className="panel-section">Детали</h2>
-        {doc?.stats?.is_valid ? (
-          <div className="part-card" data-cmd="part.plate" aria-label="Деталь «Пластина»">
-            <div className="part-name"><IconPlate /> Пластина</div>
+        {s?.is_valid && template ? (
+          <div className="part-card" data-cmd={template.command_id} aria-label={`Деталь «${template.title}»`}>
+            <div className="part-name"><IconPlate /> {template.title}</div>
+            {isCase && s.case_volume != null && s.lid_volume != null ? (
+              <div className="part-bodies">
+                <div className="part-body-row">
+                  <span>Корпус</span><span>{fmt(s.case_volume)} мм³</span>
+                </div>
+                <div className="part-body-row">
+                  <span>Крышка</span><span>{fmt(s.lid_volume)} мм³</span>
+                </div>
+                {p?.gap != null && (
+                  <div className="part-body-row">
+                    <span>Зазор</span><span>{fmt(p.gap)} мм</span>
+                  </div>
+                )}
+                {s.solid_count > 1 && <div className="part-body-row"><span>Тел: {s.solid_count}</span></div>}
+              </div>
+            ) : (
+              <div className="part-params">
+                {template.params.map((tp) => `${tp.label.toLowerCase()} ${fmt(p?.[tp.name])}`).join(", ")}
+                {s.solid_count > 1 && <div>Тел: {s.solid_count}</div>}
+              </div>
+            )}
+          </div>
+        ) : importedStats ? null : (
+          <p className="panel-empty">Нет деталей.</p>
+        )}
+        {importedStats && (
+          <div className="part-card">
+            <div className="part-name">Импортированная модель (сетка)</div>
             <div className="part-params">
-              {p ? `${fmt(p.length)} × ${fmt(p.width)} × ${fmt(p.height)} мм, Ø${fmt(p.hole_diameter)}, отступ ${fmt(p.hole_offset)}` : ""}
+              Треугольников: {importedStats.face_count}.
+              Точные операции для сетки недоступны.
             </div>
           </div>
-        ) : (
-          <p className="panel-empty">Нет деталей.</p>
         )}
       </section>
       <section>
         <h2 className="panel-section">История операций</h2>
         {doc ? (
           <ol className="history-list">
-            {Array.from({ length: doc.history_len }, (_, i) => doc.history_len - i).map((rev) => (
-              <li key={rev} className={rev === doc.history_index + 1 ? "history-current" : ""}>
-                Операция {rev}{rev === doc.history_index + 1 && <span className="history-badge">текущая</span>}
+            {Array.from({ length: doc.history_len ?? doc.revision }, (_, i) => (doc.history_len ?? doc.revision) - i).map((rev) => (
+              <li key={rev} className={rev === (doc.history_index ?? doc.revision) ? "history-current" : ""}>
+                Ревизия {rev}{rev === (doc.history_index ?? doc.revision) && <span className="history-badge">текущая</span>}
               </li>
             ))}
           </ol>
@@ -160,18 +220,32 @@ export function StatusBar({ doc, computing, message, selectedFace, faceArea }: S
   );
 }
 
-export function EmptyState({ onCreate, onLesson }: { onCreate: () => void; onLesson: () => void }) {
+export function EmptyState({ templates, onCreateTemplate, onLesson }: {
+  templates: TemplateDef[];
+  onCreateTemplate: (t: TemplateDef) => void;
+  onLesson: () => void;
+}) {
   return (
     <div className="empty-state">
       <IconBook />
       <h2>Создайте первую деталь</h2>
-      <p>Начните с пластины из шаблона — задайте размеры в панели справа.</p>
-      <div className="empty-actions">
-        <button className="btn btn-primary" data-cmd="part.create.plate" aria-label="Создать пластину" onClick={onCreate}>
-          <IconPlate /> Создать пластину
-        </button>
-        <button className="link-btn" onClick={onLesson}>Пройти урок «Первая деталь»</button>
-      </div>
+      <p>Выберите шаблон — размеры задаются в панели справа.</p>
+      <ul className="empty-templates">
+        {templates.map((t) => (
+          <li key={t.template_id}>
+            <button
+              className="template-row"
+              data-cmd={t.command_id}
+              aria-label={t.title}
+              onClick={() => onCreateTemplate(t)}
+            >
+              <span className="template-title">{t.title}</span>
+              <span className="template-blurb">{TEMPLATE_BLURBS[t.template_id] ?? ""}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <button className="link-btn" onClick={onLesson}>Пройти урок «Первая деталь»</button>
     </div>
   );
 }

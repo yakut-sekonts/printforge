@@ -4,35 +4,55 @@ export interface GeoError {
   detail?: string;
 }
 
+export interface EdgeRef {
+  solid_index: number;
+  kind: string;
+  length: number;
+  midpoint: [number, number, number];
+}
+
+export interface Operation {
+  op: string;
+  radius?: number;
+  edge_ref?: EdgeRef;
+}
+
 export interface DocStats {
   volume: number;
   solid_count: number;
   face_count: number;
   bbox: [number, number, number, number, number, number];
-  hole_centers: [number, number][];
   is_valid: boolean;
+  edges?: EdgeRef[];
+  hole_centers?: [number, number][];
+  case_volume?: number;
+  lid_volume?: number;
+  intersection_volume?: number;
 }
 
 export interface DocState {
+  doc_id?: string;
   revision: number;
   dirty: boolean;
   path: string | null;
   slot: "main" | "tutorial";
+  template?: string | null;
   params: Record<string, number>;
   expressions: Record<string, string>;
+  operations?: Operation[];
   stats: DocStats | null;
   error: GeoError | null;
   can_undo: boolean;
   can_redo: boolean;
-  history_len: number;
-  history_index: number;
-  doc_id: string | number;
+  history_len?: number;
+  history_index?: number;
 }
 
 export interface FaceRange {
   face_index: number;
   tri_start: number;
   tri_count: number;
+  solid_index?: number;
 }
 
 export interface MeshData {
@@ -46,8 +66,26 @@ export interface MeshData {
 export interface ExportResult {
   path: string;
   bytes: number;
-  linear_deflection: number;
+  format?: string;
+  linear_deflection?: number;
   stats: DocStats;
+}
+
+export interface ImportResult {
+  stats: DocStats;
+  mesh: MeshData;
+  mode: "brep" | "mesh";
+}
+
+export interface PrintCheck {
+  id: string;
+  title: string;
+  status: "pass" | "fail" | "unknown";
+  detail?: string;
+}
+
+export interface PrintCheckResult {
+  checks: PrintCheck[];
 }
 
 export interface CommandDef {
@@ -58,6 +96,22 @@ export interface CommandDef {
   availability: "always" | "requires_document" | "requires_body" | "requires_undo" | "requires_redo";
   disabled_reason?: string;
   params: { name: string; unit?: string; min?: number; desc: string }[];
+}
+
+export interface TemplateParam {
+  name: string;
+  label: string;
+  unit: string;
+  min?: number;
+  default: number;
+}
+
+export interface TemplateDef {
+  template_id: string;
+  title: string;
+  command_id: string;
+  help_id: string;
+  params: TemplateParam[];
 }
 
 export interface HelpArticle {

@@ -1,4 +1,4 @@
-import type { DocState, MeshData, ExportResult, GeoError } from "./types";
+import type { DocState, MeshData, ExportResult, ImportResult, PrintCheckResult, EdgeRef, GeoError } from "./types";
 
 const HOME = "/Users/semenkontsevoy";
 
@@ -52,16 +52,28 @@ export function parseIpcError(e: unknown): GeoError {
 }
 
 export const backend = {
-  docCreatePlate: (p: { length: number; width: number; height: number; hole_diameter: number; hole_offset: number }) =>
-    call<DocState>("doc_create_plate", p),
+  docCreate: (template: string, params?: Record<string, number>) =>
+    call<DocState>("doc_create", { template, params }),
   docSetParameter: (name: string, value: number, expression?: string) =>
     call<DocState>("doc_set_parameter", { name, value, expression }),
+  docFillet: (edge_ref: EdgeRef, radius: number) =>
+    call<DocState>("doc_fillet", { edge_ref, radius }),
+  docClearError: () => call<DocState>("doc_clear_error"),
   docUndo: () => call<DocState>("doc_undo"),
   docRedo: () => call<DocState>("doc_redo"),
   docGetState: () => call<DocState>("doc_get_state"),
   docGetMesh: () => call<MeshData>("doc_get_mesh"),
   docSave: (path: string) => call<DocState>("doc_save", { path }),
   docOpen: (path: string) => call<DocState>("doc_open", { path }),
+  docExport: (path: string, format: "stl" | "step" | "3mf", linearDeflection?: number) =>
+    call<ExportResult>("doc_export", { path, format, linear_deflection: linearDeflection }),
+  docImport: (path: string, format: "step" | "stl", unitScale?: number) =>
+    call<ImportResult>("doc_import", { path, format, unit_scale: unitScale }),
+  printCheck: (printer: { x: number; y: number; z: number }) =>
+    call<PrintCheckResult>("print_check", { printer }),
+  // совместимость M1
+  docCreatePlate: (p: { length: number; width: number; height: number; hole_diameter: number; hole_offset: number }) =>
+    call<DocState>("doc_create_plate", p),
   docExportStl: (path: string, linearDeflection?: number) =>
     call<ExportResult>("doc_export_stl", { path, linear_deflection: linearDeflection }),
   docNewTutorial: () => call<DocState>("doc_new_tutorial"),

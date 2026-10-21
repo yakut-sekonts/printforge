@@ -1,18 +1,18 @@
-// PrintForge M1: ядро приложения.
-// Документ (параметры, история, Undo/Redo) — в этом процессе и является
-// authoritative-источником; геометрия считается отдельным worker-процессом
-// (sidecar, см. backend/worker.py). Протокол worker: JSON Lines stdio.
+// PrintForge M2: ядро приложения.
+// Документ (шаблон, параметры, операции, история) — authoritative в этом
+// процессе; геометрия — отдельный worker-процесс (JSON Lines stdio).
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use tauri::async_runtime::Receiver;
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex;
 
-const SCHEMA_VERSION: u32 = 1;
-const APP_VERSION: &str = "0.1.0-m1";
+const SCHEMA_VERSION: u32 = 2;
+const APP_VERSION: &str = "0.1.0-m2";
 
 // ---------- геометрический worker ----------
 
@@ -24,6 +24,10 @@ struct GeoWorker {
 }
 
 static WORKER: Mutex<Option<GeoWorker>> = Mutex::const_new(None);
+
+fn geo_err(code: &str, message: impl Into<String>) -> String {
+    json!({"code": code, "message": message.into(), "detail": ""}).to_string()
+}
 
 async fn worker_call(
     app: &tauri::AppHandle,
@@ -46,7 +50,7 @@ async fn worker_call(
     w.next_id += 1;
     let rid = format!("r{}", w.next_id);
     let req = json!({
-        "request_id": rid, "schema_version": SCHEMA_VERSION,
+        "request_id": rid, "schema_version": 1,
         "document_id": "doc", "revision": revision,
         "method": method, "params": params,
     });
@@ -77,14 +81,10 @@ async fn worker_call(
                 }
             }
             Some(CommandEvent::Terminated(_)) | None => {
-                // Падение worker не роняет UI (TECH-001); следующий вызов
-                // поднимет процесс заново из подтверждённой ревизии.
                 *guard = None;
-                return Err(json!({
-                    "code": "worker_terminated",
-                    "message": "Геометрический процесс завершился. Последняя подтверждённая модель сохранена; повторите действие.",
-                    "detail": "",
-                }).to_string());
+                return Err(geo_err(
+                    "worker_terminated",
+                    "Геометрический процесс завершился. Последняя подтверждённая модель сохранена; повторите действие."));
             }
             _ => {}
         }
@@ -94,15 +94,17 @@ async fn worker_call(
 // ---------- документ ----------
 
 #[derive(Clone, Default)]
-struct DocParams {
-    values: BTreeMap<String, f64>,
+struct Snapshot {
+    template: Option<String>,
+    params: BTreeMap<String, f64>,
     expressions: BTreeMap<String, String>,
+    operations: Vec<Value>,
 }
 
 struct Document {
     doc_id: u64,
-    params: DocParams,
-    history: Vec<DocParams>,
+    snap: Snapshot,
+    history: Vec<Snapshot>,
     index: usize,
     dirty: bool,
     path: Option<PathBuf>,
@@ -117,8 +119,8 @@ impl Document {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Document {
             doc_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            params: DocParams::default(),
-            history: vec![DocParams::default()],
+            snap: Snapshot::default(),
+            history: vec![Snapshot::default()],
             index: 0,
             dirty: false,
             path: None,
@@ -129,6 +131,22 @@ impl Document {
         }
     }
 
+    fn commit(&mut self, snap: Snapshot) {
+        self.history.truncate(self.index + 1);
+        self.history.push(snap.clone());
+        self.index += 1;
+        self.snap = snap;
+        self.dirty = true;
+    }
+
+    fn build_params(&self) -> Value {
+        json!({
+            "template": self.snap.template,
+            "params": self.snap.params,
+            "operations": self.snap.operations,
+        })
+    }
+
     fn state(&self, slot: &str) -> Value {
         json!({
             "doc_id": self.doc_id,
@@ -136,8 +154,10 @@ impl Document {
             "dirty": self.dirty,
             "path": self.path.as_ref().map(|p| p.to_string_lossy()),
             "slot": slot,
-            "params": self.params.values,
-            "expressions": self.params.expressions,
+            "template": self.snap.template,
+            "params": self.snap.params,
+            "expressions": self.snap.expressions,
+            "operations": self.snap.operations,
             "stats": self.stats,
             "error": self.error,
             "can_undo": self.index > 0,
@@ -151,7 +171,7 @@ impl Document {
 struct Store {
     main: Document,
     tutorial: Document,
-    active: String, // "main" | "tutorial"
+    active: String,
 }
 
 static STORE: Mutex<Option<Store>> = Mutex::const_new(None);
@@ -169,23 +189,23 @@ async fn with_store<R>(f: impl FnOnce(&mut Store) -> R) -> R {
 }
 
 fn active_doc(store: &mut Store) -> &mut Document {
-    if store.active == "tutorial" {
-        &mut store.tutorial
-    } else {
-        &mut store.main
-    }
+    if store.active == "tutorial" { &mut store.tutorial } else { &mut store.main }
+}
+
+async fn current_state() -> Value {
+    with_store(|s| {
+        let slot = s.active.clone();
+        active_doc(s).state(&slot)
+    })
+    .await
 }
 
 async fn rebuild(app: &tauri::AppHandle, doc: &mut Document) {
+    if doc.snap.template.is_none() {
+        return;
+    }
     doc.revision += 1;
-    let params = json!({
-        "length": doc.params.values.get("length").copied().unwrap_or(80.0),
-        "width": doc.params.values.get("width").copied().unwrap_or(40.0),
-        "height": doc.params.values.get("height").copied().unwrap_or(6.0),
-        "hole_diameter": doc.params.values.get("hole_diameter").copied().unwrap_or(4.0),
-        "hole_offset": doc.params.values.get("hole_offset").copied().unwrap_or(10.0),
-    });
-    match worker_call(app, "build_plate", params, doc.revision).await {
+    match worker_call(app, "build", doc.build_params(), doc.revision).await {
         Ok(result) => {
             doc.stats = result.get("stats").cloned();
             doc.mesh = result.get("mesh").cloned();
@@ -201,15 +221,39 @@ async fn rebuild(app: &tauri::AppHandle, doc: &mut Document) {
     }
 }
 
-fn commit_params(doc: &mut Document, next: DocParams) {
-    doc.history.truncate(doc.index + 1);
-    doc.history.push(next.clone());
-    doc.index += 1;
-    doc.params = next;
-    doc.dirty = true;
+async fn rebuild_active(app: &tauri::AppHandle) {
+    let mut guard = STORE.lock().await;
+    if let Some(store) = guard.as_mut() {
+        let doc = active_doc(store);
+        rebuild(app, doc).await;
+    }
 }
 
 // ---------- команды IPC ----------
+
+#[tauri::command]
+async fn doc_create(
+    app: tauri::AppHandle,
+    template: String,
+    params: Option<BTreeMap<String, f64>>,
+) -> Result<Value, String> {
+    const TEMPLATES: [&str; 4] = ["plate_with_holes", "washer", "bracket_l", "case_with_lid"];
+    if !TEMPLATES.contains(&template.as_str()) {
+        return Err(geo_err("unknown_template", format!("Неизвестный шаблон: {template}")));
+    }
+    with_store(|s| {
+        let doc = active_doc(s);
+        doc.commit(Snapshot {
+            template: Some(template.clone()),
+            params: params.clone().unwrap_or_default(),
+            expressions: BTreeMap::new(),
+            operations: vec![],
+        });
+    })
+    .await;
+    rebuild_active(&app).await;
+    Ok(current_state().await)
+}
 
 #[tauri::command]
 async fn doc_create_plate(
@@ -220,36 +264,13 @@ async fn doc_create_plate(
     hole_diameter: f64,
     hole_offset: f64,
 ) -> Result<Value, String> {
-    let mut next = DocParams::default();
-    for (k, v) in [
-        ("length", length), ("width", width), ("height", height),
-        ("hole_diameter", hole_diameter), ("hole_offset", hole_offset),
-    ] {
-        next.values.insert(k.into(), v);
-    }
-    with_store(|s| {
-        let doc = active_doc(s);
-        commit_params(doc, next);
-    })
-    .await;
-    rebuild_for_active(&app).await;
-    Ok(current_state().await)
-}
-
-async fn rebuild_for_active(app: &tauri::AppHandle) {
-    let mut guard = STORE.lock().await;
-    if let Some(store) = guard.as_mut() {
-        let doc = active_doc(store);
-        rebuild(app, doc).await;
-    }
-}
-
-async fn current_state() -> Value {
-    with_store(|s| {
-        let slot = s.active.clone();
-        active_doc(s).state(&slot)
-    })
-    .await
+    let mut p = BTreeMap::new();
+    p.insert("length".into(), length);
+    p.insert("width".into(), width);
+    p.insert("height".into(), height);
+    p.insert("hole_diameter".into(), hole_diameter);
+    p.insert("hole_offset".into(), hole_offset);
+    doc_create(app, "plate_with_holes".into(), Some(p)).await
 }
 
 #[tauri::command]
@@ -260,16 +281,17 @@ async fn doc_set_parameter(
     expression: Option<String>,
 ) -> Result<Value, String> {
     if !value.is_finite() || value <= 0.0 {
-        return Err(json!({
-            "code": "bad_value",
-            "message": format!("Значение параметра «{name}» должно быть положительным числом."),
-            "detail": "",
-        }).to_string());
+        return Err(geo_err("bad_value",
+            format!("Значение параметра «{name}» должно быть положительным числом.")));
+    }
+    let has_model = with_store(|s| active_doc(s).snap.template.is_some()).await;
+    if !has_model {
+        return Err(geo_err("no_model", "Сначала создайте деталь."));
     }
     with_store(|s| {
         let doc = active_doc(s);
-        let mut next = doc.params.clone();
-        next.values.insert(name.clone(), value);
+        let mut next = doc.snap.clone();
+        next.params.insert(name.clone(), value);
         match &expression {
             Some(e) if !e.trim().is_empty() => {
                 next.expressions.insert(name.clone(), e.clone());
@@ -278,10 +300,62 @@ async fn doc_set_parameter(
                 next.expressions.remove(&name);
             }
         }
-        commit_params(doc, next);
+        doc.commit(next);
     })
     .await;
-    rebuild_for_active(&app).await;
+    rebuild_active(&app).await;
+    Ok(current_state().await)
+}
+
+#[tauri::command]
+async fn doc_fillet(
+    app: tauri::AppHandle,
+    edge_ref: Value,
+    radius: f64,
+) -> Result<Value, String> {
+    if !radius.is_finite() || radius <= 0.0 {
+        return Err(geo_err("bad_value", "Радиус скругления должен быть больше нуля."));
+    }
+    with_store(|s| {
+        let doc = active_doc(s);
+        let mut next = doc.snap.clone();
+        next.operations.retain(|op| op.get("op") != Some(&json!("fillet")));
+        next.operations.push(json!({
+            "op": "fillet", "radius": radius, "edge_ref": edge_ref,
+        }));
+        doc.commit(next);
+    })
+    .await;
+    rebuild_active(&app).await;
+    let (err, state) = with_store(|s| {
+        let slot = s.active.clone();
+        let doc = active_doc(s);
+        (doc.error.clone(), doc.state(&slot))
+    })
+    .await;
+    if let Some(e) = err {
+        let code = e.get("code").and_then(Value::as_str).unwrap_or("");
+        if code == "fillet_failed" || code == "reselect_required" || code == "bad_ref" {
+            // откат транзакции: модель и история остаются прежними
+            with_store(|s| {
+                let doc = active_doc(s);
+                if doc.index > 0 {
+                    doc.history.pop();
+                    doc.index -= 1;
+                    doc.snap = doc.history[doc.index].clone();
+                    doc.error = None;
+                }
+            })
+            .await;
+            return Err(e.to_string());
+        }
+    }
+    Ok(state)
+}
+
+#[tauri::command]
+async fn doc_clear_error() -> Result<Value, String> {
+    with_store(|s| active_doc(s).error = None).await;
     Ok(current_state().await)
 }
 
@@ -291,7 +365,7 @@ async fn doc_undo(app: tauri::AppHandle) -> Result<Value, String> {
         let doc = active_doc(s);
         if doc.index > 0 {
             doc.index -= 1;
-            doc.params = doc.history[doc.index].clone();
+            doc.snap = doc.history[doc.index].clone();
             doc.dirty = true;
             true
         } else {
@@ -300,7 +374,7 @@ async fn doc_undo(app: tauri::AppHandle) -> Result<Value, String> {
     })
     .await;
     if changed {
-        rebuild_for_active(&app).await;
+        rebuild_active(&app).await;
     }
     Ok(current_state().await)
 }
@@ -311,7 +385,7 @@ async fn doc_redo(app: tauri::AppHandle) -> Result<Value, String> {
         let doc = active_doc(s);
         if doc.index + 1 < doc.history.len() {
             doc.index += 1;
-            doc.params = doc.history[doc.index].clone();
+            doc.snap = doc.history[doc.index].clone();
             doc.dirty = true;
             true
         } else {
@@ -320,7 +394,7 @@ async fn doc_redo(app: tauri::AppHandle) -> Result<Value, String> {
     })
     .await;
     if changed {
-        rebuild_for_active(&app).await;
+        rebuild_active(&app).await;
     }
     Ok(current_state().await)
 }
@@ -341,8 +415,12 @@ async fn doc_get_mesh() -> Result<Value, String> {
             .map(String::from)
     })
     .await;
-    let path = mesh_path.ok_or("модель ещё не построена")?;
-    let data = std::fs::read(&path).map_err(|e| format!("чтение сетки: {e}"))?;
+    let path = mesh_path.ok_or_else(|| geo_err("no_model", "модель ещё не построена"))?;
+    read_mesh_resource(&path)
+}
+
+fn read_mesh_resource(path: &str) -> Result<Value, String> {
+    let data = std::fs::read(path).map_err(|e| format!("чтение сетки: {e}"))?;
     if data.len() < 8 {
         return Err("повреждённый ресурс сетки".into());
     }
@@ -359,44 +437,29 @@ async fn doc_get_mesh() -> Result<Value, String> {
         indices.push(u32::from_le_bytes(data[off..off + 4].try_into().unwrap()));
         off += 4;
     }
-    let face_ranges = with_store(|s| {
-        let doc = active_doc(s);
-        doc.mesh
-            .as_ref()
-            .and_then(|m| m.get("face_ranges"))
-            .cloned()
-            .unwrap_or(json!([]))
-    })
-    .await;
     Ok(json!({
         "vertex_count": nv, "triangle_count": nt,
         "positions": positions, "indices": indices,
-        "face_ranges": face_ranges,
     }))
 }
 
 #[tauri::command]
-async fn doc_save(path: String) -> Result<Value, String> {
-    let (params, exprs) = with_store(|s| {
-        let doc = active_doc(s);
-        (doc.params.values.clone(), doc.params.expressions.clone())
-    })
-    .await;
-    let target = PathBuf::from(&path);
+async fn doc_get_imported_mesh(path: String) -> Result<Value, String> {
+    read_mesh_resource(&path)
+}
+
+fn save_document(doc: &Document, target: &PathBuf) -> Result<(), String> {
     let tmp = target.with_extension("printforge.tmp");
     let manifest = json!({
-        "schema_version": SCHEMA_VERSION,
-        "app": "PrintForge",
-        "app_version": APP_VERSION,
-        "units": "mm",
-        "kernel": "build123d/OCP",
+        "schema_version": SCHEMA_VERSION, "app": "PrintForge",
+        "app_version": APP_VERSION, "units": "mm", "kernel": "build123d/OCP",
     });
     let document = json!({
-        "schema_version": SCHEMA_VERSION,
-        "units": "mm",
-        "parameters": params,
-        "expressions": exprs,
-        "operations": [{"op": "plate_with_holes"}],
+        "schema_version": SCHEMA_VERSION, "units": "mm",
+        "template": doc.snap.template,
+        "parameters": doc.snap.params,
+        "expressions": doc.snap.expressions,
+        "operations": doc.snap.operations,
     });
     {
         let file = std::fs::File::create(&tmp)
@@ -410,57 +473,99 @@ async fn doc_save(path: String) -> Result<Value, String> {
         zip.write_all(document.to_string().as_bytes()).map_err(|e| e.to_string())?;
         zip.finish().map_err(|e| e.to_string())?;
     }
-    // Атомарная замена (DOC-007)
-    std::fs::rename(&tmp, &target).map_err(|e| format!("замена файла: {e}"))?;
+    std::fs::rename(&tmp, target).map_err(|e| format!("замена файла: {e}"))
+}
+
+#[tauri::command]
+async fn doc_save(path: String) -> Result<Value, String> {
+    let target = PathBuf::from(&path);
     with_store(|s| {
         let doc = active_doc(s);
+        save_document(doc, &target)?;
         doc.path = Some(target.clone());
         doc.dirty = false;
+        Ok::<(), String>(())
     })
-    .await;
+    .await?;
     Ok(current_state().await)
 }
 
 #[tauri::command]
 async fn doc_open(app: tauri::AppHandle, path: String) -> Result<Value, String> {
     let file = std::fs::File::open(&path).map_err(|e| format!("открытие файла: {e}"))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|_| "это не файл проекта PrintForge".to_string())?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|_| geo_err("bad_file", "Это не файл проекта PrintForge."))?;
     let mut buf = String::new();
     zip.by_name("document.json")
-        .map_err(|_| "в проекте нет document.json".to_string())?
+        .map_err(|_| geo_err("bad_file", "В проекте нет document.json."))?
         .read_to_string(&mut buf)
         .map_err(|e| e.to_string())?;
-    let doc_json: Value =
-        serde_json::from_str(&buf).map_err(|_| "document.json повреждён".to_string())?;
-    let mut next = DocParams::default();
+    let doc_json: Value = serde_json::from_str(&buf)
+        .map_err(|_| geo_err("bad_file", "document.json повреждён."))?;
+    const TEMPLATES: [&str; 4] = ["plate_with_holes", "washer", "bracket_l", "case_with_lid"];
+    let template = doc_json
+        .get("template")
+        .and_then(Value::as_str)
+        .unwrap_or("plate_with_holes")
+        .to_string();
+    if !TEMPLATES.contains(&template.as_str()) {
+        return Err(geo_err("bad_file", format!("Неизвестный шаблон в проекте: {template}")));
+    }
+    let mut snap = Snapshot {
+        template: Some(template),
+        params: BTreeMap::new(),
+        expressions: BTreeMap::new(),
+        operations: doc_json.get("operations").and_then(Value::as_array).cloned().unwrap_or_default(),
+    };
     if let Some(obj) = doc_json.get("parameters").and_then(Value::as_object) {
         for (k, v) in obj {
             if let Some(n) = v.as_f64() {
-                next.values.insert(k.clone(), n);
+                snap.params.insert(k.clone(), n);
             }
         }
     }
     if let Some(obj) = doc_json.get("expressions").and_then(Value::as_object) {
         for (k, v) in obj {
             if let Some(sv) = v.as_str() {
-                next.expressions.insert(k.clone(), sv.to_string());
+                snap.expressions.insert(k.clone(), sv.to_string());
             }
         }
-    }
-    if next.values.is_empty() {
-        return Err("в проекте нет параметров модели".into());
     }
     let p = PathBuf::from(&path);
     with_store(|s| {
         let doc = active_doc(s);
         *doc = Document::new();
-        commit_params(doc, next);
-        doc.path = Some(p);
+        doc.commit(snap.clone());
+        doc.path = Some(p.clone());
         doc.dirty = false;
     })
     .await;
-    rebuild_for_active(&app).await;
+    rebuild_active(&app).await;
     Ok(current_state().await)
+}
+
+#[tauri::command]
+async fn doc_export(
+    app: tauri::AppHandle,
+    path: String,
+    format: String,
+    linear_deflection: Option<f64>,
+) -> Result<Value, String> {
+    let (params, revision) = with_store(|s| {
+        let doc = active_doc(s);
+        (doc.build_params(), doc.revision)
+    })
+    .await;
+    if params.get("template").is_none() || params["template"].is_null() {
+        return Err(geo_err("no_model", "нет модели для экспорта"));
+    }
+    let mut call = params;
+    call["format"] = json!(format);
+    call["path"] = json!(path);
+    if let Some(t) = linear_deflection {
+        call["linear_deflection"] = json!(t);
+    }
+    worker_call(&app, "export", call, revision).await
 }
 
 #[tauri::command]
@@ -469,64 +574,144 @@ async fn doc_export_stl(
     path: String,
     linear_deflection: Option<f64>,
 ) -> Result<Value, String> {
+    doc_export(app, path, "stl".into(), linear_deflection).await
+}
+
+#[tauri::command]
+async fn doc_import(
+    app: tauri::AppHandle,
+    path: String,
+    format: String,
+    unit_scale: Option<f64>,
+) -> Result<Value, String> {
+    let revision = with_store(|s| active_doc(s).revision).await;
+    let mut call = json!({"path": path, "format": format});
+    if let Some(sc) = unit_scale {
+        call["unit_scale"] = json!(sc);
+    }
+    worker_call(&app, "import", call, revision).await
+}
+
+#[tauri::command]
+async fn print_check(app: tauri::AppHandle, printer: Value) -> Result<Value, String> {
     let (params, revision) = with_store(|s| {
         let doc = active_doc(s);
-        (doc.params.values.clone(), doc.revision)
+        (doc.build_params(), doc.revision)
     })
     .await;
-    if params.is_empty() {
-        return Err("нет модели для экспорта".into());
+    if params["template"].is_null() {
+        return Err(geo_err("no_model", "Сначала создайте деталь."));
     }
-    let mut call_params = json!({
-        "length": params.get("length").copied().unwrap_or(80.0),
-        "width": params.get("width").copied().unwrap_or(40.0),
-        "height": params.get("height").copied().unwrap_or(6.0),
-        "hole_diameter": params.get("hole_diameter").copied().unwrap_or(4.0),
-        "hole_offset": params.get("hole_offset").copied().unwrap_or(10.0),
-        "path": path,
-    });
-    if let Some(t) = linear_deflection {
-        call_params["linear_deflection"] = json!(t);
-    }
-    let result = worker_call(&app, "export_stl", call_params, revision).await?;
-    Ok(result)
+    let mut call = params;
+    call["printer"] = printer;
+    worker_call(&app, "print_check", call, revision).await
 }
 
 #[tauri::command]
 async fn doc_switch_slot(slot: String) -> Result<Value, String> {
     if slot != "main" && slot != "tutorial" {
-        return Err("неизвестный слот документа".into());
+        return Err(geo_err("bad_slot", "неизвестный слот документа"));
     }
     with_store(|s| s.active = slot).await;
     Ok(current_state().await)
 }
 
 #[tauri::command]
-async fn doc_new_tutorial(app: tauri::AppHandle) -> Result<Value, String> {
+async fn doc_new_tutorial() -> Result<Value, String> {
     with_store(|s| {
         s.tutorial = Document::new();
         s.active = "tutorial".into();
     })
     .await;
-    let _ = app;
     Ok(current_state().await)
+}
+
+// ---------- файловые диалоги ----------
+
+#[tauri::command]
+async fn dialog_save_path(
+    app: tauri::AppHandle,
+    default_name: String,
+    filter_name: String,
+    extensions: Vec<String>,
+) -> Result<Option<String>, String> {
+    let exts: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let result = app
+        .dialog()
+        .file()
+        .set_file_name(&default_name)
+        .add_filter(&filter_name, &exts)
+        .blocking_save_file();
+    Ok(result.and_then(|p| p.into_path().ok().map(|p| p.to_string_lossy().into_owned())))
+}
+
+#[tauri::command]
+async fn dialog_open_path(
+    app: tauri::AppHandle,
+    filter_name: String,
+    extensions: Vec<String>,
+) -> Result<Option<String>, String> {
+    let exts: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let result = app
+        .dialog()
+        .file()
+        .add_filter(&filter_name, &exts)
+        .blocking_pick_file();
+    Ok(result.and_then(|p| p.into_path().ok().map(|p| p.to_string_lossy().into_owned())))
+}
+
+// ---------- автосохранение (DOC-007) ----------
+
+fn spawn_autosave() {
+    tauri::async_runtime::spawn(async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let _ = with_store(|s| {
+                for doc in [&mut s.main, &mut s.tutorial] {
+                    if doc.dirty {
+                        if let Some(path) = doc.path.clone() {
+                            if save_document(doc, &path).is_ok() {
+                                doc.dirty = false;
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+        }
+    });
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|_app| {
+            spawn_autosave();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            doc_create,
             doc_create_plate,
             doc_set_parameter,
+            doc_fillet,
+            doc_clear_error,
             doc_undo,
             doc_redo,
             doc_get_state,
             doc_get_mesh,
+            doc_get_imported_mesh,
             doc_save,
             doc_open,
+            doc_export,
             doc_export_stl,
+            doc_import,
+            print_check,
             doc_switch_slot,
             doc_new_tutorial,
+            dialog_save_path,
+            dialog_open_path,
         ])
         .run(tauri::generate_context!())
         .expect("ошибка запуска PrintForge");
