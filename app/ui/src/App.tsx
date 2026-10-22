@@ -52,6 +52,11 @@ export default function App() {
   const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [importedStats, setImportedStats] = useState<DocStats | null>(null);
+  const [measureResult, setMeasureResult] = useState<{
+    source?: string; bbox?: number[]; volume?: number;
+    faceDiameter?: number; faceError?: string; distance?: number;
+  } | null>(null);
+  const [measureBusy, setMeasureBusy] = useState(false);
 
   const viewportRef = useRef<Viewport | null>(null);
   const viewportEl = useRef<HTMLDivElement>(null);
@@ -328,6 +333,70 @@ export default function App() {
     await runBackend(() => backend.docTransform(id, translate));
   }, [runBackend, activePartId]);
 
+  const runProfileExtrude = useCallback(async (args: Parameters<typeof backend.docProfileExtrude>[0]) => {
+    await runBackend(() => backend.docProfileExtrude(args));
+  }, [runBackend]);
+
+  const runArrayCircular = useCallback(async (count: number, angle: number, center: [number, number, number]) => {
+    const id = activePartId();
+    if (!id) return;
+    await runBackend(() => backend.docArrayCircular(id, count, angle, center));
+  }, [runBackend, activePartId]);
+
+  const runAlign = useCallback(async (axis: "x" | "y" | "z", align: "center" | "min" | "max", value: number) => {
+    const id = activePartId();
+    if (!id) return;
+    await runBackend(() => backend.docAlign(id, axis, align, value));
+  }, [runBackend, activePartId]);
+
+  // ---------- измерения ----------
+  const runMeasure = useCallback(async () => {
+    setMeasureBusy(true);
+    try {
+      const [bboxRes, volRes] = await Promise.all([
+        backend.measure({ type: "bbox" }),
+        backend.measure({ type: "volume" }),
+      ]);
+      setMeasureResult((prev) => ({
+        ...prev,
+        source: (bboxRes.source as string) ?? "brep",
+        bbox: (bboxRes.bbox as number[]) ?? (bboxRes.min && bboxRes.max ? [...(bboxRes.min as number[]), ...(bboxRes.max as number[])] as number[] : undefined),
+        volume: volRes.volume as number | undefined,
+        faceError: undefined,
+      }));
+    } catch (e) {
+      setStatusMsg(`Ошибка измерения: ${parseIpcError(e).message}`);
+    } finally {
+      setMeasureBusy(false);
+    }
+  }, []);
+
+  const runMeasureFace = useCallback(async () => {
+    if (selectedFace == null) return;
+    setMeasureBusy(true);
+    try {
+      const res = await backend.measure({ type: "face_diameter", face_index: selectedFace });
+      setMeasureResult((prev) => ({ ...prev, faceDiameter: res.diameter as number | undefined, faceError: undefined }));
+    } catch (e) {
+      const err = parseIpcError(e);
+      setMeasureResult((prev) => ({ ...prev, faceDiameter: undefined, faceError: err.message }));
+    } finally {
+      setMeasureBusy(false);
+    }
+  }, [selectedFace]);
+
+  const runMeasureDistance = useCallback(async (p0: [number, number, number], p1: [number, number, number]) => {
+    setMeasureBusy(true);
+    try {
+      const res = await backend.measure({ type: "distance", p0, p1 });
+      setMeasureResult((prev) => ({ ...prev, distance: res.distance as number | undefined }));
+    } catch (e) {
+      setStatusMsg(`Ошибка измерения: ${parseIpcError(e).message}`);
+    } finally {
+      setMeasureBusy(false);
+    }
+  }, []);
+
   // ---------- скругление ----------
   const startFillet = useCallback(() => {
     setFillet({ active: true, selected: null, radius: filletRef.current.radius });
@@ -596,6 +665,14 @@ export default function App() {
           onMirror={(pl) => void runMirror(pl)}
           onSplit={(pl, off) => void runSplit(pl, off)}
           onTransform={(tr) => void runTransform(tr)}
+          onProfileExtrude={(a) => void runProfileExtrude(a)}
+          onArrayCircular={(c, ang, ctr) => void runArrayCircular(c, ang, ctr)}
+          onAlign={(ax, al, v) => void runAlign(ax, al, v)}
+          measureResult={measureResult}
+          measureBusy={measureBusy}
+          onMeasure={() => void runMeasure()}
+          onMeasureFace={() => void runMeasureFace()}
+          onMeasureDistance={(p0, p1) => void runMeasureDistance(p0, p1)}
           fillet={fillet}
           onStartFillet={startFillet}
           onSelectEdge={selectEdge}

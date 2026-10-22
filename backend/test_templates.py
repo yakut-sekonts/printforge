@@ -273,3 +273,54 @@ def test_v3_split_fail_is_managed(worker):
     r = worker.call("build", doc)
     assert r["ok"] is False
     assert r["error"]["code"] == "split_failed"
+
+
+def test_profile_extrude_and_slot(worker):
+    doc = {"parts": [{"part_id": "a", "template": "plate_with_holes", "params": {}}],
+           "operations": [{"op": "profile_extrude", "mode": "add", "plane": "XY",
+                           "depth": 8,
+                           "profile": {"kind": "rectangle", "width": 10, "height": 6,
+                                       "center": [0, 0]}}]}
+    r = worker.call("build", doc)
+    vols = sorted(p["volume"] for p in r["result"]["stats"]["parts"])
+    assert vols[0] == pytest.approx(480, abs=1e-3)
+    doc2 = {"parts": [{"part_id": "a", "template": "plate_with_holes",
+                       "params": {"hole_diameter": 0}}],
+            "operations": [{"op": "profile_extrude", "mode": "cut", "plane": "XY",
+                            "depth": "through", "target_id": "a",
+                            "profile": {"kind": "slot", "width": 4, "length": 20,
+                                        "center": [0, 0]}}]}
+    r2 = worker.call("build", doc2)
+    exp = 80 * 40 * 6 - (4 * 16 * 6 + math.pi * 4 * 6)
+    assert abs(r2["result"]["stats"]["volume"] - exp) <= 1
+
+
+def test_circular_array_and_align(worker):
+    doc = {"parts": [{"part_id": "a", "template": "washer",
+                      "params": {"outer_diameter": 10, "inner_diameter": 0, "height": 8}}],
+           "operations": [{"op": "transform", "part_id": "a", "translate": [25, 0, 0]},
+                          {"op": "array_circular", "part_id": "a", "count": 4,
+                           "angle": 360, "center": [0, 0, 0]}]}
+    r = worker.call("build", doc)
+    st = r["result"]["stats"]
+    assert st["solid_count"] == 4
+    assert st["bbox"][3] - st["bbox"][0] == pytest.approx(60, abs=1e-3)
+    doc2 = {"parts": [{"part_id": "a", "template": "bracket_l", "params": {}}],
+            "operations": [{"op": "align", "part_id": "a", "axis": "x",
+                            "align": "center", "value": 0}]}
+    r2 = worker.call("build", doc2)
+    bb = r2["result"]["stats"]["bbox"]
+    assert bb[0] == pytest.approx(-20, abs=1e-3)
+
+
+def test_measure(worker):
+    r = worker.call("measure", {"type": "face_diameter", "face_index": 0,
+                                "template": "washer", "params": {}})
+    assert r["result"]["diameter"] == pytest.approx(20, abs=1e-3)
+    assert r["result"]["source"] == "brep"
+    r2 = worker.call("measure", {"type": "distance",
+                                 "p0": [0, 0, 0], "p1": [30, 40, 0]})
+    assert r2["result"]["distance"] == pytest.approx(50, abs=1e-3)
+    r3 = worker.call("measure", {"type": "face_diameter", "face_index": 99,
+                                 "template": "washer", "params": {}})
+    assert r3["ok"] is False and r3["error"]["code"] == "bad_ref"

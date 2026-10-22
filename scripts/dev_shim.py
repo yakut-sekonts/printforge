@@ -257,6 +257,46 @@ def cmd_doc_transform(a):
                          "translate": a.get("translate") or [0, 0, 0]})
 
 
+def cmd_doc_profile_extrude(a):
+    op = {"op": "profile_extrude", "mode": a.get("mode", "add"),
+          "plane": a.get("plane", "XY"), "profile": a["profile"]}
+    if a.get("depth") is not None:
+        op["depth"] = a["depth"]
+    if a.get("target_id"):
+        op["target_id"] = a["target_id"]
+    elif op["mode"] == "cut":
+        d = doc()
+        if d.parts:
+            op["target_id"] = d.parts[0]["part_id"]
+    return _apply_op(a, op)
+
+
+def cmd_doc_array_circular(a):
+    return _apply_op(a, {"op": "array_circular", "part_id": a["part_id"],
+                         "count": int(a["count"]),
+                         "angle": float(a.get("angle", 360)),
+                         "center": a.get("center") or [0, 0, 0]})
+
+
+def cmd_doc_align(a):
+    return _apply_op(a, {"op": "align", "part_id": a["part_id"],
+                         "axis": a.get("axis", "x"),
+                         "align": a.get("align", "center"),
+                         "value": float(a.get("value", 0))})
+
+
+def cmd_measure(a):
+    d = doc()
+    if not d.parts:
+        raise geo_error("no_model", "Сначала создайте деталь")
+    p = d.build_params()
+    p["type"] = a.get("type", "bbox")
+    for k in ("face_index", "p0", "p1"):
+        if k in a:
+            p[k] = a[k]
+    return worker_call("measure", p, d.revision)
+
+
 def cmd_doc_fillet(a):
     radius = a.get("radius")
     if not isinstance(radius, (int, float)) or radius <= 0:
@@ -436,6 +476,10 @@ HANDLERS = {
     "doc_mirror": cmd_doc_mirror,
     "doc_split": cmd_doc_split,
     "doc_transform": cmd_doc_transform,
+    "doc_profile_extrude": cmd_doc_profile_extrude,
+    "doc_array_circular": cmd_doc_array_circular,
+    "doc_align": cmd_doc_align,
+    "measure": cmd_measure,
     "doc_new_tutorial": cmd_doc_new_tutorial,
     "doc_switch_slot": cmd_doc_switch_slot,
 }

@@ -453,6 +453,82 @@ async fn doc_fillet(
 }
 
 #[tauri::command]
+async fn doc_profile_extrude(
+    app: tauri::AppHandle,
+    mode: String,
+    plane: String,
+    profile: Value,
+    depth: Option<Value>,
+    target_id: Option<String>,
+) -> Result<Value, String> {
+    let mut op = json!({"op": "profile_extrude", "mode": mode, "plane": plane, "profile": profile});
+    if let Some(d) = depth { op["depth"] = d; }
+    let tid = target_id.or_else(|| None);
+    if mode_is_cut(&op) {
+        let fallback = with_store(|s| {
+            let doc = active_doc(s);
+            doc.snap.parts.first().and_then(|p| p.get("part_id")).and_then(Value::as_str).map(String::from)
+        }).await;
+        op["target_id"] = json!(tid.or(fallback));
+    } else if let Some(t) = tid {
+        op["target_id"] = json!(t);
+    }
+    apply_op(&app, op).await
+}
+
+fn mode_is_cut(op: &Value) -> bool {
+    op.get("mode").and_then(Value::as_str) == Some("cut")
+}
+
+#[tauri::command]
+async fn doc_array_circular(
+    app: tauri::AppHandle,
+    part_id: String,
+    count: u32,
+    angle: Option<f64>,
+    center: Option<Vec<f64>>,
+) -> Result<Value, String> {
+    apply_op(&app, json!({
+        "op": "array_circular", "part_id": part_id, "count": count,
+        "angle": angle.unwrap_or(360.0),
+        "center": center.unwrap_or(vec![0.0, 0.0, 0.0]),
+    })).await
+}
+
+#[tauri::command]
+async fn doc_align(
+    app: tauri::AppHandle,
+    part_id: String,
+    axis: String,
+    align: String,
+    value: f64,
+) -> Result<Value, String> {
+    apply_op(&app, json!({
+        "op": "align", "part_id": part_id, "axis": axis,
+        "align": align, "value": value,
+    })).await
+}
+
+#[tauri::command]
+async fn measure(app: tauri::AppHandle, measure_type: String, extra: Option<Value>) -> Result<Value, String> {
+    let (params, revision) = with_store(|s| {
+        let doc = active_doc(s);
+        (doc.build_params(), doc.revision)
+    }).await;
+    if params["template"].is_null() && params["parts"].is_null() {
+        return Err(geo_err("no_model", "Сначала создайте деталь."));
+    }
+    let mut call = params;
+    call["type"] = json!(measure_type);
+    if let Some(e) = extra {
+        if let Some(obj) = e.as_object() {
+            for (k, v) in obj { call[k] = v.clone(); }
+        }
+    }
+    worker_call(&app, "measure", call, revision).await
+}
+
+#[tauri::command]
 async fn doc_clear_error() -> Result<Value, String> {
     with_store(|s| active_doc(s).error = None).await;
     Ok(current_state().await)
@@ -809,6 +885,10 @@ fn main() {
             doc_mirror,
             doc_split,
             doc_transform,
+            doc_profile_extrude,
+            doc_array_circular,
+            doc_align,
+            measure,
             doc_set_parameter,
             doc_fillet,
             doc_clear_error,

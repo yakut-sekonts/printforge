@@ -285,6 +285,56 @@ def build_document(params):
 
 # ---------- многодетальный документ (v3) ----------
 
+def profile_prism(profile, plane, depth):
+    """Призма из простого профиля (CAD-003): rectangle/circle/ring/slot."""
+    from build123d import Pos, Plane
+    kind = profile.get("kind")
+    cx, cy = (profile.get("center") or [0, 0])[:2]
+    with_ = None
+    if kind == "rectangle":
+        from build123d import Box
+        w, h = profile["width"], profile["height"]
+        prism = Box(w, h, depth)
+    elif kind == "circle":
+        from build123d import Cylinder
+        prism = Cylinder(radius=profile["diameter"] / 2, height=depth)
+    elif kind == "ring":
+        from build123d import Cylinder
+        od, id_ = profile["outer_diameter"], profile["inner_diameter"]
+        if id_ >= od:
+            raise GeometryError("bad_params",
+                                "Внутренний диаметр кольца должен быть меньше наружного.")
+        prism = Cylinder(radius=od / 2, height=depth) - \
+            Cylinder(radius=id_ / 2, height=depth * 1.2)
+    elif kind == "slot":
+        from build123d import Box, Cylinder
+        w, ln = profile["width"], profile["length"]
+        if ln <= w:
+            raise GeometryError("bad_params",
+                                "Длина паза должна быть больше его ширины.")
+        r = w / 2
+        prism = Box(ln - w, w, depth) + \
+            Pos(-(ln - w) / 2, 0, 0) * Cylinder(radius=r, height=depth) + \
+            Pos((ln - w) / 2, 0, 0) * Cylinder(radius=r, height=depth)
+    else:
+        raise GeometryError("bad_params", f"неизвестный профиль: {kind}")
+    base = Pos(cx, cy, 0)
+    if plane == "XZ":
+        from build123d import Rotation
+        return base * Rotation(90, 0, 0) * prism
+    if plane == "YZ":
+        from build123d import Rotation
+        return base * Rotation(0, 90, 0) * prism
+    return base * prism
+
+
+def _rotate_about(shape, center, angle_deg):
+    """Поворот вокруг оси Z через точку center."""
+    from build123d import Pos, Rotation
+    cx, cy, cz = center
+    return Pos(cx, cy, cz) * Rotation(0, 0, angle_deg) * Pos(-cx, -cy, -cz) * shape
+
+
 def apply_part_operations(parts, operations):
     """Операции над деталями документа v3. parts: {part_id: {"shape": Shape,
     "name": str}}. Возвращает изменённый словарь."""
@@ -337,6 +387,57 @@ def apply_part_operations(parts, operations):
             if pl is None:
                 raise GeometryError("bad_params", f"неизвестная плоскость: {plane}")
             parts[pid]["shape"] = base.mirror(pl)
+        elif kind == "profile_extrude":
+            prof = op.get("profile") or {}
+            plane = op.get("plane", "XY")
+            mode = op.get("mode", "add")
+            depth = op.get("depth")
+            if mode == "cut":
+                target = parts[op["target_id"]]["shape"]
+                bb = target.bounding_box()
+                d = float(depth) if depth not in (None, "through") else \
+                    (bb.max.Z - bb.min.Z + 2 * max(1, abs(bb.max.Z), 1))
+                z0 = bb.min.Z - 1 if depth == "through" else bb.min.Z
+                prism = profile_prism(prof, plane, d) if plane == "XY" else \
+                    profile_prism(prof, plane, d)
+                if depth == "through" and plane == "XY":
+                    from build123d import Pos as _Pos
+                    prism = _Pos(0, 0, z0) * prism
+                parts[op["target_id"]]["shape"] = target - prism
+            else:
+                if depth in (None, "through"):
+                    raise GeometryError("bad_params",
+                                        "Для выдавливания нужна глубина в мм.")
+                prism = profile_prism(prof, plane, float(depth))
+                new_id = f"part-profile-{len(parts) + 1}"
+                parts[new_id] = {"shape": prism,
+                                 "name": f"Профиль ({prof.get('kind')})"}
+        elif kind == "array_circular":
+            from build123d import Compound
+            n = int(op["count"])
+            if n < 2:
+                raise GeometryError("bad_params", "В массиве должно быть хотя бы 2 элемента.")
+            total = float(op.get("angle", 360))
+            center = op.get("center") or [0, 0, 0]
+            base = parts[pid]["shape"]
+            step = total / n if abs(total - 360) < 1e-9 else total / (n - 1)
+            copies = [_rotate_about(base, center, step * i) for i in range(n)]
+            parts[pid]["shape"] = Compound(children=copies)
+        elif kind == "align":
+            base = parts[pid]["shape"]
+            bb = base.bounding_box()
+            axis = op.get("axis", "x")
+            mode = op.get("align", "center")
+            value = float(op.get("value", 0))
+            ai = {"x": 0, "y": 1, "z": 2}[axis]
+            lo = (bb.min.X, bb.min.Y, bb.min.Z)[ai]
+            hi = (bb.max.X, bb.max.Y, bb.max.Z)[ai]
+            cur = {"center": (lo + hi) / 2, "min": lo, "max": hi}[mode]
+            delta = value - cur
+            t = [0, 0, 0]
+            t[ai] = delta
+            from build123d import Pos as _Pos
+            parts[pid]["shape"] = _Pos(*t) * base
         elif kind == "split":
             plane = op.get("plane", "XZ")
             off = float(op.get("offset", 0))
@@ -542,6 +643,35 @@ def handle_mesh_check(params):
             "bbox_mesh": [float(x) for x in mesh.bounding_box.extents]}
 
 
+def handle_measure(params):
+    """CAD-009: измерения по точной BRep. Указывает источник (brep)."""
+    part, _ = build_any(params)
+    kind = params.get("type", "bbox")
+    if kind == "bbox":
+        bb = part.bounding_box()
+        return {"source": "brep", "bbox": [bb.min.X, bb.min.Y, bb.min.Z,
+                                           bb.max.X, bb.max.Y, bb.max.Z],
+                "size": [bb.max.X - bb.min.X, bb.max.Y - bb.min.Y,
+                         bb.max.Z - bb.min.Z]}
+    if kind == "volume":
+        return {"source": "brep", "volume": part.volume,
+                "solid_count": len(part.solids())}
+    if kind == "face_diameter":
+        fi = int(params["face_index"])
+        faces = part.faces()
+        if fi < 0 or fi >= len(faces):
+            raise GeometryError("bad_ref", "Грань не найдена. Выберите грань заново.")
+        f = faces[fi]
+        if str(f.geom_type).split(".")[-1] != "CYLINDER":
+            raise GeometryError(
+                "bad_ref", "Выбранная грань не цилиндрическая — диаметр не определён.")
+        return {"source": "brep", "diameter": 2 * f.radius}
+    if kind == "distance":
+        p0, p1 = params["p0"], params["p1"]
+        return {"source": "brep", "distance": math.dist(p0, p1)}
+    raise GeometryError("bad_params", f"неизвестное измерение: {kind}")
+
+
 HANDLERS = {
     "ping": lambda p: {"pid": os.getpid()},
     "build_plate": lambda p: handle_build({"template": "plate_with_holes",
@@ -554,6 +684,7 @@ HANDLERS = {
     "import": handle_import,
     "print_check": handle_print_check,
     "mesh_check": handle_mesh_check,
+    "measure": handle_measure,
 }
 
 

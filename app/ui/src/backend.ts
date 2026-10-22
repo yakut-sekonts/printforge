@@ -70,6 +70,19 @@ export const backend = {
     call<DocState>("doc_split", { part_id: partId, plane, offset }),
   docTransform: (partId: string, translate: [number, number, number]) =>
     call<DocState>("doc_transform", { part_id: partId, translate }),
+  docProfileExtrude: (args: {
+    mode: "add" | "cut";
+    plane: "XY" | "XZ" | "YZ";
+    profile: Record<string, unknown>;
+    depth?: number | "through";
+    target_id?: string;
+  }) => call<DocState>("doc_profile_extrude", args as Record<string, unknown>),
+  docArrayCircular: (partId: string, count: number, angle?: number, center?: [number, number, number]) =>
+    call<DocState>("doc_array_circular", { part_id: partId, count, angle, center }),
+  docAlign: (partId: string, axis: "x" | "y" | "z", align: "center" | "min" | "max", value: number) =>
+    call<DocState>("doc_align", { part_id: partId, axis, align, value }),
+  measure: (args: { type: "bbox" | "volume" | "face_diameter" | "distance"; face_index?: number; p0?: [number, number, number]; p1?: [number, number, number] }) =>
+    call<Record<string, unknown>>(`measure`, args as Record<string, unknown>),
   docFillet: (edge_ref: EdgeRef, radius: number, partId?: string) =>
     call<DocState>("doc_fillet", { edge_ref, radius, part_id: partId }),
   docClearError: () => call<DocState>("doc_clear_error"),
