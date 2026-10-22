@@ -143,19 +143,20 @@ impl Document {
         if self.snap.parts.is_empty() {
             return json!({"template": null, "params": {}, "operations": []});
         }
-        let only_fillet = self.snap.operations.iter()
-            .all(|op| op.get("op") == Some(&json!("fillet")));
-        if self.snap.parts.len() == 1 && only_fillet {
-            let p = &self.snap.parts[0];
-            return json!({
-                "template": p.get("template"),
-                "params": p.get("params").cloned().unwrap_or(json!({})),
-                "operations": self.snap.operations,
-            });
-        }
+        let first_id = self.snap.parts.first()
+            .and_then(|p| p.get("part_id")).and_then(Value::as_str).map(String::from);
+        let ops: Vec<Value> = self.snap.operations.iter().map(|op| {
+            if op.get("op") == Some(&json!("fillet")) && op.get("part_id").is_none() {
+                let mut o = op.clone();
+                o["part_id"] = json!(first_id);
+                o
+            } else {
+                op.clone()
+            }
+        }).collect();
         json!({
             "parts": self.snap.parts,
-            "operations": self.snap.operations,
+            "operations": ops,
         })
     }
 

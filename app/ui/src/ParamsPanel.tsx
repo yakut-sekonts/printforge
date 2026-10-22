@@ -24,6 +24,23 @@ interface Props {
   onMirror: (plane: "XY" | "XZ" | "YZ") => void;
   onSplit: (plane: "XY" | "XZ" | "YZ", offset: number) => void;
   onTransform: (translate: [number, number, number]) => void;
+  onProfileExtrude: (args: {
+    mode: "add" | "cut";
+    plane: "XY" | "XZ" | "YZ";
+    profile: Record<string, unknown>;
+    depth?: number | "through";
+    target_id?: string;
+  }) => void;
+  onArrayCircular: (count: number, angle: number, center: [number, number, number]) => void;
+  onAlign: (axis: "x" | "y" | "z", align: "center" | "min" | "max", value: number) => void;
+  measureResult: {
+    source?: string; bbox?: number[]; volume?: number;
+    faceDiameter?: number; faceError?: string; distance?: number;
+  } | null;
+  measureBusy: boolean;
+  onMeasure: () => void;
+  onMeasureFace: () => void;
+  onMeasureDistance: (p0: [number, number, number], p1: [number, number, number]) => void;
   // скругление
   fillet: FilletUi;
   onStartFillet: () => void;
@@ -94,6 +111,21 @@ export function ParamsPanel(props: Props) {
   const [splitPlane, setSplitPlane] = useState<"XY" | "XZ" | "YZ">("XY");
   const [splitOffset, setSplitOffset] = useState("0");
   const [translate, setTranslate] = useState({ x: "0", y: "0", z: "0" });
+  const [profileKind, setProfileKind] = useState<"rectangle" | "circle" | "ring" | "slot">("rectangle");
+  const [profileDims, setProfileDims] = useState({ width: "20", height: "10", diameter: "10", outer_diameter: "20", inner_diameter: "10", slot_width: "6", slot_length: "20" });
+  const [profileCenter, setProfileCenter] = useState({ x: "0", y: "0" });
+  const [profilePlane, setProfilePlane] = useState<"XY" | "XZ" | "YZ">("XY");
+  const [profileMode, setProfileMode] = useState<"add" | "cut">("add");
+  const [profileDepth, setProfileDepth] = useState("5");
+  const [profileThrough, setProfileThrough] = useState(true);
+  const [circCount, setCircCount] = useState("4");
+  const [circAngle, setCircAngle] = useState("360");
+  const [circCenter, setCircCenter] = useState({ x: "0", y: "0", z: "0" });
+  const [alignAxis, setAlignAxis] = useState<"x" | "y" | "z">("z");
+  const [alignMode, setAlignMode] = useState<"center" | "min" | "max">("min");
+  const [alignValue, setAlignValue] = useState("0");
+  const [distP0, setDistP0] = useState({ x: "0", y: "0", z: "0" });
+  const [distP1, setDistP1] = useState({ x: "0", y: "0", z: "0" });
 
   // значения полей из активной детали
   useEffect(() => {
@@ -405,6 +437,83 @@ export function ParamsPanel(props: Props) {
         </div>
 
         <div className="op-block">
+          <span className="op-label">Профиль и выдавливание</span>
+          <div className="op-row">
+            <select value={profileKind} aria-label="Тип профиля" onChange={(e) => setProfileKind(e.target.value as typeof profileKind)}>
+              <option value="rectangle">Прямоугольник</option>
+              <option value="circle">Окружность</option>
+              <option value="ring">Кольцо</option>
+              <option value="slot">Паз</option>
+            </select>
+            <select value={profilePlane} aria-label="Плоскость профиля" onChange={(e) => setProfilePlane(e.target.value as "XY" | "XZ" | "YZ")}>
+              <option value="XY">XY</option><option value="XZ">XZ</option><option value="YZ">YZ</option>
+            </select>
+          </div>
+          <div className="op-row">
+            {profileKind === "rectangle" && (<>
+              <div className="param-input op-field"><input inputMode="decimal" value={profileDims.width} aria-label="Ширина X, мм" onChange={(e) => setProfileDims({ ...profileDims, width: e.target.value })} /><span className="param-unit">X, мм</span></div>
+              <div className="param-input op-field"><input inputMode="decimal" value={profileDims.height} aria-label="Высота Y, мм" onChange={(e) => setProfileDims({ ...profileDims, height: e.target.value })} /><span className="param-unit">Y, мм</span></div>
+            </>)}
+            {profileKind === "circle" && (
+              <div className="param-input op-field"><input inputMode="decimal" value={profileDims.diameter} aria-label="Диаметр, мм" onChange={(e) => setProfileDims({ ...profileDims, diameter: e.target.value })} /><span className="param-unit">Ø, мм</span></div>
+            )}
+            {profileKind === "ring" && (<>
+              <div className="param-input op-field"><input inputMode="decimal" value={profileDims.outer_diameter} aria-label="Наружный диаметр, мм" onChange={(e) => setProfileDims({ ...profileDims, outer_diameter: e.target.value })} /><span className="param-unit">Ø нар, мм</span></div>
+              <div className="param-input op-field"><input inputMode="decimal" value={profileDims.inner_diameter} aria-label="Внутренний диаметр, мм" onChange={(e) => setProfileDims({ ...profileDims, inner_diameter: e.target.value })} /><span className="param-unit">Ø вн, мм</span></div>
+            </>)}
+            {profileKind === "slot" && (<>
+              <div className="param-input op-field"><input inputMode="decimal" value={profileDims.slot_width} aria-label="Ширина паза, мм" onChange={(e) => setProfileDims({ ...profileDims, slot_width: e.target.value })} /><span className="param-unit">ширина, мм</span></div>
+              <div className="param-input op-field"><input inputMode="decimal" value={profileDims.slot_length} aria-label="Длина паза, мм" onChange={(e) => setProfileDims({ ...profileDims, slot_length: e.target.value })} /><span className="param-unit">длина, мм</span></div>
+            </>)}
+          </div>
+          {profileKind === "slot" && num(profileDims.slot_length) <= num(profileDims.slot_width) && (
+            <p className="op-pair">Длина должна быть больше ширины.</p>
+          )}
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={profileCenter.x} aria-label="Центр X, мм" onChange={(e) => setProfileCenter({ ...profileCenter, x: e.target.value })} /><span className="param-unit">ц. X</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={profileCenter.y} aria-label="Центр Y, мм" onChange={(e) => setProfileCenter({ ...profileCenter, y: e.target.value })} /><span className="param-unit">ц. Y</span></div>
+          </div>
+          <div className="op-row">
+            <select value={profileMode} aria-label="Режим выдавливания" onChange={(e) => setProfileMode(e.target.value as "add" | "cut")}>
+              <option value="add">Добавить объём</option>
+              <option value="cut">Вырезать</option>
+            </select>
+            {profileMode === "cut" && (
+              <label className="keep-tool">
+                <input type="checkbox" checked={profileThrough} onChange={(e) => setProfileThrough(e.target.checked)} />
+                Сквозной вырез
+              </label>
+            )}
+          </div>
+          {(profileMode === "add" || !profileThrough) && (
+            <div className="op-row">
+              <div className="param-input op-field"><input inputMode="decimal" value={profileDepth} aria-label="Глубина, мм" onChange={(e) => setProfileDepth(e.target.value)} /><span className="param-unit">глубина, мм</span></div>
+            </div>
+          )}
+          <button
+            className="btn" data-cmd="op.profile" aria-label="Выдавить профиль"
+            disabled={profileMode === "add" ? num(profileDepth) <= 0 : !targetPart}
+            title={profileMode === "cut" && !targetPart ? "Сначала создайте деталь" : "Выдавить профиль"}
+            onClick={() => {
+              const profile: Record<string, unknown> = { kind: profileKind, center: [num(profileCenter.x), num(profileCenter.y)] };
+              if (profileKind === "rectangle") { profile.width = num(profileDims.width); profile.height = num(profileDims.height); }
+              if (profileKind === "circle") profile.diameter = num(profileDims.diameter);
+              if (profileKind === "ring") { profile.outer_diameter = num(profileDims.outer_diameter); profile.inner_diameter = num(profileDims.inner_diameter); }
+              if (profileKind === "slot") { profile.width = num(profileDims.slot_width); profile.length = num(profileDims.slot_length); }
+              props.onProfileExtrude({
+                mode: profileMode,
+                plane: profilePlane,
+                profile,
+                depth: profileMode === "add" ? num(profileDepth) : profileThrough ? "through" : num(profileDepth),
+                target_id: profileMode === "cut" ? targetPart?.part_id : undefined,
+              });
+            }}
+          >
+            Выдавить
+          </button>
+        </div>
+
+        <div className="op-block">
           <span className="op-label">Переместить</span>
           <div className="op-row">
             {(["x", "y", "z"] as const).map((a) => (
@@ -421,6 +530,120 @@ export function ParamsPanel(props: Props) {
               Переместить
             </button>
           </div>
+        </div>
+
+        <div className="op-block">
+          <span className="op-label">Круговой массив</span>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="numeric" value={circCount} aria-label="Количество копий" onChange={(e) => setCircCount(e.target.value)} /><span className="param-unit">шт</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={circAngle} aria-label="Полный угол, градусы" onChange={(e) => setCircAngle(e.target.value)} /><span className="param-unit">°</span></div>
+          </div>
+          <div className="op-row">
+            {(["x", "y", "z"] as const).map((a) => (
+              <div className="param-input op-field" key={a}>
+                <input inputMode="decimal" value={circCenter[a]} aria-label={`Центр ${a.toUpperCase()}, мм`} onChange={(e) => setCircCenter({ ...circCenter, [a]: e.target.value })} />
+                <span className="param-unit">{a.toUpperCase()}</span>
+              </div>
+            ))}
+          </div>
+          <button
+            className="btn" data-cmd="op.array_circular" aria-label="Создать круговой массив"
+            disabled={!targetPart || parseInt(circCount, 10) < 2}
+            title={!targetPart ? "Сначала создайте деталь" : parseInt(circCount, 10) < 2 ? "Количество — не меньше 2" : "Создать круговой массив"}
+            onClick={() => props.onArrayCircular(parseInt(circCount, 10), num(circAngle), [num(circCenter.x), num(circCenter.y), num(circCenter.z)])}
+          >
+            Круговой массив
+          </button>
+        </div>
+
+        <div className="op-block">
+          <span className="op-label">Выровнять</span>
+          <div className="op-row">
+            <select value={alignAxis} aria-label="Ось выравнивания" onChange={(e) => setAlignAxis(e.target.value as "x" | "y" | "z")}>
+              <option value="x">X</option><option value="y">Y</option><option value="z">Z</option>
+            </select>
+            <select value={alignMode} aria-label="Режим выравнивания" onChange={(e) => setAlignMode(e.target.value as "center" | "min" | "max")}>
+              <option value="center">по центру</option>
+              <option value="min">по минимуму</option>
+              <option value="max">по максимуму</option>
+            </select>
+            <div className="param-input op-field"><input inputMode="decimal" value={alignValue} aria-label="Значение, мм" onChange={(e) => setAlignValue(e.target.value)} /><span className="param-unit">мм</span></div>
+            <button
+              className="btn" data-cmd="op.align" aria-label="Выровнять деталь"
+              disabled={!targetPart} title={!targetPart ? "Сначала создайте деталь" : "Выровнять деталь"}
+              onClick={() => props.onAlign(alignAxis, alignMode, num(alignValue))}
+            >
+              Выровнять
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="tool-section">
+        <h3 className="panel-section">Измерения</h3>
+        <button
+          className="btn" data-cmd="measure.run" aria-label="Обновить измерения"
+          disabled={!doc?.stats?.is_valid || props.measureBusy}
+          title={!doc?.stats?.is_valid ? "Сначала создайте деталь" : "Обновить измерения"}
+          onClick={props.onMeasure}
+        >
+          {props.measureBusy ? "Измерение…" : "Обновить измерения"}
+        </button>
+        {props.measureResult?.bbox && (
+          <div className="measure-result">
+            <p>
+              Габарит: {fmtNum(props.measureResult.bbox[3] - props.measureResult.bbox[0])} × {fmtNum(props.measureResult.bbox[4] - props.measureResult.bbox[1])} × {fmtNum(props.measureResult.bbox[5] - props.measureResult.bbox[2])} мм
+            </p>
+            {props.measureResult.volume != null && <p>Объём: {fmtNum(props.measureResult.volume)} мм³</p>}
+            <p>Тел: {doc?.stats?.solid_count ?? "—"}</p>
+            <p className="check-note">Источник: точная геометрия (BRep)</p>
+          </div>
+        )}
+        <button
+          className="btn" data-cmd="measure.run" aria-label="Измерить диаметр выбранной грани"
+          disabled={props.selectedFace == null || props.measureBusy}
+          title={props.selectedFace == null ? "Сначала выберите грань на сцене" : "Измерить диаметр грани"}
+          onClick={props.onMeasureFace}
+        >
+          Диаметр грани
+        </button>
+        {props.measureResult?.faceDiameter != null && (
+          <p className="measure-result">Диаметр грани {props.selectedFace}: {fmtNum(props.measureResult.faceDiameter)} мм</p>
+        )}
+        {props.measureResult?.faceError && (
+          <p className="error-inline" role="alert">{props.measureResult.faceError}</p>
+        )}
+        <div className="op-block">
+          <span className="op-label">Расстояние между точками</span>
+          <div className="op-row">
+            {(["x", "y", "z"] as const).map((a) => (
+              <div className="param-input op-field" key={`p0-${a}`}>
+                <input inputMode="decimal" value={distP0[a]} aria-label={`Точка 1, ${a.toUpperCase()}, мм`} onChange={(e) => setDistP0({ ...distP0, [a]: e.target.value })} />
+                <span className="param-unit">{a.toUpperCase()}₁</span>
+              </div>
+            ))}
+          </div>
+          <div className="op-row">
+            {(["x", "y", "z"] as const).map((a) => (
+              <div className="param-input op-field" key={`p1-${a}`}>
+                <input inputMode="decimal" value={distP1[a]} aria-label={`Точка 2, ${a.toUpperCase()}, мм`} onChange={(e) => setDistP1({ ...distP1, [a]: e.target.value })} />
+                <span className="param-unit">{a.toUpperCase()}₂</span>
+              </div>
+            ))}
+          </div>
+          <button
+            className="btn" data-cmd="measure.run" aria-label="Измерить расстояние"
+            disabled={!doc?.stats?.is_valid || props.measureBusy}
+            onClick={() => props.onMeasureDistance(
+              [num(distP0.x), num(distP0.y), num(distP0.z)],
+              [num(distP1.x), num(distP1.y), num(distP1.z)]
+            )}
+          >
+            Измерить расстояние
+          </button>
+          {props.measureResult?.distance != null && (
+            <p className="measure-result">Расстояние: {fmtNum(props.measureResult.distance)} мм</p>
+          )}
         </div>
       </section>
 

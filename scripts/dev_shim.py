@@ -133,13 +133,13 @@ class Doc:
     def build_params(self):
         if not self.parts:
             return {"template": None, "params": {}, "operations": []}
-        if len(self.parts) == 1 and not any(
-                o.get("op") not in ("fillet",) for o in self.operations):
-            # совместимость с одиночным шаблоном (фаска той же схемой)
-            return {"template": self.parts[0]["template"],
-                    "params": self.parts[0]["params"],
-                    "operations": self.operations}
-        return {"parts": self.parts, "operations": self.operations}
+        # единый v3-путь: реальные part_id во всех статусах и операциях
+        ops = []
+        for o in self.operations:
+            if o.get("op") == "fillet" and "part_id" not in o:
+                o = {**o, "part_id": self.parts[0]["part_id"]}
+            ops.append(o)
+        return {"parts": self.parts, "operations": ops}
 
     def rebuild(self):
         if not self.template:
@@ -172,6 +172,7 @@ def cmd_doc_create(a):
     d.parts = []
     d.expressions = {}
     d.operations = []
+    d._part_n = 0
     d.add_part(template, a.get("params") or {})
     d.commit()
     d.rebuild()

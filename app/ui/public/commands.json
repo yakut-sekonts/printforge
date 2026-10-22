@@ -287,6 +287,42 @@
       "availability": "requires_body",
       "disabled_reason": "Сначала создайте деталь",
       "params": []
+    },
+    {
+      "command_id": "op.profile",
+      "title": "Профиль и выдавливание",
+      "help_id": "profil-vydavlivanie",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": []
+    },
+    {
+      "command_id": "op.array_circular",
+      "title": "Круговой массив",
+      "help_id": "massiv-zerkalo-peremeshenie",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": []
+    },
+    {
+      "command_id": "op.align",
+      "title": "Выровнять",
+      "help_id": "massiv-zerkalo-peremeshenie",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": []
+    },
+    {
+      "command_id": "measure.run",
+      "title": "Измерения",
+      "help_id": "izmereniya",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": []
     }
   ]
 }

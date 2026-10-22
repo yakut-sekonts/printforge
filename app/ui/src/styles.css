@@ -521,3 +521,7 @@ mark { background: var(--pill-warning-bg); color: var(--accent-ink); border-radi
 .add-part > summary::-webkit-details-marker { display: none; }
 .add-part[open] > summary { background: var(--active); }
 .add-part-menu { margin-top: 6px; border: 1px solid var(--border); border-radius: var(--radius-control); padding: 4px; background: var(--surface); }
+
+/* ---------- v4: измерения ---------- */
+.measure-result { margin: 0; font-size: var(--fs-small); font-variant-numeric: tabular-nums; width: 100%; }
+.measure-result p { margin: 0 0 2px; }

@@ -482,6 +482,13 @@ def handle_build_v3(params):
                         "volume": p["shape"].volume,
                         "solid_count": len(p["shape"].solids())}
                        for pid, p in parts.items()]}
+    # дополнительные данные шаблона (case_volume и т.п.) для одиночной детали
+    if len(params.get("parts") or []) == 1:
+        p0 = params["parts"][0]
+        _, tex = TEMPLATES[p0["template"]][0](
+            merged_params(p0["template"], p0.get("params")))
+        for k, v in tex.items():
+            extra.setdefault(k, v)
     return compound, extra
 
 
