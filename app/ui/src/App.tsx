@@ -34,6 +34,7 @@ export default function App() {
   const [mesh, setMesh] = useState<MeshData | null>(null);
   const [computing, setComputing] = useState(false);
   const [selectedFace, setSelectedFace] = useState<number | null>(null);
+  const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [whatIsThis, setWhatIsThis] = useState(false);
   const [articleReq, setArticleReq] = useState<{ helpId: string; seq: number } | null>(null);
@@ -266,15 +267,66 @@ export default function App() {
     if (state) lessonEvent({ type: "params", state });
   }, [runBackend, lessonEvent]);
 
-  const applyField = useCallback(async (name: string, raw: string) => {
+  const applyField = useCallback(async (name: string, raw: string, partId?: string) => {
     const cur = docRef.current;
     if (!cur) return;
+    const part = partId ? cur.parts?.find((p) => p.part_id === partId) : cur.parts?.[0];
     let num: number;
-    try { num = evalExpression(raw, { ...cur.params }); }
+    try { num = evalExpression(raw, { ...(part?.params ?? cur.params) }); }
     catch (e) { setStatusMsg(`Ошибка выражения: ${(e as Error).message}`); return; }
-    const state = await runBackend(() => backend.docSetParameter(name, num, raw));
+    const state = await runBackend(() => backend.docSetParameter(name, num, raw, partId));
     if (state) lessonEvent({ type: "params", state });
   }, [runBackend, lessonEvent]);
+
+  // сброс выбора детали, если она исчезла из живых тел
+  useEffect(() => {
+    if (!selectedPartId) return;
+    const live = doc?.stats?.parts;
+    if (live && !live.some((p) => p.part_id === selectedPartId)) setSelectedPartId(null);
+  }, [doc, selectedPartId]);
+
+  const activePartId = useCallback((): string | undefined => {
+    const cur = docRef.current;
+    const live = cur?.stats?.parts;
+    if (selectedPartId && live?.some((p) => p.part_id === selectedPartId)) return selectedPartId;
+    return live?.[0]?.part_id ?? cur?.parts?.[0]?.part_id;
+  }, [selectedPartId]);
+
+  const addPart = useCallback(async (t: TemplateDef) => {
+    await runBackend(() => backend.docAddPart(t.template_id));
+  }, [runBackend]);
+
+  const runBoolean = useCallback(async (kind: "union" | "subtract" | "intersect", keepTool: boolean) => {
+    const live = docRef.current?.stats?.parts ?? [];
+    if (live.length < 2) return;
+    const target = live.find((p) => p.part_id === selectedPartId) ?? live[0];
+    const tool = live[(live.indexOf(target) + 1) % live.length];
+    await runBackend(() => backend.docBoolean(kind, target.part_id, tool.part_id, keepTool));
+  }, [runBackend, selectedPartId]);
+
+  const runArray = useCallback(async (count: number, step: [number, number, number]) => {
+    const id = activePartId();
+    if (!id) return;
+    await runBackend(() => backend.docArray(id, count, step));
+  }, [runBackend, activePartId]);
+
+  const runMirror = useCallback(async (plane: "XY" | "XZ" | "YZ") => {
+    const id = activePartId();
+    if (!id) return;
+    await runBackend(() => backend.docMirror(id, plane));
+  }, [runBackend, activePartId]);
+
+  const runSplit = useCallback(async (plane: "XY" | "XZ" | "YZ", offset: number) => {
+    const id = activePartId();
+    if (!id) return;
+    await runBackend(() => backend.docSplit(id, plane, offset));
+  }, [runBackend, activePartId]);
+
+  const runTransform = useCallback(async (translate: [number, number, number]) => {
+    const id = activePartId();
+    if (!id) return;
+    await runBackend(() => backend.docTransform(id, translate));
+  }, [runBackend, activePartId]);
 
   // ---------- скругление ----------
   const startFillet = useCallback(() => {
@@ -299,12 +351,12 @@ export default function App() {
       setStatusMsg("Радиус должен быть положительным числом");
       return;
     }
-    const state = await runBackend(() => backend.docFillet(f.selected!, radius));
+    const state = await runBackend(() => backend.docFillet(f.selected!, radius, activePartId()));
     if (state && !state.error) {
       cancelFillet();
       lessonEvent({ type: "operation", op: "fillet", radius });
     }
-  }, [runBackend, cancelFillet, lessonEvent]);
+  }, [runBackend, cancelFillet, lessonEvent, activePartId]);
 
   const clearErrorOrUndo = useCallback(() => {
     const code = docRef.current?.error?.code;
@@ -494,6 +546,8 @@ export default function App() {
           doc={doc}
           templates={templates}
           importedStats={importedStats}
+          selectedPartId={selectedPartId}
+          onSelectPart={setSelectedPartId}
           onCreateTemplate={(t) => void createFromTemplate(t)}
         />
         <main className="scene-area">
@@ -534,7 +588,14 @@ export default function App() {
           templates={templates}
           selectedFace={selectedFace}
           faceArea={faceAreaValue}
-          onApplyField={(n, r) => void applyField(n, r)}
+          onApplyField={(n, r, p) => void applyField(n, r, p)}
+          selectedPartId={selectedPartId}
+          onAddPart={(t) => void addPart(t)}
+          onBoolean={(k, keep) => void runBoolean(k, keep)}
+          onArray={(c, s) => void runArray(c, s)}
+          onMirror={(pl) => void runMirror(pl)}
+          onSplit={(pl, off) => void runSplit(pl, off)}
+          onTransform={(tr) => void runTransform(tr)}
           fillet={fillet}
           onStartFillet={startFillet}
           onSelectEdge={selectEdge}

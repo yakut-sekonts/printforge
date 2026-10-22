@@ -203,6 +203,90 @@
       "availability": "requires_body",
       "disabled_reason": "Сначала создайте деталь",
       "params": []
+    },
+    {
+      "command_id": "part.add",
+      "title": "Добавить деталь",
+      "help_id": "bulevy-operacii",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь из шаблона",
+      "params": []
+    },
+    {
+      "command_id": "op.union",
+      "title": "Объединить",
+      "help_id": "bulevy-operacii",
+      "shortcut": null,
+      "availability": "requires_two_bodies",
+      "disabled_reason": "Сначала добавьте вторую деталь",
+      "params": []
+    },
+    {
+      "command_id": "op.subtract",
+      "title": "Вычесть",
+      "help_id": "bulevy-operacii",
+      "shortcut": null,
+      "availability": "requires_two_bodies",
+      "disabled_reason": "Сначала добавьте вторую деталь",
+      "params": []
+    },
+    {
+      "command_id": "op.intersect",
+      "title": "Пересечь",
+      "help_id": "bulevy-operacii",
+      "shortcut": null,
+      "availability": "requires_two_bodies",
+      "disabled_reason": "Сначала добавьте вторую деталь",
+      "params": []
+    },
+    {
+      "command_id": "op.array",
+      "title": "Массив",
+      "help_id": "massiv-zerkalo-peremeshenie",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": [
+        {
+          "name": "count",
+          "unit": "шт",
+          "min": 2,
+          "desc": "Число элементов"
+        },
+        {
+          "name": "step",
+          "unit": "mm",
+          "desc": "Шаг по осям"
+        }
+      ]
+    },
+    {
+      "command_id": "op.mirror",
+      "title": "Зеркало",
+      "help_id": "massiv-zerkalo-peremeshenie",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": []
+    },
+    {
+      "command_id": "op.transform",
+      "title": "Переместить",
+      "help_id": "massiv-zerkalo-peremeshenie",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": []
+    },
+    {
+      "command_id": "op.split",
+      "title": "Разделить деталь",
+      "help_id": "razdelit-detalyu",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте деталь",
+      "params": []
     }
   ]
 }

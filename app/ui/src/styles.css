@@ -486,3 +486,38 @@ mark { background: var(--pill-warning-bg); color: var(--accent-ink); border-radi
 .import-preview { width: 100%; font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
 .import-preview p { margin: 0 0 8px; line-height: 1.45; }
 .export-formats { display: flex; gap: 6px; }
+
+/* ---------- v3: детали и операции ---------- */
+.part-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.part-row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px; width: 100%;
+  background: none; border: 1px solid transparent; border-radius: var(--radius-control);
+  padding: 6px 8px; cursor: pointer; text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.part-row:hover { background: var(--raised); }
+.part-row.part-selected { background: var(--active); border-color: var(--border); }
+.part-row-name { font-weight: 500; }
+.part-row-vol { font-size: var(--fs-small); color: var(--muted); }
+
+.op-block { display: flex; flex-direction: column; gap: 6px; width: 100%; padding-top: 8px; border-top: 1px solid var(--rule); }
+.op-label { font-size: var(--fs-small); color: var(--muted); font-weight: 500; }
+.op-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.op-row select {
+  height: var(--control-height);
+  border: 1px solid var(--control); border-radius: var(--radius-control);
+  background: var(--surface); font-size: var(--fs-small);
+}
+.op-field { flex: 1; min-width: 64px; }
+.op-field input { padding: 0 6px; font-size: var(--fs-small); }
+.op-pair { margin: 0; font-size: var(--fs-small); color: var(--muted); }
+.keep-tool { display: flex; align-items: center; gap: 6px; font-size: var(--fs-small); color: var(--muted); cursor: pointer; }
+
+.add-part { width: 100%; }
+.add-part > summary {
+  list-style: none; user-select: none;
+  display: inline-flex; align-items: center;
+}
+.add-part > summary::-webkit-details-marker { display: none; }
+.add-part[open] > summary { background: var(--active); }
+.add-part-menu { margin-top: 6px; border: 1px solid var(--border); border-radius: var(--radius-control); padding: 4px; background: var(--surface); }

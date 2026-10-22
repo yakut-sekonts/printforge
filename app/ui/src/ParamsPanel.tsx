@@ -15,7 +15,15 @@ interface Props {
   templates: TemplateDef[];
   selectedFace: number | null;
   faceArea: number | null;
-  onApplyField: (name: string, raw: string) => void;
+  selectedPartId: string | null;
+  onApplyField: (name: string, raw: string, partId?: string) => void;
+  // операции над деталями
+  onAddPart: (t: TemplateDef) => void;
+  onBoolean: (kind: "union" | "subtract" | "intersect", keepTool: boolean) => void;
+  onArray: (count: number, step: [number, number, number]) => void;
+  onMirror: (plane: "XY" | "XZ" | "YZ") => void;
+  onSplit: (plane: "XY" | "XZ" | "YZ", offset: number) => void;
+  onTransform: (translate: [number, number, number]) => void;
   // скругление
   fillet: FilletUi;
   onStartFillet: () => void;
@@ -61,8 +69,17 @@ function sameEdge(a: EdgeRef, b: EdgeRef): boolean {
 }
 
 export function ParamsPanel(props: Props) {
-  const { doc, templates } = props;
-  const template = templates.find((t) => t.template_id === doc?.template) ?? null;
+  const { doc, templates, selectedPartId } = props;
+  // активная деталь: выбранная или первая
+  const activePart = doc?.parts?.find((p) => p.part_id === selectedPartId) ?? doc?.parts?.[0] ?? null;
+  const isFirstPart = !activePart || doc?.parts?.[0]?.part_id === activePart.part_id;
+  const template = templates.find((t) => t.template_id === (activePart?.template ?? doc?.template)) ?? null;
+  const paramSource: Record<string, number> = activePart?.params ?? doc?.params ?? {};
+  const exprFor = (name: string, def: number): string => {
+    if (isFirstPart && doc?.expressions?.[name]) return doc.expressions[name];
+    const v = paramSource[name];
+    return v != null ? String(v) : String(def);
+  };
   const [values, setValues] = useState<Record<string, string>>({});
   const [exprError, setExprError] = useState<string | null>(null);
   const [multiHint, setMultiHint] = useState(false);
@@ -70,36 +87,41 @@ export function ParamsPanel(props: Props) {
   const [printer, setPrinter] = useState(loadPrinter);
   const [importPath, setImportPath] = useState("~/model.step");
   const [importFormat, setImportFormat] = useState<"step" | "stl">("step");
+  const [keepTool, setKeepTool] = useState(false);
+  const [arrayCount, setArrayCount] = useState("2");
+  const [arrayStep, setArrayStep] = useState({ x: "50", y: "0", z: "0" });
+  const [mirrorPlane, setMirrorPlane] = useState<"XY" | "XZ" | "YZ">("YZ");
+  const [splitPlane, setSplitPlane] = useState<"XY" | "XZ" | "YZ">("XY");
+  const [splitOffset, setSplitOffset] = useState("0");
+  const [translate, setTranslate] = useState({ x: "0", y: "0", z: "0" });
 
-  // значения полей из документа
+  // значения полей из активной детали
   useEffect(() => {
     if (!doc || !template) return;
     const next: Record<string, string> = {};
-    for (const p of template.params) {
-      next[p.name] = doc.expressions?.[p.name] ??
-        (doc.params?.[p.name] != null ? String(doc.params[p.name]) : String(p.default));
-    }
+    for (const p of template.params) next[p.name] = exprFor(p.name, p.default);
     setValues(next);
     setMultiHint(false);
-  }, [doc, template]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, template, selectedPartId]);
 
   const changedFields = useMemo(() => {
     if (!doc || !template) return [];
     return template.params.filter((p) => {
-      const cur = doc.expressions?.[p.name] ??
-        (doc.params?.[p.name] != null ? String(doc.params[p.name]) : String(p.default));
+      const cur = exprFor(p.name, p.default);
       return (values[p.name] ?? cur).trim() !== cur;
     }).map((p) => p.name);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [values, doc, template]);
 
   const applyOne = (name: string, raw: string) => {
-    const vars: Record<string, number> = { ...(doc?.params ?? {}) };
+    const vars: Record<string, number> = { ...paramSource };
     try {
       const v = evalExpression(raw.trim(), vars);
       if (v <= 0) { setExprError(`Значение должно быть больше нуля`); return; }
       setExprError(null);
       setMultiHint(false);
-      props.onApplyField(name, raw.trim());
+      props.onApplyField(name, raw.trim(), activePart?.part_id);
     } catch (e) {
       setExprError(e instanceof Error ? e.message : String(e));
     }
@@ -117,12 +139,20 @@ export function ParamsPanel(props: Props) {
     const raw = (values[name] ?? "").trim();
     if (!raw || /^-?\d+([.,]\d+)?$/.test(raw)) return null;
     try {
-      const v = evalExpression(raw, { ...(doc?.params ?? {}) });
+      const v = evalExpression(raw, { ...paramSource });
       return `= ${fmtNum(v)} мм`;
     } catch {
       return "ошибка в выражении";
     }
   };
+
+  const liveParts = doc?.stats?.parts ?? [];
+  const targetPart = liveParts.find((p) => p.part_id === selectedPartId) ?? liveParts[0] ?? null;
+  const toolPart = targetPart
+    ? liveParts[(liveParts.indexOf(targetPart) + 1) % liveParts.length] ?? null
+    : null;
+  const booleanReady = liveParts.length >= 2 && !!targetPart && !!toolPart;
+  const num = (s: string) => Number(s.replace(",", ".")) || 0;
 
   const err: GeoError | null = doc?.error ?? null;
   const isFilletError = err?.code === "fillet_failed" || err?.code === "reselect_required";
@@ -140,7 +170,9 @@ export function ParamsPanel(props: Props) {
 
   return (
     <aside className="right-panel" aria-label="Параметры и инструменты">
-      <h2 className="panel-section">Параметры{template ? ` — ${template.title}` : ""}</h2>
+      <h2 className="panel-section">
+        Параметры{template ? ` — ${template.title}` : ""}{activePart && liveParts.length > 1 ? ` (${activePart.name})` : ""}
+      </h2>
 
       {err && (
         <div className="error-box" role="alert">
@@ -272,6 +304,124 @@ export function ParamsPanel(props: Props) {
             </div>
           </div>
         )}
+      </section>
+
+      <section className="tool-section">
+        <h3 className="panel-section">Операции</h3>
+        <details className="add-part">
+          <summary className="btn" data-cmd="part.add" aria-label="Добавить деталь">Добавить деталь</summary>
+          <ul className="template-list add-part-menu">
+            {templates.map((t) => (
+              <li key={t.template_id}>
+                <button className="template-row" data-cmd="part.add" aria-label={`Добавить: ${t.title}`} onClick={() => props.onAddPart(t)}>
+                  <span className="template-title">{t.title}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
+
+        <div className="op-block">
+          <div className="op-row">
+            {([["union", "Объединить"], ["subtract", "Вычесть"], ["intersect", "Пересечь"]] as const).map(([kind, label]) => (
+              <button
+                key={kind} className="btn" data-cmd={`op.${kind}`}
+                aria-label={label}
+                disabled={!booleanReady}
+                title={booleanReady ? label : "Сначала добавьте вторую деталь"}
+                onClick={() => props.onBoolean(kind, keepTool)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <label className="keep-tool">
+            <input type="checkbox" checked={keepTool} onChange={(e) => setKeepTool(e.target.checked)} />
+            Сохранить инструмент
+          </label>
+          {booleanReady && targetPart && toolPart && (
+            <p className="op-pair">Основное: {targetPart.name} · Инструмент: {toolPart.name}</p>
+          )}
+        </div>
+
+        <div className="op-block">
+          <span className="op-label">Массив</span>
+          <div className="op-row">
+            <div className="param-input op-field">
+              <input inputMode="numeric" value={arrayCount} aria-label="Количество копий" onChange={(e) => setArrayCount(e.target.value)} />
+              <span className="param-unit">шт</span>
+            </div>
+            {(["x", "y", "z"] as const).map((a) => (
+              <div className="param-input op-field" key={a}>
+                <input inputMode="decimal" value={arrayStep[a]} aria-label={`Шаг ${a.toUpperCase()}, мм`} onChange={(e) => setArrayStep({ ...arrayStep, [a]: e.target.value })} />
+                <span className="param-unit">{a.toUpperCase()}</span>
+              </div>
+            ))}
+          </div>
+          <button
+            className="btn" data-cmd="op.array" aria-label="Создать массив"
+            disabled={!targetPart || parseInt(arrayCount, 10) < 2}
+            title={!targetPart ? "Сначала создайте деталь" : parseInt(arrayCount, 10) < 2 ? "Количество — не меньше 2" : "Создать массив"}
+            onClick={() => props.onArray(parseInt(arrayCount, 10), [num(arrayStep.x), num(arrayStep.y), num(arrayStep.z)])}
+          >
+            Массив
+          </button>
+        </div>
+
+        <div className="op-block">
+          <span className="op-label">Зеркало</span>
+          <div className="op-row">
+            <select value={mirrorPlane} aria-label="Плоскость зеркала" onChange={(e) => setMirrorPlane(e.target.value as "XY" | "XZ" | "YZ")}>
+              <option value="XY">XY</option><option value="XZ">XZ</option><option value="YZ">YZ</option>
+            </select>
+            <button
+              className="btn" data-cmd="op.mirror" aria-label="Зеркалировать деталь"
+              disabled={!targetPart} title={!targetPart ? "Сначала создайте деталь" : "Зеркалировать"}
+              onClick={() => props.onMirror(mirrorPlane)}
+            >
+              Зеркало
+            </button>
+          </div>
+        </div>
+
+        <div className="op-block">
+          <span className="op-label">Разделить деталь</span>
+          <div className="op-row">
+            <select value={splitPlane} aria-label="Плоскость разреза" onChange={(e) => setSplitPlane(e.target.value as "XY" | "XZ" | "YZ")}>
+              <option value="XY">XY</option><option value="XZ">XZ</option><option value="YZ">YZ</option>
+            </select>
+            <div className="param-input op-field">
+              <input inputMode="decimal" value={splitOffset} aria-label="Смещение плоскости, мм" onChange={(e) => setSplitOffset(e.target.value)} />
+              <span className="param-unit">мм</span>
+            </div>
+            <button
+              className="btn" data-cmd="op.split" aria-label="Разделить деталь"
+              disabled={!targetPart} title={!targetPart ? "Сначала создайте деталь" : "Разделить деталь"}
+              onClick={() => props.onSplit(splitPlane, num(splitOffset))}
+            >
+              Разделить
+            </button>
+          </div>
+        </div>
+
+        <div className="op-block">
+          <span className="op-label">Переместить</span>
+          <div className="op-row">
+            {(["x", "y", "z"] as const).map((a) => (
+              <div className="param-input op-field" key={a}>
+                <input inputMode="decimal" value={translate[a]} aria-label={`Сдвиг ${a.toUpperCase()}, мм`} onChange={(e) => setTranslate({ ...translate, [a]: e.target.value })} />
+                <span className="param-unit">{a.toUpperCase()}, мм</span>
+              </div>
+            ))}
+            <button
+              className="btn" data-cmd="op.transform" aria-label="Переместить деталь"
+              disabled={!targetPart} title={!targetPart ? "Сначала создайте деталь" : "Переместить деталь"}
+              onClick={() => props.onTransform([num(translate.x), num(translate.y), num(translate.z)])}
+            >
+              Переместить
+            </button>
+          </div>
+        </div>
       </section>
 
       <section className="tool-section">

@@ -100,9 +100,10 @@ const TEMPLATE_BLURBS: Record<string, string> = {
   case_with_lid: "Корпус со съёмной крышкой и регулируемым зазором.",
 };
 
-export function LeftPanel({ doc, templates, importedStats, onCreateTemplate }: LeftPanelProps) {
+export function LeftPanel({ doc, templates, importedStats, selectedPartId, onSelectPart, onCreateTemplate }: LeftPanelProps) {
   const p = doc?.params;
   const s = doc?.stats;
+  const liveParts = s?.parts;
   const template = templates.find((t) => t.template_id === doc?.template);
   const isCase = doc?.template === "case_with_lid";
   return (
@@ -127,7 +128,23 @@ export function LeftPanel({ doc, templates, importedStats, onCreateTemplate }: L
       </section>
       <section>
         <h2 className="panel-section">Детали</h2>
-        {s?.is_valid && template ? (
+        {liveParts && liveParts.length > 0 ? (
+          <ul className="part-list">
+            {liveParts.map((part) => (
+              <li key={part.part_id}>
+                <button
+                  className={`part-row ${selectedPartId === part.part_id ? "part-selected" : ""}`}
+                  data-cmd="part.select"
+                  aria-label={`Деталь «${part.name}», объём ${fmt(part.volume)} мм³`}
+                  onClick={() => onSelectPart(part.part_id)}
+                >
+                  <span className="part-row-name">{part.name}</span>
+                  <span className="part-row-vol">{fmt(part.volume)} мм³</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : s?.is_valid && template ? (
           <div className="part-card" data-cmd={template.command_id} aria-label={`Деталь «${template.title}»`}>
             <div className="part-name"><IconPlate /> {template.title}</div>
             {isCase && s.case_volume != null && s.lid_volume != null ? (

@@ -394,6 +394,13 @@ def build_any(params):
 
 def handle_build(params):
     part, extra = build_any(params)
+    if "parts" not in extra:
+        # одиночный шаблон: синтезируем запись живого тела для списка деталей
+        extra["parts"] = [{"part_id": "part-1",
+                           "name": (params or {}).get("template",
+                                                     "plate_with_holes"),
+                           "volume": part.volume,
+                           "solid_count": len(part.solids())}]
     return {"stats": stats_of(part, extra),
             "mesh": mesh_resource(part, "model")}
 
