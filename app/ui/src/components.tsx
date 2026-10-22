@@ -50,27 +50,29 @@ export function TopBar({ commands, doc, docName, onCommand }: TopBarProps) {
         </h1>
       </div>
       <nav className="topbar-actions" aria-label="Основные действия">
-        {TOPBAR_IDS.map((id) => {
-          const c = get(id);
-          if (!c) return null;
-          const enabled = cmdEnabled(c, doc);
-          const title = !enabled && c.disabled_reason ? `${c.title} — ${c.disabled_reason}` : c.title;
-          return (
-            <button
-              key={id}
-              className="btn"
-              data-cmd={id}
-              aria-label={c.title}
-              title={title}
-              disabled={!enabled}
-              onClick={() => onCommand(id)}
-            >
-              {TOPBAR_ICONS[id]}
-              <span>{c.title}</span>
-              {c.shortcut && <kbd>{c.shortcut.replace("CmdOrCtrl", "⌘").replace("Shift", "⇧").replaceAll("+", "")}</kbd>}
-            </button>
-          );
-        })}
+        <div className="topbar-scroll">
+          {TOPBAR_IDS.map((id) => {
+            const c = get(id);
+            if (!c) return null;
+            const enabled = cmdEnabled(c, doc);
+            const title = !enabled && c.disabled_reason ? `${c.title} — ${c.disabled_reason}` : c.title;
+            return (
+              <button
+                key={id}
+                className="btn"
+                data-cmd={id}
+                aria-label={c.title}
+                title={title}
+                disabled={!enabled}
+                onClick={() => onCommand(id)}
+              >
+                {TOPBAR_ICONS[id]}
+                <span>{c.title}</span>
+                {c.shortcut && <kbd>{c.shortcut.replace("CmdOrCtrl", "⌘").replace("Shift", "⇧").replaceAll("+", "")}</kbd>}
+              </button>
+            );
+          })}
+        </div>
         <span className="topbar-sep" aria-hidden />
         <button className="btn" data-cmd="app.help.what_is_this" aria-label="Что это?" title="Что это? (Shift+Escape)" onClick={() => onCommand("app.help.what_is_this")}>
           <IconCursorQuestion />
