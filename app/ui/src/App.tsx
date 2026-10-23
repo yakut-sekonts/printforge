@@ -178,35 +178,39 @@ export default function App() {
     checks?: { id: string; status: string }[];
   }) => {
     const run = lessonRef.current;
-    if (!run || run.paused || run.stepIndex >= run.lesson.steps.length) return;
-    const step = run.lesson.steps[run.stepIndex];
-    const check = step.check;
-    let ok = false;
-    switch (check.type) {
-      case "camera_rotated": ok = ev.type === "camera_rotated"; break;
-      case "camera_zoomed": ok = ev.type === "camera_zoomed"; break;
-      case "command": ok = ev.type === "command" && ev.command_id === check.command_id; break;
-      case "face_selected": ok = ev.type === "face_selected"; break;
-      case "params": ok = ev.state != null && checkParams(check, ev.state); break;
-      case "saved": ok = ev.type === "saved"; break;
-      case "reopened": ok = ev.type === "reopened" && (!check.params || (ev.state != null && checkParams(check, ev.state))); break;
-      case "exported": ok = ev.type === "exported"; break;
-      case "operation":
-        ok = ev.type === "operation" && ev.op === check.op
-          && (check.radius == null || Math.abs((ev.radius ?? -1) - check.radius) < 1e-9);
-        break;
-      case "error_shown": ok = ev.type === "error_shown" && (!check.code || ev.code === check.code); break;
-      case "imported": ok = ev.type === "imported" && (!check.mode || ev.mode === check.mode); break;
-      case "check_result":
-        ok = ev.type === "check_result"
-          && (ev.checks ?? []).some((c) => c.id === check.id && c.status === check.status);
-        break;
+    if (!run || run.paused) return;
+    const matches = (check: (typeof run.lesson.steps)[number]["check"]): boolean => {
+      switch (check.type) {
+        case "camera_rotated": return ev.type === "camera_rotated";
+        case "camera_zoomed": return ev.type === "camera_zoomed";
+        case "command": return ev.type === "command" && ev.command_id === check.command_id;
+        case "face_selected": return ev.type === "face_selected";
+        case "params": return ev.state != null && checkParams(check, ev.state);
+        case "saved": return ev.type === "saved";
+        case "reopened": return ev.type === "reopened" && (!check.params || (ev.state != null && checkParams(check, ev.state)));
+        case "exported": return ev.type === "exported";
+        case "operation":
+          return ev.type === "operation" && ev.op === check.op
+            && (check.radius == null || Math.abs((ev.radius ?? -1) - check.radius) < 1e-9);
+        case "error_shown": return ev.type === "error_shown" && (!check.code || ev.code === check.code);
+        case "imported": return ev.type === "imported" && (!check.mode || ev.mode === check.mode);
+        case "check_result":
+          return ev.type === "check_result"
+            && (ev.checks ?? []).some((c) => c.id === check.id && c.status === check.status);
+        default: return false;
+      }
+    };
+    // событие может закрыть несколько подряд идущих уже выполненных шагов
+    let cur = run;
+    let progressed = false;
+    while (cur.stepIndex < cur.lesson.steps.length
+           && matches(cur.lesson.steps[cur.stepIndex].check)) {
+      const statuses = [...cur.statuses];
+      statuses[cur.stepIndex] = "done";
+      cur = advanceIfDone({ ...cur, statuses });
+      progressed = true;
     }
-    if (ok) {
-      const statuses = [...run.statuses];
-      statuses[run.stepIndex] = "done";
-      setLessonRun(advanceIfDone({ ...run, statuses }));
-    }
+    if (progressed) setLessonRun(cur);
   }, [advanceIfDone, checkParams]);
 
   useEffect(() => {
@@ -459,7 +463,8 @@ export default function App() {
         // первый проход: показываем габарит и спрашиваем единицы
         setImportPreview(res);
       } else {
-        setMesh(res.mesh);
+        const meshData = await backend.docGetImportedMesh(res.mesh.path);
+        setMesh(meshData);
         setImportedStats(res.stats);
         setImportPreview(null);
         setSelectedFace(null);

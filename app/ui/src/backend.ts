@@ -90,6 +90,7 @@ export const backend = {
   docRedo: () => call<DocState>("doc_redo"),
   docGetState: () => call<DocState>("doc_get_state"),
   docGetMesh: () => call<MeshData>("doc_get_mesh"),
+  docGetImportedMesh: (path: string) => call<MeshData>("doc_get_imported_mesh", { path }),
   docSave: (path: string) => call<DocState>("doc_save", { path }),
   docOpen: (path: string) => call<DocState>("doc_open", { path }),
   docExport: (path: string, format: "stl" | "step" | "3mf", linearDeflection?: number) =>

@@ -36,8 +36,10 @@ export interface PartStats {
 export interface DocStats {
   volume: number;
   solid_count: number;
-  face_count: number;
-  bbox: [number, number, number, number, number, number];
+  face_count: number | null;
+  bbox: [number, number, number, number, number, number] | null;
+  bbox_mesh?: number[];
+  triangle_count?: number | null;
   is_valid: boolean;
   edges?: EdgeRef[];
   hole_centers?: [number, number][];
@@ -89,9 +91,18 @@ export interface ExportResult {
   stats: DocStats;
 }
 
+export interface MeshResource {
+  path: string;
+  bytes: number;
+  sha256: string;
+  vertex_count: number;
+  triangle_count: number;
+  face_ranges: { face_index: number; solid_index?: number; tri_start: number; tri_count: number }[];
+}
+
 export interface ImportResult {
   stats: DocStats;
-  mesh: MeshData;
+  mesh: MeshResource;
   mode: "brep" | "mesh";
 }
 

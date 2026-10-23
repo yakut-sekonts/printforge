@@ -178,7 +178,7 @@ export function LeftPanel({ doc, templates, importedStats, selectedPartId, onSel
           <div className="part-card">
             <div className="part-name">Импортированная модель (сетка)</div>
             <div className="part-params">
-              Треугольников: {importedStats.face_count}.
+              Треугольников: {importedStats.triangle_count ?? importedStats.face_count}.
               Точные операции для сетки недоступны.
             </div>
           </div>

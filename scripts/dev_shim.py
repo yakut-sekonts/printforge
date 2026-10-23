@@ -340,6 +340,15 @@ def cmd_doc_get_state(a):
     return doc().state(ACTIVE[0])
 
 
+def cmd_doc_get_imported_mesh(a):
+    data = Path(a["path"]).read_bytes()
+    nv, nt = struct.unpack_from("<II", data)
+    pos = list(struct.unpack_from(f"<{nv*3}f", data, 8))
+    idx = list(struct.unpack_from(f"<{nt*3}I", data, 8 + nv * 12))
+    return {"vertex_count": nv, "triangle_count": nt, "positions": pos,
+            "indices": idx, "face_ranges": []}
+
+
 def cmd_doc_get_mesh(a):
     if not doc().mesh:
         raise geo_error("no_model", "модель ещё не построена")
@@ -465,6 +474,7 @@ HANDLERS = {
     "doc_redo": cmd_doc_redo,
     "doc_get_state": cmd_doc_get_state,
     "doc_get_mesh": cmd_doc_get_mesh,
+    "doc_get_imported_mesh": cmd_doc_get_imported_mesh,
     "doc_save": cmd_doc_save,
     "doc_open": cmd_doc_open,
     "doc_export": cmd_doc_export,

@@ -199,6 +199,7 @@ export function ParamsPanel(props: Props) {
   };
 
   const previewBbox = props.importPreview?.stats?.bbox;
+  const previewExt = props.importPreview?.stats?.bbox_mesh;
 
   return (
     <aside className="right-panel" aria-label="Параметры и инструменты">
@@ -712,10 +713,12 @@ export function ParamsPanel(props: Props) {
           </button>
         ) : (
           <div className="import-preview">
-            {importFormat === "stl" && previewBbox ? (
+            {importFormat === "stl" && (previewBbox || previewExt) ? (
               <>
                 <p>
-                  Габарит сетки: {fmtNum(previewBbox[3] - previewBbox[0])} × {fmtNum(previewBbox[4] - previewBbox[1])} × {fmtNum(previewBbox[5] - previewBbox[2])}.
+                  Габарит сетки: {previewBbox
+                    ? `${fmtNum(previewBbox[3] - previewBbox[0])} × ${fmtNum(previewBbox[4] - previewBbox[1])} × ${fmtNum(previewBbox[5] - previewBbox[2])}`
+                    : `${fmtNum(previewExt![0])} × ${fmtNum(previewExt![1])} × ${fmtNum(previewExt![2])}`}.
                   Выберите единицы исходного файла:
                 </p>
                 <div className="fillet-actions">
