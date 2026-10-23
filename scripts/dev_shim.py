@@ -15,6 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 WORKER = ROOT / "backend" / "worker.py"
 PYTHON = ROOT / "backend" / ".venv" / "bin" / "python"
+sys.path.insert(0, str(ROOT / "scripts"))
+import ai_planner
 
 _worker = None
 _req_n = 0
@@ -438,6 +440,82 @@ def cmd_print_check(a):
     return worker_call("print_check", p, d.revision)
 
 
+def _apply_plan_ops_to(d, ops):
+    """Применить проверенные операции плана к документу d как один снимок."""
+    for op in ops:
+        cid = op["command_id"]
+        params = op["parameters"]
+        if cid == "part.create.from_template":
+            d.parts = []
+            d.expressions = {}
+            d.operations = []
+            d._part_n = 0
+            d.add_part(params["template"], params.get("params") or {})
+        elif cid == "parameter.set":
+            part = next(p for p in d.parts if p["part_id"] == op["target_id"])
+            part["params"][params["name"]] = float(params["value"])
+        elif cid == "op.fillet":
+            d.operations = [o for o in d.operations if o.get("op") != "fillet"]
+            fop = {"op": "fillet", "radius": float(params["radius"]),
+                   "edge_ref": params.get("edge_ref")}
+            tid = op.get("target_id") or (d.parts[0]["part_id"] if d.parts else None)
+            if tid:
+                fop["part_id"] = tid
+            d.operations.append(fop)
+
+
+def cmd_doc_transaction(a):
+    """Единая транзакция (DOC-004): preview на копии либо apply одним шагом
+    истории. Операции — уже провалидированный декларативный набор."""
+    d = doc()
+    base = a.get("base_revision", d.revision)
+    if base != d.revision:
+        raise geo_error("plan_stale",
+                        "Документ изменился, пока формировалось предложение. Пересчитайте.")
+    ops = a.get("operations") or []
+    if not ops:
+        raise geo_error("plan_invalid", "Пустой набор операций.")
+    if a.get("mode", "preview") == "preview":
+        tmp = copy.deepcopy(d)
+        try:
+            _apply_plan_ops_to(tmp, ops)
+            tmp.rebuild()
+        except Exception as e:  # noqa: BLE001
+            raise geo_error("geometry_error", f"Предпросмотр не удался: {e}")
+        return {"mode": "preview", "stats": tmp.stats, "error": tmp.error,
+                "parts": tmp.parts}
+    # apply: одна запись истории на весь пакет
+    _apply_plan_ops_to(d, ops)
+    d.commit()
+    d.rebuild()
+    if d.error:
+        d.history.pop()
+        d.index -= 1
+        d.restore(d.history[d.index])
+        d.dirty = True
+    return d.state(ACTIVE[0])
+
+
+def cmd_ai_providers(a):
+    return ai_planner.provider_info()
+
+
+def cmd_ai_plan(a):
+    d = doc()
+    text = (a.get("text") or "").strip()
+    if not text:
+        raise geo_error("bad_request", "Пустой запрос.")
+    return ai_planner.ai_plan(
+        text, d,
+        lambda ops, base: cmd_doc_transaction(
+            {"operations": ops, "base_revision": base, "mode": "preview"}))
+
+
+def cmd_ai_chat(a):
+    return {"content": ai_planner.ai_chat(a.get("messages") or [],
+                                          bool(a.get("want_json")))}
+
+
 def cmd_doc_new_tutorial(a):
     DOCS["tutorial"] = Doc()
     ACTIVE[0] = "tutorial"
@@ -491,6 +569,10 @@ HANDLERS = {
     "doc_array_circular": cmd_doc_array_circular,
     "doc_align": cmd_doc_align,
     "measure": cmd_measure,
+    "doc_transaction": cmd_doc_transaction,
+    "ai_providers": cmd_ai_providers,
+    "ai_plan": cmd_ai_plan,
+    "ai_chat": cmd_ai_chat,
     "doc_new_tutorial": cmd_doc_new_tutorial,
     "doc_switch_slot": cmd_doc_switch_slot,
 }

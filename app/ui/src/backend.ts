@@ -83,6 +83,11 @@ export const backend = {
     call<DocState>("doc_align", { part_id: partId, axis, align, value }),
   measure: (args: { type: "bbox" | "volume" | "face_diameter" | "distance"; face_index?: number; p0?: [number, number, number]; p1?: [number, number, number] }) =>
     call<Record<string, unknown>>(`measure`, args as Record<string, unknown>),
+  aiProviders: () => call<AiProviders>("ai_providers"),
+  aiPlan: (text: string, signal?: AbortSignal) =>
+    call<AiPlanResponse>("ai_plan", { text }, signal),
+  docTransaction: (args: { operations: AiOperation[]; base_revision: number; mode: "apply" | "preview" }) =>
+    call<DocState>("doc_transaction", args as unknown as Record<string, unknown>),
   docFillet: (edge_ref: EdgeRef, radius: number, partId?: string) =>
     call<DocState>("doc_fillet", { edge_ref, radius, part_id: partId }),
   docClearError: () => call<DocState>("doc_clear_error"),

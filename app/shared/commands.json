@@ -323,6 +323,23 @@
       "availability": "requires_body",
       "disabled_reason": "Сначала создайте деталь",
       "params": []
+    },
+    {
+      "command_id": "ai.panel.open",
+      "title": "AI-помощник",
+      "help_id": "ai-pomoshchnik",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "ai.plan",
+      "title": "Предложить план (AI)",
+      "help_id": "ai-pomoshchnik",
+      "shortcut": null,
+      "availability": "requires_ai",
+      "disabled_reason": "AI-помощник выключен в настройках",
+      "params": []
     }
   ]
 }

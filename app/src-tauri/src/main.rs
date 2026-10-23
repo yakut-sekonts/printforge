@@ -1,6 +1,8 @@
 // PrintForge M2: ядро приложения.
 // Документ (шаблон, параметры, операции, история) — authoritative в этом
 // процессе; геометрия — отдельный worker-процесс (JSON Lines stdio).
+mod ai;
+
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
@@ -527,6 +529,174 @@ async fn measure(app: tauri::AppHandle, measure_type: String, extra: Option<Valu
         }
     }
     worker_call(&app, "measure", call, revision).await
+}
+
+fn apply_plan_ops(snap: &mut Snapshot, ops: &[Value]) {
+    for op in ops {
+        let cid = op.get("command_id").and_then(Value::as_str).unwrap_or("");
+        let params = op.get("parameters").cloned().unwrap_or(json!({}));
+        match cid {
+            "part.create.from_template" => {
+                let template = params.get("template").and_then(Value::as_str).unwrap_or("");
+                let mut pmap = BTreeMap::new();
+                if let Some(obj) = params.get("params").and_then(Value::as_object) {
+                    for (k, v) in obj {
+                        if let Some(n) = v.as_f64() {
+                            pmap.insert(k.clone(), n);
+                        }
+                    }
+                }
+                snap.parts = vec![make_part(1, template, pmap)];
+                snap.part_n = 1;
+                snap.operations = vec![];
+                snap.expressions = BTreeMap::new();
+            }
+            "parameter.set" => {
+                let tid = op.get("target_id").and_then(Value::as_str).unwrap_or("");
+                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+                let value = params.get("value").and_then(Value::as_f64).unwrap_or(0.0);
+                if let Some(part) = snap.parts.iter_mut().find(|p| {
+                    p.get("part_id").and_then(Value::as_str) == Some(tid)
+                }) {
+                    part["params"][name] = json!(value);
+                }
+            }
+            "op.fillet" => {
+                let radius = params.get("radius").and_then(Value::as_f64).unwrap_or(0.0);
+                snap.operations.retain(|o| o.get("op") != Some(&json!("fillet")));
+                let tid = op.get("target_id").and_then(Value::as_str)
+                    .or_else(|| snap.parts.first().and_then(|p| p.get("part_id")).and_then(Value::as_str));
+                snap.operations.push(json!({
+                    "op": "fillet", "radius": radius,
+                    "edge_ref": params.get("edge_ref"),
+                    "part_id": tid,
+                }));
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tauri::command]
+async fn doc_transaction(
+    app: tauri::AppHandle,
+    operations: Vec<Value>,
+    base_revision: Option<u64>,
+    mode: Option<String>,
+) -> Result<Value, String> {
+    let (doc_id, revision) = with_store(|s| {
+        let doc = active_doc(s);
+        (doc.doc_id, doc.revision)
+    })
+    .await;
+    let _ = doc_id;
+    if base_revision.unwrap_or(revision) != revision {
+        return Err(geo_err("plan_stale",
+            "Документ изменился, пока формировалось предложение. Пересчитайте."));
+    }
+    if operations.is_empty() {
+        return Err(geo_err("plan_invalid", "Пустой набор операций."));
+    }
+    if mode.as_deref() == Some("apply") {
+        with_store(|s| {
+            let doc = active_doc(s);
+            let mut next = doc.snap.clone();
+            apply_plan_ops(&mut next, &operations);
+            doc.commit(next);
+        })
+        .await;
+        rebuild_active(&app).await;
+        with_store(|s| {
+            let doc = active_doc(s);
+            if doc.error.is_some() && doc.index > 0 {
+                let err = doc.error.clone();
+                doc.history.pop();
+                doc.index -= 1;
+                doc.snap = doc.history[doc.index].clone();
+                doc.error = err;
+            }
+        })
+        .await;
+        return Ok(current_state().await);
+    }
+    // preview на временной копии документа
+    let mut tmp = with_store(|s| {
+        let doc = active_doc(s);
+        Document {
+            doc_id: doc.doc_id,
+            snap: doc.snap.clone(),
+            history: vec![],
+            index: 0,
+            dirty: false,
+            path: None,
+            revision: doc.revision,
+            stats: None,
+            mesh: None,
+            error: None,
+        }
+    })
+    .await;
+    apply_plan_ops(&mut tmp.snap, &operations);
+    rebuild(&app, &mut tmp).await;
+    Ok(json!({
+        "mode": "preview",
+        "stats": tmp.stats,
+        "error": tmp.error,
+        "parts": tmp.snap.parts,
+    }))
+}
+
+#[tauri::command]
+async fn ai_providers() -> Result<Value, String> {
+    Ok(ai::provider_info())
+}
+
+#[tauri::command]
+async fn ai_plan(app: tauri::AppHandle, text: String) -> Result<Value, String> {
+    let info = ai::provider_info();
+    if info["provider"] == "disabled" {
+        return Err(geo_err("ai_disabled", "AI-помощник выключен в настройках."));
+    }
+    if text.trim().is_empty() {
+        return Err(geo_err("bad_request", "Пустой запрос."));
+    }
+    let (doc_id, revision, parts, part_ids) = with_store(|s| {
+        let doc = active_doc(s);
+        let ids: Vec<String> = doc.snap.parts.iter()
+            .filter_map(|p| p.get("part_id").and_then(Value::as_str).map(String::from))
+            .collect();
+        (doc.doc_id, doc.revision, doc.snap.parts.clone(), ids)
+    })
+    .await;
+    let plan = if info["scripted"] == true {
+        ai::scripted_plan(&text, doc_id, revision, &parts)
+    } else {
+        ai::llm_plan(&text, doc_id, revision, &parts).await?
+    };
+    if let Some(err) = ai::validate_plan(&plan, doc_id, revision, &part_ids) {
+        return Err(err.to_string());
+    }
+    let ops = plan.get("operations").and_then(Value::as_array).cloned().unwrap_or_default();
+    let preview = if ops.is_empty() {
+        Value::Null
+    } else {
+        doc_transaction(app, ops, Some(revision), None).await?
+    };
+    Ok(json!({"plan": plan, "preview": preview}))
+}
+
+#[tauri::command]
+async fn ai_chat(messages: Value, want_json: Option<bool>) -> Result<Value, String> {
+    let info = ai::provider_info();
+    if info["provider"] == "disabled" {
+        return Err(geo_err("ai_disabled", "AI-помощник выключен в настройках."));
+    }
+    if info["scripted"] == true {
+        return Err(geo_err("ai_scripted_only",
+            "Включён детерминированный планировщик (не LLM): используйте «Предложить план»."));
+    }
+    let content = ai::http_chat(messages, want_json.unwrap_or(false)).await?;
+    Ok(json!({"content": content}))
 }
 
 #[tauri::command]
