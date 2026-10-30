@@ -297,6 +297,16 @@ mark { background: var(--pill-warning-bg); color: var(--accent-ink); border-radi
 
 .face-info { margin-bottom: var(--gap); }
 .face-info p { margin: 0; font-variant-numeric: tabular-nums; }
+.push-pull-panel {
+  margin-top: 10px; padding: 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-card);
+  background: var(--raised);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.push-pull-summary { display: flex; justify-content: space-between; gap: 8px; font-variant-numeric: tabular-nums; }
+.push-pull-hint { margin-top: 6px !important; color: var(--muted); font-size: var(--fs-small); line-height: 1.35; }
+.push-pull-live { color: var(--accent-ink); font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
+.push-pull-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 .io-forms { display: flex; flex-direction: column; gap: 8px; }
 .io-row { display: flex; gap: 6px; }

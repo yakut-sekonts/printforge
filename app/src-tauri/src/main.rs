@@ -893,17 +893,22 @@ async fn doc_get_state() -> Result<Value, String> {
 
 #[tauri::command]
 async fn doc_get_mesh() -> Result<Value, String> {
-    let mesh_path = with_store(|s| {
+    let mesh_resource = with_store(|s| {
         let doc = active_doc(s);
-        doc.mesh
-            .as_ref()
-            .and_then(|m| m.get("path"))
-            .and_then(Value::as_str)
-            .map(String::from)
+        doc.mesh.clone()
     })
     .await;
-    let path = mesh_path.ok_or_else(|| geo_err("no_model", "модель ещё не построена"))?;
-    read_mesh_resource(&path)
+    let resource = mesh_resource.ok_or_else(|| geo_err("no_model", "модель ещё не построена"))?;
+    let path = resource
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| geo_err("mesh_invalid", "ресурс сетки не содержит путь"))?;
+    let mut mesh = read_mesh_resource(path)?;
+    mesh["face_ranges"] = resource
+        .get("face_ranges")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    Ok(mesh)
 }
 
 fn read_mesh_resource(path: &str) -> Result<Value, String> {
@@ -932,7 +937,9 @@ fn read_mesh_resource(path: &str) -> Result<Value, String> {
 
 #[tauri::command]
 async fn doc_get_imported_mesh(path: String) -> Result<Value, String> {
-    read_mesh_resource(&path)
+    let mut mesh = read_mesh_resource(&path)?;
+    mesh["face_ranges"] = json!([]);
+    Ok(mesh)
 }
 
 fn save_document(doc: &Document, target: &PathBuf) -> Result<(), String> {

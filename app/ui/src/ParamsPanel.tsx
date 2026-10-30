@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import type {
   DocState, GeoError, TemplateDef, EdgeRef, PrintCheck, ImportResult,
 } from "./types";
+import type { FaceEditTarget } from "./faceEditing";
 import { evalExpression } from "./expr";
 
 export interface FilletUi {
@@ -10,11 +11,22 @@ export interface FilletUi {
   radius: string;
 }
 
+export interface PushPullUi {
+  target: FaceEditTarget | null;
+  value: string;
+  dragging: boolean;
+  reason: string | null;
+}
+
 interface Props {
   doc: DocState | null;
   templates: TemplateDef[];
   selectedFace: number | null;
   faceArea: number | null;
+  pushPull: PushPullUi;
+  onPushPullValue: (value: string) => void;
+  onApplyPushPull: () => void;
+  onCancelPushPull: () => void;
   selectedPartId: string | null;
   onApplyField: (name: string, raw: string, partId?: string) => void;
   // операции над деталями
@@ -272,6 +284,39 @@ export function ParamsPanel(props: Props) {
         <section className="face-info">
           <h3 className="panel-section">Выбранная грань</h3>
           <p>Грань {props.selectedFace} — площадь <strong>{fmtNum(props.faceArea)} мм²</strong></p>
+          {props.pushPull.target ? (
+            <div className="push-pull-panel">
+              <div className="push-pull-summary">
+                <span>{props.pushPull.target.label}</span>
+                <strong>{fmtNum(props.pushPull.target.current)} мм</strong>
+              </div>
+              <div className="param-field">
+                <label htmlFor="push-pull-value">Точный размер</label>
+                <div className="param-input" data-cmd="parameter.set">
+                  <input
+                    id="push-pull-value"
+                    inputMode="decimal"
+                    value={props.pushPull.value}
+                    aria-label={`${props.pushPull.target.label}, мм`}
+                    onChange={(event) => props.onPushPullValue(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter") props.onApplyPushPull(); }}
+                  />
+                  <span className="param-unit">мм</span>
+                </div>
+              </div>
+              <p className="push-pull-hint">
+                Потяните оранжевый манипулятор или введите размер.
+                {props.pushPull.target.symmetric && " Размер меняется симметрично относительно центра."}
+              </p>
+              {props.pushPull.dragging && <div className="push-pull-live">Предпросмотр: {props.pushPull.value} мм</div>}
+              <div className="push-pull-actions">
+                <button className="btn btn-primary" onClick={props.onApplyPushPull}>Применить</button>
+                <button className="btn" onClick={props.onCancelPushPull}>Сбросить</button>
+              </div>
+            </div>
+          ) : props.pushPull.reason ? (
+            <p className="push-pull-hint">{props.pushPull.reason}</p>
+          ) : null}
         </section>
       )}
 

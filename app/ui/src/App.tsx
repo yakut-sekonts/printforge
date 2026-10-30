@@ -6,8 +6,10 @@ import type {
 import { backend, expandTilde, parseIpcError } from "./backend";
 import { evalExpression } from "./expr";
 import { Viewport, faceArea, ViewName } from "./viewport";
+import { pushPullDelta, pushPullValue, resolveFaceEditTarget } from "./faceEditing";
 import { TopBar, LeftPanel, StatusBar, EmptyState, cmdEnabled } from "./components";
-import { ParamsPanel, FilletUi } from "./ParamsPanel";
+import { ParamsPanel } from "./ParamsPanel";
+import type { FilletUi, PushPullUi } from "./ParamsPanel";
 import { HelpPanel, TooltipMode } from "./HelpPanel";
 import { Tooltips } from "./Tooltips";
 import { LessonBar, LessonRun, StepStatus } from "./LessonBar";
@@ -49,6 +51,12 @@ export default function App() {
   const [openPath, setOpenPath] = useState("~/plate.printforge");
   const [exportPath, setExportPath] = useState("~/plate.stl");
   const [fillet, setFillet] = useState<FilletUi>({ active: false, selected: null, radius: "2" });
+  const [pushPull, setPushPull] = useState<PushPullUi>({
+    target: null,
+    value: "",
+    dragging: false,
+    reason: null,
+  });
   const [printChecks, setPrintChecks] = useState<PrintCheck[] | null>(null);
   const [printBusy, setPrintBusy] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
@@ -66,9 +74,16 @@ export default function App() {
   const docRef = useRef<DocState | null>(null);
   const lessonRef = useRef<LessonRun | null>(null);
   const filletRef = useRef(fillet);
+  const pushPullRef = useRef(pushPull);
+  const pushPullHandlersRef = useRef({
+    start: () => {},
+    preview: (_delta: number) => {},
+    commit: (_delta: number) => {},
+  });
   docRef.current = doc;
   lessonRef.current = lessonRun;
   filletRef.current = fillet;
+  pushPullRef.current = pushPull;
 
   // ---------- загрузка реестров ----------
   useEffect(() => {
@@ -91,6 +106,9 @@ export default function App() {
         vp.setSelectedFace(face);
         if (face != null) lessonEvent({ type: "face_selected" });
       },
+      onPushPullStart: () => pushPullHandlersRef.current.start(),
+      onPushPullPreview: (delta) => pushPullHandlersRef.current.preview(delta),
+      onPushPullCommit: (delta) => pushPullHandlersRef.current.commit(delta),
       onCameraRotated: () => lessonEvent({ type: "camera_rotated" }),
       onCameraZoomed: () => lessonEvent({ type: "camera_zoomed" }),
     });
@@ -302,6 +320,112 @@ export default function App() {
     const state = await runBackend(() => backend.docSetParameter(name, num, raw, partId));
     if (state) lessonEvent({ type: "params", state });
   }, [runBackend, lessonEvent]);
+
+  const cancelPushPull = useCallback(() => {
+    const target = pushPullRef.current.target;
+    viewportRef.current?.cancelPushPullPreview();
+    setPushPull((current) => ({
+      ...current,
+      value: target ? String(target.current) : "",
+      dragging: false,
+    }));
+  }, []);
+
+  const commitPushPullValue = useCallback(async (value: number) => {
+    const target = pushPullRef.current.target;
+    if (!target) return;
+    if (!Number.isFinite(value)) {
+      setStatusMsg("Размер должен быть числом");
+      return;
+    }
+    if (value < target.minimum) {
+      setStatusMsg(`${target.label}: минимальное значение ${target.minimum} мм`);
+      return;
+    }
+    viewportRef.current?.cancelPushPullPreview();
+    setPushPull((current) => ({ ...current, value: String(value), dragging: false }));
+    if (Math.abs(value - target.current) < 1e-9) return;
+    const state = await runBackend(() => backend.docSetParameter(
+      target.parameter,
+      value,
+      String(value),
+      target.partId,
+    ));
+    if (state) {
+      setStatusMsg(`${target.label}: ${value} мм`);
+      lessonEvent({ type: "params", state });
+    }
+  }, [runBackend, lessonEvent]);
+
+  const previewPushPull = useCallback((delta: number) => {
+    const target = pushPullRef.current.target;
+    if (!target) return;
+    const value = pushPullValue(target, delta);
+    viewportRef.current?.setPushPullPreview(pushPullDelta(target, value));
+    setPushPull((current) => ({ ...current, value: String(value), dragging: true }));
+  }, []);
+
+  const commitPushPullDelta = useCallback((delta: number) => {
+    const target = pushPullRef.current.target;
+    if (!target) return;
+    void commitPushPullValue(pushPullValue(target, delta));
+  }, [commitPushPullValue]);
+
+  const updatePushPullValue = useCallback((raw: string) => {
+    setPushPull((current) => ({ ...current, value: raw, dragging: false }));
+    const target = pushPullRef.current.target;
+    const value = Number(raw.replace(",", "."));
+    if (target && Number.isFinite(value) && value >= target.minimum) {
+      viewportRef.current?.setPushPullPreview(pushPullDelta(target, value));
+    } else {
+      viewportRef.current?.cancelPushPullPreview();
+    }
+  }, []);
+
+  const applyPushPull = useCallback(() => {
+    const value = Number(pushPullRef.current.value.replace(",", "."));
+    void commitPushPullValue(value);
+  }, [commitPushPullValue]);
+
+  pushPullHandlersRef.current = {
+    start: () => setPushPull((current) => ({ ...current, dragging: !!current.target })),
+    preview: previewPushPull,
+    commit: commitPushPullDelta,
+  };
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    viewport?.setSelectedFace(selectedFace);
+    if (selectedFace == null || !mesh || !doc) {
+      viewport?.setPushPullHandle(null);
+      setPushPull({ target: null, value: "", dragging: false, reason: null });
+      return;
+    }
+
+    let reason: string | null = null;
+    let target = null;
+    const parts = doc.parts ?? [];
+    if (importedStats) {
+      reason = "Push/Pull для импортированной сетки пока недоступен.";
+    } else if (parts.length !== 1) {
+      reason = "Push/Pull пока доступен для одного параметрического тела.";
+    } else if ((doc.operations ?? []).some((operation) => operation.op !== "fillet")) {
+      reason = "Push/Pull недоступен после операций, меняющих топологию тела.";
+    } else {
+      const part = parts[0];
+      const template = templates.find((candidate) => candidate.template_id === part.template);
+      if (template) target = resolveFaceEditTarget(mesh, selectedFace, part, template);
+      if (!target) reason = "Эта грань пока не связана с редактируемым размером.";
+    }
+
+    viewport?.setPushPullHandle(target);
+    setPushPull({
+      target,
+      value: target ? String(target.current) : "",
+      dragging: false,
+      reason,
+    });
+  }, [selectedFace, mesh, doc, templates, importedStats]);
 
   // сброс выбора детали, если она исчезла из живых тел
   useEffect(() => {
@@ -639,7 +763,15 @@ export default function App() {
         e.preventDefault();
         setWhatIsThis((v) => !v);
       } else if (e.key === "Escape") {
-        if (filletRef.current.active) cancelFillet();
+        const pushPullState = pushPullRef.current;
+        const pushPullValueNumber = Number(pushPullState.value.replace(",", "."));
+        const pushPullPending = pushPullState.dragging || (
+          pushPullState.target != null &&
+          Number.isFinite(pushPullValueNumber) &&
+          Math.abs(pushPullValueNumber - pushPullState.target.current) >= 1e-9
+        );
+        if (pushPullPending) cancelPushPull();
+        else if (filletRef.current.active) cancelFillet();
         else if (whatIsThis) setWhatIsThis(false);
         else if (aiOpen) setAiOpen(false);
         else if (helpOpen) setHelpOpen(false);
@@ -647,7 +779,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [whatIsThis, helpOpen, aiOpen, undoDocument, redoDocument, doSave, doOpen, cancelFillet]);
+  }, [whatIsThis, helpOpen, aiOpen, undoDocument, redoDocument, doSave, doOpen, cancelFillet, cancelPushPull]);
 
   const faceAreaValue = mesh && selectedFace != null ? faceArea(mesh, selectedFace) : null;
   const docName = doc?.path ? doc.path.split("/").pop()! : "Без названия";
@@ -703,6 +835,10 @@ export default function App() {
           templates={templates}
           selectedFace={selectedFace}
           faceArea={faceAreaValue}
+          pushPull={pushPull}
+          onPushPullValue={updatePushPullValue}
+          onApplyPushPull={applyPushPull}
+          onCancelPushPull={cancelPushPull}
           onApplyField={(n, r, p) => void applyField(n, r, p)}
           selectedPartId={selectedPartId}
           onAddPart={(t) => void addPart(t)}

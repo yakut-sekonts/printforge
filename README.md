@@ -8,7 +8,7 @@
 
 ## Скачать
 
-Текущий релиз: **[PrintForge v0.1.0](https://github.com/yakut-sekonts/printforge/releases/tag/v0.1.0)**.
+Текущий релиз: **[PrintForge v0.1.1](https://github.com/yakut-sekonts/printforge/releases/tag/v0.1.1)**.
 
 - macOS Apple Silicon: DMG для Mac на M1/M2/M3/M4 и новее.
 - macOS Intel: DMG для Mac на Intel.
@@ -21,6 +21,7 @@
 ## Возможности
 
 - Параметрические детали, профили, выдавливание, отверстия, скругления, булевы операции, массивы, зеркало, выравнивание и разделение тел.
+- Прямое редактирование поддерживаемых плоских граней: Push/Pull с live preview, точным размером и одним шагом Undo.
 - Готовые шаблоны пластины, шайбы/втулки, L-кронштейна и корпуса с крышкой.
 - Импорт STEP/STL и экспорт STEP/STL/3MF.
 - Формат проекта `.printforge`, автосохранение, Undo/Redo и транзакционное применение операций.

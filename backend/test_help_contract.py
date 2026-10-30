@@ -30,6 +30,6 @@ def test_shipped_help_and_lessons_match_authoritative_sources():
         "navigation", "first-part", "save-export", "ai-assistant",
     }
     help_ids = {article["help_id"] for article in help_index["articles"]}
-    assert len(help_ids) == 28
+    assert len(help_ids) == 29
     assert "ai-pomoshchnik" in help_ids
     assert all(command["help_id"] in help_ids for command in public_commands["commands"])

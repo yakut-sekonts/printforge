@@ -1,9 +1,9 @@
 ---
 help_id: razmery-i-parametry
 title: Размеры, единицы и параметры
-synonyms: [размер, миллиметры, единицы, формула, выражение, зависимость, parameter]
+synonyms: [размер, миллиметры, единицы, формула, выражение, зависимость, parameter, потянуть грань, push pull]
 commands: [parameter.set]
-related: [shablon-plastina, sdelat-otverstie, istoriya-i-otmena]
+related: [push-pull, shablon-plastina, sdelat-otverstie, istoriya-i-otmena]
 ---
 # Размеры, единицы и параметры
 
@@ -13,7 +13,7 @@ related: [shablon-plastina, sdelat-otverstie, istoriya-i-otmena]
 
 ## Где
 
-Правая панель «Параметры». Рядом с каждым полем — единицы (мм).
+Правая панель «Параметры». Рядом с каждым полем — единицы (мм). Для поддерживаемых внешних плоских граней тот же параметр можно менять инструментом Push/Pull прямо на модели.
 
 ## Ввод чисел
 
@@ -41,4 +41,5 @@ related: [shablon-plastina, sdelat-otverstie, istoriya-i-otmena]
 ## Связанное
 
 - «История и отмена» — как работает журнал изменений.
+- «Push/Pull грани» — визуальное изменение размера на модели.
 - Урок «Первая деталь» — практика с зависимыми отступами.

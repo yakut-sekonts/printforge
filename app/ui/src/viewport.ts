@@ -1,12 +1,16 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { MeshData, FaceRange, EdgeRef } from "./types";
+import type { FaceEditTarget } from "./faceEditing";
 
 export type ViewName = "top" | "front" | "side" | "iso";
 
 export interface ViewportEvents {
   onHoverFace: (face: number | null) => void;
   onSelectFace: (face: number | null) => void;
+  onPushPullStart: () => void;
+  onPushPullPreview: (delta: number) => void;
+  onPushPullCommit: (delta: number) => void;
   onCameraRotated: () => void;
   onCameraZoomed: () => void;
 }
@@ -55,6 +59,23 @@ function makeTextSprite(text: string): THREE.Sprite {
   return sprite;
 }
 
+function disposeObject(object: THREE.Object3D) {
+  object.traverse((child) => {
+    const renderable = child as THREE.Object3D & {
+      geometry?: THREE.BufferGeometry;
+      material?: THREE.Material | THREE.Material[];
+    };
+    renderable.geometry?.dispose();
+    const materials = Array.isArray(renderable.material) ? renderable.material : [renderable.material];
+    for (const material of materials) {
+      if (!material) continue;
+      const mapped = material as THREE.Material & { map?: THREE.Texture | null };
+      mapped.map?.dispose();
+      material.dispose();
+    }
+  });
+}
+
 function subGeometry(geo: THREE.BufferGeometry, range: FaceRange): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", geo.getAttribute("position"));
@@ -80,6 +101,17 @@ export class Viewport {
   private hoverOverlay: THREE.Object3D | null = null;
   private selOverlay: THREE.Object3D | null = null;
   private edgeMarker: THREE.Group | null = null;
+  private pushPullGroup: THREE.Group | null = null;
+  private pushPullTarget: FaceEditTarget | null = null;
+  private pushPullLabel: THREE.Sprite | null = null;
+  private pushPullDrag: {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    screenDirection: THREE.Vector2;
+    pixelsPerMm: number;
+    delta: number;
+  } | null = null;
   private dimGroup: THREE.Group | null = null;
   private resizeObs!: ResizeObserver;
   private downPos = { x: 0, y: 0 };
@@ -139,15 +171,9 @@ export class Viewport {
     });
 
     this.renderer.domElement.addEventListener("pointermove", (e) => this.onPointerMove(e));
-    this.renderer.domElement.addEventListener("pointerdown", (e) => {
-      this.downPos = { x: e.clientX, y: e.clientY };
-    });
-    this.renderer.domElement.addEventListener("pointerup", (e) => {
-      if (e.button !== 0) return;
-      const dx = e.clientX - this.downPos.x;
-      const dy = e.clientY - this.downPos.y;
-      if (dx * dx + dy * dy < 25) this.onClick(e);
-    });
+    this.renderer.domElement.addEventListener("pointerdown", (e) => this.onPointerDown(e), true);
+    this.renderer.domElement.addEventListener("pointerup", (e) => this.onPointerUp(e), true);
+    this.renderer.domElement.addEventListener("pointercancel", (e) => this.onPointerCancel(e), true);
     this.renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
 
     this.resizeObs = new ResizeObserver(() => this.onResize());
@@ -228,10 +254,103 @@ export class Viewport {
     return range ? range.face_index : null;
   }
 
+  private updatePointer(e: PointerEvent) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+  }
+
+  private pickPushPullHandle(e: PointerEvent): boolean {
+    if (!this.pushPullGroup) return false;
+    this.updatePointer(e);
+    return this.raycaster.intersectObject(this.pushPullGroup, true)
+      .some((hit) => hit.object.userData.pushPullHandle === true);
+  }
+
+  private pushPullScreenScale(target: FaceEditTarget): {
+    direction: THREE.Vector2;
+    pixelsPerMm: number;
+  } {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const [cx, cy, cz] = docToThree(...target.center);
+    const [nx, ny, nz] = docToThree(...target.normal);
+    const origin = new THREE.Vector3(cx, cy, cz).project(this.camera);
+    const sample = new THREE.Vector3(cx + nx * 10, cy + ny * 10, cz + nz * 10).project(this.camera);
+    const screen = new THREE.Vector2(
+      (sample.x - origin.x) * rect.width / 2,
+      -(sample.y - origin.y) * rect.height / 2,
+    );
+    const pixelsPerMm = screen.length() / 10;
+    if (pixelsPerMm < 0.15) return { direction: new THREE.Vector2(0, -1), pixelsPerMm: 2 };
+    return { direction: screen.normalize(), pixelsPerMm };
+  }
+
+  private onPointerDown(e: PointerEvent) {
+    this.downPos = { x: e.clientX, y: e.clientY };
+    if (e.button !== 0 || !this.pushPullTarget || !this.pickPushPullHandle(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const scale = this.pushPullScreenScale(this.pushPullTarget);
+    this.pushPullDrag = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      screenDirection: scale.direction,
+      pixelsPerMm: scale.pixelsPerMm,
+      delta: 0,
+    };
+    this.controls.enabled = false;
+    this.renderer.domElement.setPointerCapture(e.pointerId);
+    this.renderer.domElement.style.cursor = "grabbing";
+    this.events.onPushPullStart();
+  }
+
   private onPointerMove(e: PointerEvent) {
+    if (this.pushPullDrag && e.pointerId === this.pushPullDrag.pointerId) {
+      e.preventDefault();
+      const movement = new THREE.Vector2(
+        e.clientX - this.pushPullDrag.startX,
+        e.clientY - this.pushPullDrag.startY,
+      );
+      const delta = movement.dot(this.pushPullDrag.screenDirection) / this.pushPullDrag.pixelsPerMm;
+      this.pushPullDrag.delta = Math.round(delta * 10) / 10;
+      this.setPushPullPreview(this.pushPullDrag.delta);
+      this.events.onPushPullPreview(this.pushPullDrag.delta);
+      return;
+    }
+    const overHandle = this.pickPushPullHandle(e);
+    this.renderer.domElement.style.cursor = overHandle ? "grab" : "default";
     const face = this.pickFace(e);
     this.setHoverFace(face);
     this.events.onHoverFace(face);
+  }
+
+  private onPointerUp(e: PointerEvent) {
+    if (this.pushPullDrag && e.pointerId === this.pushPullDrag.pointerId) {
+      e.preventDefault();
+      e.stopPropagation();
+      const delta = this.pushPullDrag.delta;
+      this.pushPullDrag = null;
+      this.controls.enabled = true;
+      this.renderer.domElement.releasePointerCapture(e.pointerId);
+      this.renderer.domElement.style.cursor = "grab";
+      if (Math.abs(delta) >= 0.05) this.events.onPushPullCommit(delta);
+      else this.cancelPushPullPreview();
+      return;
+    }
+    if (e.button !== 0) return;
+    const dx = e.clientX - this.downPos.x;
+    const dy = e.clientY - this.downPos.y;
+    if (dx * dx + dy * dy < 25) this.onClick(e);
+  }
+
+  private onPointerCancel(e: PointerEvent) {
+    if (!this.pushPullDrag || e.pointerId !== this.pushPullDrag.pointerId) return;
+    this.pushPullDrag = null;
+    this.controls.enabled = true;
+    this.renderer.domElement.style.cursor = "default";
+    this.cancelPushPullPreview();
   }
 
   private onClick(e: PointerEvent) {
@@ -326,6 +445,105 @@ export class Viewport {
     this.scene.add(this.selOverlay);
   }
 
+  setPushPullHandle(target: FaceEditTarget | null) {
+    if (this.pushPullGroup) {
+      this.scene.remove(this.pushPullGroup);
+      disposeObject(this.pushPullGroup);
+      this.pushPullGroup = null;
+    }
+    this.pushPullLabel = null;
+    this.pushPullTarget = target;
+    if (!target) return;
+
+    const [cx, cy, cz] = docToThree(...target.center);
+    const [nx, ny, nz] = docToThree(...target.normal);
+    const origin = new THREE.Vector3(cx, cy, cz);
+    const direction = new THREE.Vector3(nx, ny, nz).normalize();
+    const length = 14;
+    const group = new THREE.Group();
+    const arrow = new THREE.ArrowHelper(direction, origin, length, COLOR.selFace, 4.5, 2.5);
+    (arrow.line.material as THREE.LineBasicMaterial).depthTest = false;
+    (arrow.line.material as THREE.LineBasicMaterial).depthWrite = false;
+    (arrow.cone.material as THREE.MeshBasicMaterial).depthTest = false;
+    (arrow.cone.material as THREE.MeshBasicMaterial).depthWrite = false;
+    arrow.line.renderOrder = 21;
+    arrow.cone.renderOrder = 21;
+    arrow.cone.userData.pushPullHandle = true;
+    group.add(arrow);
+
+    const stemLength = length - 3;
+    const stem = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.65, 0.65, stemLength, 12),
+      new THREE.MeshBasicMaterial({ color: 0x211f1d, depthTest: false, depthWrite: false }),
+    );
+    stem.position.copy(origin.clone().addScaledVector(direction, stemLength / 2));
+    stem.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+    stem.renderOrder = 20;
+    group.add(stem);
+
+    const tipPosition = origin.clone().addScaledVector(direction, length);
+    const tipOutline = new THREE.Mesh(
+      new THREE.SphereGeometry(3.6, 20, 20),
+      new THREE.MeshBasicMaterial({ color: 0x211f1d, depthTest: false, depthWrite: false }),
+    );
+    tipOutline.position.copy(tipPosition);
+    tipOutline.userData.pushPullHandle = true;
+    tipOutline.renderOrder = 22;
+    group.add(tipOutline);
+    const tip = new THREE.Mesh(
+      new THREE.SphereGeometry(2.6, 20, 20),
+      new THREE.MeshBasicMaterial({ color: COLOR.selFace, depthTest: false, depthWrite: false }),
+    );
+    tip.position.copy(tipPosition);
+    tip.userData.pushPullHandle = true;
+    tip.renderOrder = 23;
+    group.add(tip);
+    const hit = new THREE.Mesh(
+      new THREE.SphereGeometry(5, 16, 16),
+      new THREE.MeshBasicMaterial({ color: COLOR.selFace, transparent: true, opacity: 0, depthTest: false, depthWrite: false }),
+    );
+    hit.position.copy(tipPosition);
+    hit.userData.pushPullHandle = true;
+    hit.renderOrder = 24;
+    group.add(hit);
+    this.pushPullGroup = group;
+    this.scene.add(group);
+  }
+
+  setPushPullPreview(delta: number) {
+    if (!this.pushPullTarget || !this.pushPullGroup) return;
+    const [nx, ny, nz] = docToThree(...this.pushPullTarget.normal);
+    const offset = new THREE.Vector3(nx, ny, nz).normalize().multiplyScalar(delta);
+    this.pushPullGroup.position.copy(offset);
+    if (this.selOverlay) this.selOverlay.position.copy(offset);
+    if (this.pushPullLabel) {
+      this.pushPullGroup.remove(this.pushPullLabel);
+      disposeObject(this.pushPullLabel);
+      this.pushPullLabel = null;
+    }
+    if (Math.abs(delta) >= 0.05) {
+      const sign = delta > 0 ? "+" : "";
+      const label = makeTextSprite(`${sign}${Math.round(delta * 10) / 10} мм`);
+      const [cx, cy, cz] = docToThree(...this.pushPullTarget.center);
+      label.position.set(cx, cy + 10, cz);
+      label.renderOrder = 24;
+      this.pushPullLabel = label;
+      this.pushPullGroup.add(label);
+    }
+    this.render();
+  }
+
+  cancelPushPullPreview() {
+    if (this.pushPullGroup) this.pushPullGroup.position.set(0, 0, 0);
+    if (this.selOverlay) this.selOverlay.position.set(0, 0, 0);
+    if (this.pushPullGroup && this.pushPullLabel) {
+      this.pushPullGroup.remove(this.pushPullLabel);
+      disposeObject(this.pushPullLabel);
+    }
+    this.pushPullLabel = null;
+    this.render();
+  }
+
   setMesh(data: MeshData | null) {
     if (this.mesh) {
       this.scene.remove(this.mesh);
@@ -334,6 +552,7 @@ export class Viewport {
     }
     this.setHoverFace(null);
     this.setSelectedFace(null);
+    this.setPushPullHandle(null);
     this.faceRanges = data?.face_ranges ?? [];
     if (!data) {
       this.rebuildDimensions(null);
