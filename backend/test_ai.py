@@ -1,14 +1,21 @@
 """AC-11: невалидные и устаревшие AI-планы не меняют документ (уровень валидации)."""
+import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import ai_planner  # noqa: E402
+import dev_shim  # noqa: E402
+
+pytestmark = [pytest.mark.unit, pytest.mark.contract, pytest.mark.ai]
 
 
 class FakeDoc:
     def __init__(self):
         self.doc_id = "doc-test"
+        self.document_instance_id = "instance-test"
         self.revision = 7
         self.parts = [{"part_id": "part-1",
                        "template": "plate_with_holes",
@@ -19,6 +26,7 @@ def base_plan(**kw):
     p = {
         "schema_version": 1,
         "document_id": "doc-test",
+        "document_instance_id": "instance-test",
         "base_revision": 7,
         "units": "mm",
         "assumptions": [],
@@ -135,3 +143,113 @@ def test_scripted_ambiguous_marks_assumption():
     plan = ai_planner.scripted_plan("сделай отверстие побольше", doc)
     assert plan["assumptions"], "ожидалось явное редактируемое предположение"
     assert plan["operations"][0]["parameters"]["value"] > 4
+
+
+def test_provider_configuration_never_returns_api_key(monkeypatch):
+    monkeypatch.setattr(ai_planner, "_PROVIDER_CONFIG", {
+        "provider": "disabled", "base_url": "", "model": "", "api_key": ""})
+    info = ai_planner.configure_provider(
+        "openai", "http://127.0.0.1:3001/v1/", "test-model", "secret-value")
+    assert info["provider"] == "openai"
+    assert info["base_url"] == "http://127.0.0.1:3001/v1"
+    assert info["has_api_key"] is True
+    assert "secret-value" not in json.dumps(info)
+
+
+def test_ollama_profile_rejects_remote_endpoint(monkeypatch):
+    monkeypatch.setattr(ai_planner, "_PROVIDER_CONFIG", {
+        "provider": "disabled", "base_url": "", "model": "", "api_key": ""})
+    try:
+        ai_planner.configure_provider(
+            "ollama", "https://example.com/v1", "qwen3:4b")
+    except ValueError as error:
+        assert "локального endpoint" in str(error)
+    else:
+        raise AssertionError("удалённый endpoint не должен приниматься как локальный Ollama")
+
+
+def test_disabling_provider_does_not_require_network_settings(monkeypatch):
+    monkeypatch.setattr(ai_planner, "_PROVIDER_CONFIG", {
+        "provider": "openai", "base_url": "http://localhost:3001/v1",
+        "model": "test-model", "api_key": "secret-value"})
+    info = ai_planner.configure_provider(
+        "disabled", "", "", clear_api_key=True)
+    assert info["available"] is False
+    assert info["has_api_key"] is False
+
+
+def test_ollama_plan_request_includes_json_schema(monkeypatch):
+    monkeypatch.setattr(ai_planner, "_PROVIDER_CONFIG", {
+        "provider": "ollama", "base_url": "http://127.0.0.1:11434/v1",
+        "model": "qwen3:4b", "api_key": ""})
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps({
+                "choices": [{"message": {"content": "{}"}}]}).encode()
+
+    def fake_urlopen(request, timeout):
+        captured["body"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(ai_planner.urllib.request, "urlopen", fake_urlopen)
+    schema = {"type": "object", "properties": {}}
+    ai_planner.http_chat(
+        [{"role": "user", "content": "test"}], True, json_schema=schema)
+
+    response_format = captured["body"]["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["schema"] == schema
+    assert captured["timeout"] == ai_planner.AI_TIMEOUT_S
+
+
+def test_ai_transaction_single_undo_clears_derived_geometry(monkeypatch):
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    monkeypatch.setitem(dev_shim.DOCS, "tutorial", dev_shim.Doc())
+    dev_shim.ACTIVE[0] = "main"
+
+    def fake_worker_call(method, params, revision=0):
+        assert method == "build"
+        return {
+            "stats": {
+                "volume": 1143.5,
+                "solid_count": 1,
+                "bbox": [-10, -10, 0, 10, 10, 4],
+                "is_valid": True,
+            },
+            "mesh": {"path": "/tmp/preview.mesh"},
+        }
+
+    monkeypatch.setattr(dev_shim, "worker_call", fake_worker_call)
+    operation = {
+        "command_id": "part.create.from_template",
+        "target_id": None,
+        "parameters": {
+            "template": "washer",
+            "params": {"outer_diameter": 20, "inner_diameter": 6, "height": 4},
+        },
+    }
+
+    applied = dev_shim.cmd_doc_transaction({
+        "operations": [operation],
+        "base_revision": 0,
+        "mode": "apply",
+    })
+    assert applied["stats"]["volume"] == 1143.5
+    assert applied["can_undo"] is True
+
+    undone = dev_shim.cmd_doc_undo({})
+    assert undone["parts"] == []
+    assert undone["stats"] is None
+    assert undone["can_undo"] is False
+    assert undone["can_redo"] is True
+    assert undone["revision"] == 2

@@ -1,0 +1,60 @@
+name: Test stages
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic:
+    name: Deterministic M0-M3 regression
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Create pinned Python environment
+        run: |
+          python -m venv backend/.venv
+          backend/.venv/bin/python -m pip install --upgrade pip
+          backend/.venv/bin/python -m pip install -r backend/requirements.txt
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/ui/package-lock.json
+
+      - name: Install UI dependencies
+        run: npm ci --prefix app/ui
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+
+      - name: Run full deterministic stage
+        run: backend/.venv/bin/python scripts/run_test_stage.py --scope ${{ github.event_name == 'schedule' && 'nightly' || 'pr' }}
+
+      - name: Upload machine reports and failure logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-reports-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14

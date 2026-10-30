@@ -50,7 +50,8 @@ export interface DocStats {
 }
 
 export interface DocState {
-  doc_id?: string;
+  doc_id?: string | number;
+  document_instance_id?: string | number;
   revision: number;
   dirty: boolean;
   path: string | null;
@@ -117,12 +118,87 @@ export interface PrintCheckResult {
   checks: PrintCheck[];
 }
 
+export interface AiProviderInfo {
+  provider: "disabled" | "ollama" | "openai" | "scripted";
+  available: boolean;
+  scripted: boolean;
+  model: string;
+  base_url: string;
+  has_api_key: boolean;
+  secret_storage: "system" | "environment" | "session";
+  local_endpoint: boolean;
+  capabilities: {
+    structured_output: boolean;
+    json_object: boolean;
+    tools: boolean;
+    images: boolean;
+    context_limit: number;
+  };
+}
+
+export interface AiProviderConfig {
+  provider: "disabled" | "ollama" | "openai";
+  base_url: string;
+  model: string;
+  api_key?: string;
+  clear_api_key?: boolean;
+}
+
+export interface AiConnectionTest {
+  ok: boolean;
+  message: string;
+  model_found: boolean;
+  models?: string[];
+}
+
+export interface AiOperation {
+  command_id: "part.create.from_template" | "parameter.set" | "op.fillet";
+  target_id: string | null;
+  parameters: Record<string, unknown>;
+}
+
+export interface AiPlan {
+  schema_version: 1;
+  document_id: string | number;
+  document_instance_id: string | number;
+  base_revision: number;
+  units: "mm";
+  assumptions: string[];
+  questions: string[];
+  operations: AiOperation[];
+  summary: string;
+}
+
+export interface AiPreview {
+  mode: "preview";
+  stats: DocStats | null;
+  error: GeoError | null;
+  parts: PartDef[];
+  plan_hash: string;
+  base_revision: number;
+  document_instance_id: string | number;
+}
+
+export interface AiPlanResponse {
+  plan: AiPlan;
+  preview: AiPreview | null;
+  plan_hash: string;
+  action_id: string;
+}
+
 export interface CommandDef {
   command_id: string;
   title: string;
   help_id: string;
   shortcut: string | null;
-  availability: "always" | "requires_document" | "requires_body" | "requires_undo" | "requires_redo";
+  availability:
+    | "always"
+    | "requires_document"
+    | "requires_body"
+    | "requires_two_bodies"
+    | "requires_undo"
+    | "requires_redo"
+    | "requires_ai";
   disabled_reason?: string;
   params: { name: string; unit?: string; min?: number; desc: string }[];
 }

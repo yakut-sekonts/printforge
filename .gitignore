@@ -13,3 +13,4 @@ tauri-build.log
 pyinstaller.log
 *.spec
 app/src-tauri/binaries/
+artifacts/

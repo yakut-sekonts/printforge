@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "source": {
+    "document": "PrintForge_Codex_Autotest_Requirements.md",
+    "version": "1.0",
+    "sha256": "c1485d569f6b32e25f21b0593f65c21eb4c122f77300ef3af7bde8be43fed09a"
+  },
+  "tolerances": {
+    "brep_length_mm": 0.001,
+    "brep_volume": "max(0.001 mm^3, 1e-6 * abs(expected))",
+    "mesh_bbox_mm": 0.05,
+    "mesh_relative_volume": 0.005
+  },
+  "fixtures": {
+    "F-01": {
+      "title": "Пластина с четырьмя отверстиями",
+      "provenance": "Аналитическое определение из тестового ТЗ; ожидания не используют production geometry helper.",
+      "status": "implemented",
+      "parameters_mm": {
+        "length": 80,
+        "width": 40,
+        "height": 6,
+        "hole_diameter": 4,
+        "hole_centers": [[-30, -10], [-30, 10], [30, -10], [30, 10]]
+      },
+      "expected": {
+        "solid_count": 1,
+        "bbox_mm": [80, 40, 6],
+        "volume_mm3": 18898.40710525538,
+        "length_100_hole_centers": [[-40, -10], [-40, 10], [40, -10], [40, 10]],
+        "length_100_volume_mm3": 23698.40710525538
+      }
+    },
+    "F-02": {
+      "title": "Шайба",
+      "provenance": "Аналитическое определение 364*pi из тестового ТЗ.",
+      "status": "implemented",
+      "parameters_mm": {"outer_diameter": 20, "inner_diameter": 6, "height": 4},
+      "expected": {"solid_count": 1, "bbox_mm": [20, 20, 4], "volume_mm3": 1143.5397259066847}
+    },
+    "F-03": {
+      "title": "Корпус и крышка",
+      "provenance": "Аналитические объёмы и зазор из тестового ТЗ.",
+      "status": "implemented",
+      "parameters_mm": {"length": 100, "width": 60, "height": 30, "wall": 2, "bottom": 2, "gap": 0.2},
+      "expected": {"solid_count": 2, "case_volume_mm3": 29472, "lid_volume_mm3": 14355.2, "intersection_volume_mm3": 0}
+    },
+    "F-04": {
+      "title": "Кронштейн",
+      "provenance": "Объединение двух аналитически заданных блоков из тестового ТЗ.",
+      "status": "implemented",
+      "expected": {"solid_count": 1, "volume_mm3": 11000, "valid_fillet_radius_mm": 2, "invalid_fillet_radius_mm": 50}
+    },
+    "F-05": {
+      "title": "Независимые файлы и дефектные сетки",
+      "provenance": "ASCII STL написаны вручную и не создаются экспортёром PrintForge.",
+      "status": "partial",
+      "files": [
+        {"path": "f05/unit_cube_ascii.stl", "expected": "closed watertight cube, coordinates 0..1"},
+        {"path": "f05/unit_cube_open_ascii.stl", "expected": "cube without top face; boundary and watertight checks fail"},
+        {"path": "f05/truncated.stl", "expected": "damaged/truncated STL rejected"}
+      ],
+      "gaps": ["independent STEP 25.4 mm", "3MF components/transforms", "inverted patch", "degenerate triangle", "non-manifold edge", "intersecting surfaces"]
+    },
+    "F-06": {
+      "title": "Проект и помощь",
+      "provenance": "Проекты создаются production serializer в temp directory; registry/help fixtures versioned in app/shared and docs/help.",
+      "status": "partial",
+      "gaps": ["versioned previous-format project", "unknown future-version project", "portable imported asset fixture"]
+    }
+  }
+}

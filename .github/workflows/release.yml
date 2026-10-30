@@ -1,0 +1,112 @@
+name: Desktop release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  signing-configuration:
+    name: Updater signing key
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the GitHub updater key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+            echo "Configure the TAURI_SIGNING_PRIVATE_KEY repository secret before publishing updater-enabled releases." >&2
+            exit 1
+          fi
+          echo "Updater artifacts will be signed and verified against the embedded public key."
+
+  publish:
+    name: ${{ matrix.name }}
+    needs: signing-configuration
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            platform: macos-15
+            target: aarch64-apple-darwin
+            bundle: app,dmg
+          - name: macOS Intel
+            platform: macos-15-intel
+            target: x86_64-apple-darwin
+            bundle: app,dmg
+          - name: Windows x64
+            platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Validate release version
+        run: python scripts/check_release_version.py
+
+      - name: Install sidecar dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Build native geometry sidecar
+        run: python scripts/build_sidecar.py --target ${{ matrix.target }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            app/ui/package-lock.json
+
+      - name: Install JavaScript dependencies
+        run: |
+          npm ci --prefix app
+          npm ci --prefix app/ui
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+
+      - name: Use open-source macOS ad-hoc signing
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app
+          tagName: v__VERSION__
+          releaseName: PrintForge v__VERSION__
+          releaseBody: |
+            Установщики PrintForge для macOS и Windows.
+
+            После публикации этой draft-версии установленные приложения увидят обновление через колокольчик.
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} --config src-tauri/tauri.release.conf.json

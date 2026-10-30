@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = [pytest.mark.integration, pytest.mark.real_kernel]
+
 BACKEND = Path(__file__).resolve().parent
+FIXTURES = BACKEND.parent / "tests" / "fixtures" / "f05"
 WORKER = BACKEND / "worker.py"
 PYTHON = BACKEND / ".venv" / "bin" / "python"
 
@@ -212,6 +215,32 @@ def test_mesh_check_open_edge(worker, tmp_path):
     c2 = {c["id"]: c for c in r2["result"]["checks"]}
     assert c2["boundary"]["status"] == "fail"
     assert c2["watertight"]["status"] == "fail"
+
+
+def test_independent_stl_fixtures(worker):
+    closed = FIXTURES / "unit_cube_ascii.stl"
+    imported = worker.call("import", {
+        "format": "stl",
+        "path": str(closed),
+        "unit_scale": 25.4,
+    })
+    assert imported["ok"], imported.get("error")
+    stats = imported["result"]["stats"]
+    assert stats["bbox_mesh"] == pytest.approx([25.4, 25.4, 25.4], abs=0.001)
+    assert stats["volume"] == pytest.approx(25.4 ** 3, rel=1e-6)
+
+    opened = worker.call("mesh_check", {"path": str(FIXTURES / "unit_cube_open_ascii.stl")})
+    assert opened["ok"], opened.get("error")
+    checks = {item["id"]: item for item in opened["result"]["checks"]}
+    assert checks["boundary"]["status"] == "fail"
+    assert checks["watertight"]["status"] == "fail"
+
+    damaged = worker.call("import", {
+        "format": "stl",
+        "path": str(FIXTURES / "truncated.stl"),
+        "unit_scale": 1.0,
+    })
+    assert damaged["ok"] is False
 
 
 # --- документ v3: несколько деталей и операции ---

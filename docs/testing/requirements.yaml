@@ -1,0 +1,1605 @@
+{
+  "schema_version": 1,
+  "current_stage": "M3",
+  "source": {
+    "product_requirements": "REQUIREMENTS.md",
+    "autotest_requirements": "PrintForge_Codex_Autotest_Requirements.md v1.0",
+    "autotest_requirements_sha256": "c1485d569f6b32e25f21b0593f65c21eb4c122f77300ef3af7bde8be43fed09a"
+  },
+  "note": "JSON is valid YAML 1.2. last_run_status is static and intentionally not_run; actual statuses live in generated test-report.json.",
+  "requirements": [
+    {
+      "requirement_id": "AC-01",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-CAD-01",
+        "T-DOC-01",
+        "T-IO-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AC-02",
+      "required_from": "M2",
+      "severity": "R",
+      "test_ids": [
+        "T-CAD-02",
+        "T-IO-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AC-03",
+      "required_from": "M2",
+      "severity": "R",
+      "test_ids": [
+        "T-CAD-03",
+        "T-IO-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AC-04",
+      "required_from": "M2",
+      "severity": "R",
+      "test_ids": [
+        "T-CAD-04",
+        "T-CAD-05"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AC-05",
+      "required_from": "M2",
+      "severity": "R",
+      "test_ids": [
+        "T-IO-01",
+        "T-IO-02"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AC-06",
+      "required_from": "M2",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "AC-07",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-13",
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AC-08",
+      "required_from": "M2",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "AC-09",
+      "required_from": "M2",
+      "severity": "R",
+      "test_ids": [
+        "T-PRINT-01",
+        "T-PRINT-02"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AC-10",
+      "required_from": "M3",
+      "severity": "R",
+      "test_ids": [
+        "T-AI-10",
+        "T-AI-12",
+        "T-AI-16"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AC-11",
+      "required_from": "M3",
+      "severity": "R",
+      "test_ids": [
+        "T-AI-05",
+        "T-AI-13",
+        "T-AI-17",
+        "T-AI-26"
+      ],
+      "levels": [
+        "integration-real-kernel",
+        "unit-contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AC-12",
+      "required_from": "M2",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-14",
+        "T-BUILD-01"
+      ],
+      "levels": [
+        "contract",
+        "release-contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AC-13",
+      "required_from": "M3",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "AI-001",
+      "required_from": "M3",
+      "severity": "B",
+      "test_ids": [
+        "T-AI-01",
+        "T-AI-02"
+      ],
+      "levels": [
+        "contract",
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AI-002",
+      "required_from": "M3",
+      "severity": "B",
+      "test_ids": [
+        "T-AI-02",
+        "T-AI-03"
+      ],
+      "levels": [
+        "contract",
+        "contract-loopback-http"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AI-003",
+      "required_from": "M3",
+      "severity": "B",
+      "test_ids": [
+        "T-AI-04",
+        "T-AI-05",
+        "T-AI-06"
+      ],
+      "levels": [
+        "contract-loopback-http",
+        "unit-contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AI-004",
+      "required_from": "M3",
+      "severity": "B",
+      "test_ids": [
+        "T-AI-07",
+        "T-AI-08"
+      ],
+      "levels": [
+        "contract-loopback-http",
+        "unit-contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AI-005",
+      "required_from": "M3",
+      "severity": "B",
+      "test_ids": [
+        "T-AI-10",
+        "T-AI-12",
+        "T-AI-13",
+        "T-AI-14",
+        "T-AI-16"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AI-006",
+      "required_from": "M3",
+      "severity": "B",
+      "test_ids": [
+        "T-AI-04",
+        "T-AI-05",
+        "T-AI-06"
+      ],
+      "levels": [
+        "contract-loopback-http",
+        "unit-contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AI-007",
+      "required_from": "M3",
+      "severity": "B",
+      "test_ids": [
+        "T-AI-17",
+        "T-AI-18",
+        "T-AI-19",
+        "T-AI-20",
+        "T-AI-23",
+        "T-AI-24",
+        "T-AI-26"
+      ],
+      "levels": [
+        "integration-real-kernel",
+        "integration-real-process"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "AI-008",
+      "required_from": "M3",
+      "severity": "Q",
+      "test_ids": [
+        "T-AI-27-HARNESS"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "BUILD-001",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-BUILD-01",
+        "T-BUILD-02"
+      ],
+      "levels": [
+        "release-contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "BUILD-002",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-BUILD-02"
+      ],
+      "levels": [
+        "release-contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "BUILD-003",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-BUILD-01"
+      ],
+      "levels": [
+        "release-contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "BUILD-004",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-BUILD-02",
+        "T-BUILD-03"
+      ],
+      "levels": [
+        "release-contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "CAD-001",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-01",
+        "T-CAD-02",
+        "T-CAD-03",
+        "T-CAD-04"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "CAD-002",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-01",
+        "T-CAD-02"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "CAD-003",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-04",
+        "T-CAD-05"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "CAD-004",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-06"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "CAD-005",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-06"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "CAD-006",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-06"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "CAD-007",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-06"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "CAD-008",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-06"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "CAD-009",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-06"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "CAD-010",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-01",
+        "T-CAD-02",
+        "T-CAD-03",
+        "T-CAD-04"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "DOC-001",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-DOC-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "DOC-002",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-CAD-01",
+        "T-CAD-02"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "DOC-003",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-AI-16"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "DOC-004",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-AI-13",
+        "T-AI-16",
+        "T-AI-17"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "DOC-005",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-AI-13",
+        "T-AI-17",
+        "T-AI-26"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "DOC-006",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-DOC-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "DOC-007",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-DOC-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "DOC-008",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-DOC-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-001",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-002",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-003",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-004",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-13"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-005",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-13"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-006",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-13"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-007",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-008",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-009",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-010",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-011",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-012",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "HELP-013",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [
+        "T-HELP-13",
+        "T-HELP-14"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "IO-001",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-IO-01",
+        "T-IO-02"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "IO-002",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-IO-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "IO-003",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-IO-01",
+        "T-IO-02"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "IO-004",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-IO-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "IO-005",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-IO-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "IO-006",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-DOC-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "PRINT-001",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-PRINT-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "PRINT-002",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-PRINT-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "PRINT-003",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-PRINT-02"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "PRINT-004",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-PRINT-02"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "PRINT-005",
+      "required_from": "M2",
+      "severity": "B",
+      "test_ids": [
+        "T-PRINT-01",
+        "T-PRINT-02"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "TECH-001",
+      "required_from": "M0",
+      "severity": "B",
+      "test_ids": [
+        "T-TECH-01",
+        "T-TECH-02"
+      ],
+      "levels": [
+        "contract",
+        "integration-real-process"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "TECH-002",
+      "required_from": "M0",
+      "severity": "B",
+      "test_ids": [
+        "T-TECH-03",
+        "T-AI-17",
+        "T-AI-24"
+      ],
+      "levels": [
+        "integration-real-kernel",
+        "integration-real-process"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "TECH-003",
+      "required_from": "M0",
+      "severity": "B",
+      "test_ids": [
+        "T-BUILD-01",
+        "T-BUILD-02"
+      ],
+      "levels": [
+        "release-contract"
+      ],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Есть перечисленное automated evidence; оставшиеся clauses и уровни указаны в TEST_GAPS.md."
+      ]
+    },
+    {
+      "requirement_id": "UI-001",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-002",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-003",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-004",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-005",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-006",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-007",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-008",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-009",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-010",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-011",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-012",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-013",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-014",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "UI-015",
+      "required_from": "M1",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "partial",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "Нет automated evidence подходящего уровня; требование не считается принятым."
+      ]
+    },
+    {
+      "requirement_id": "EXT-001",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-002",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-003",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-004",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-005",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-006",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-007",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-008",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-009",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-010",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-011",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    },
+    {
+      "requirement_id": "EXT-012",
+      "required_from": "M4",
+      "severity": "R",
+      "test_ids": [],
+      "levels": [],
+      "implementation_status": "planned",
+      "last_run_status": "not_run",
+      "evidence": [],
+      "uncovered_clauses": [
+        "M4 scope: функция и её доказательства ещё не реализованы."
+      ]
+    }
+  ]
+}

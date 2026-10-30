@@ -2,16 +2,19 @@ import React from "react";
 import type { CommandDef, DocState, TemplateDef, DocStats } from "./types";
 import {
   IconPlate, IconUndo, IconRedo, IconSave, IconOpen, IconExport,
-  IconQuestion, IconCursorQuestion, IconBook,
+  IconQuestion, IconCursorQuestion, IconBook, IconSparkles,
 } from "./icons";
+import { UpdateBell } from "./UpdateBell";
 
 export function cmdEnabled(c: CommandDef, doc: DocState | null): boolean {
   switch (c.availability) {
     case "always": return true;
     case "requires_document": return doc !== null;
     case "requires_body": return !!doc?.stats?.is_valid;
+    case "requires_two_bodies": return (doc?.stats?.parts?.length ?? doc?.stats?.solid_count ?? 0) >= 2;
     case "requires_undo": return !!doc?.can_undo;
     case "requires_redo": return !!doc?.can_redo;
+    case "requires_ai": return false;
   }
 }
 
@@ -23,7 +26,7 @@ interface TopBarProps {
 }
 
 const TOPBAR_IDS = [
-  "part.create.plate", "op.undo", "op.redo", "doc.save", "doc.open", "export.stl",
+  "part.create.plate", "op.undo", "op.redo", "doc.save", "doc.open", "export.stl", "ai.panel.open",
 ];
 const TOPBAR_ICONS: Record<string, React.ReactNode> = {
   "part.create.plate": <IconPlate />,
@@ -32,6 +35,7 @@ const TOPBAR_ICONS: Record<string, React.ReactNode> = {
   "doc.save": <IconSave />,
   "doc.open": <IconOpen />,
   "export.stl": <IconExport />,
+  "ai.panel.open": <IconSparkles />,
 };
 
 export function TopBar({ commands, doc, docName, onCommand }: TopBarProps) {
@@ -74,6 +78,7 @@ export function TopBar({ commands, doc, docName, onCommand }: TopBarProps) {
           })}
         </div>
         <span className="topbar-sep" aria-hidden />
+        <UpdateBell hasUnsavedChanges={!!doc?.dirty} />
         <button className="btn" data-cmd="app.help.what_is_this" aria-label="Что это?" title="Что это? (Shift+Escape)" onClick={() => onCommand("app.help.what_is_this")}>
           <IconCursorQuestion />
           <span>Что это?</span>

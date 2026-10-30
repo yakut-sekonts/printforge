@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = [pytest.mark.integration, pytest.mark.real_kernel]
+
 BACKEND = Path(__file__).resolve().parent
 WORKER = BACKEND / "worker.py"
 PYTHON = BACKEND / ".venv" / "bin" / "python"

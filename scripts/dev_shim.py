@@ -65,10 +65,15 @@ DEFAULTS = {
 
 class Doc:
     _ids = 0
+    _instances = 0
 
-    def __init__(self):
-        Doc._ids += 1
-        self.doc_id = f"doc-{Doc._ids}"
+    def __init__(self, document_id=None):
+        if document_id is None:
+            Doc._ids += 1
+            document_id = f"doc-{Doc._ids}"
+        Doc._instances += 1
+        self.doc_id = document_id
+        self.document_instance_id = f"instance-{Doc._instances}"
         self.parts = []          # [{part_id, name, template, params}]
         self.expressions = {}
         self.operations = []     # v3-операции (boolean/fillet/array/mirror/split/transform)
@@ -80,6 +85,7 @@ class Doc:
         self.stats = None
         self.mesh = None
         self.error = None
+        self.applied_actions = {}
         self._part_n = 0
         self.commit()
 
@@ -121,7 +127,9 @@ class Doc:
 
     def state(self, slot):
         return {
-            "doc_id": self.doc_id, "revision": self.revision,
+            "doc_id": self.doc_id,
+            "document_instance_id": self.document_instance_id,
+            "revision": self.revision,
             "dirty": self.dirty, "path": self.path, "slot": slot,
             "template": self.template, "params": self.params,
             "parts": self.parts,
@@ -144,9 +152,12 @@ class Doc:
         return {"parts": self.parts, "operations": ops}
 
     def rebuild(self):
-        if not self.template:
-            return
         self.revision += 1
+        if not self.template:
+            self.stats = None
+            self.mesh = None
+            self.error = None
+            return
         try:
             result = worker_call("build", self.build_params(), self.revision)
             self.stats = result.get("stats")
@@ -367,7 +378,8 @@ def save_doc(d, path):
     manifest = {"schema_version": 3, "app": "PrintForge",
                 "app_version": "0.1.0-m2", "units": "mm",
                 "kernel": "build123d/OCP"}
-    document = {"schema_version": 3, "units": "mm", "template": d.template,
+    document = {"schema_version": 3, "units": "mm",
+                "document_id": d.doc_id, "template": d.template,
                 "parts": d.parts,
                 "parameters": d.params, "expressions": d.expressions,
                 "operations": d.operations}
@@ -397,7 +409,7 @@ def cmd_doc_open(a):
     template = document.get("template") or "plate_with_holes"
     if template not in DEFAULTS:
         raise geo_error("bad_file", f"Неизвестный шаблон в проекте: {template}")
-    d.__init__()
+    d.__init__(document.get("document_id"))
     if document.get("parts"):
         d.parts = document["parts"]
         d._part_n = len(d.parts)
@@ -468,6 +480,27 @@ def cmd_doc_transaction(a):
     """Единая транзакция (DOC-004): preview на копии либо apply одним шагом
     истории. Операции — уже провалидированный декларативный набор."""
     d = doc()
+    instance_id = a.get("document_instance_id", d.document_instance_id)
+    if instance_id != d.document_instance_id:
+        raise geo_error("plan_stale", "План относится к другому открытию документа.")
+    supplied_hash = a.get("plan_hash")
+    expected_hash = ai_planner.plan_hash({
+        "schema_version": 1,
+        "document_id": d.doc_id,
+        "document_instance_id": d.document_instance_id,
+        "base_revision": a.get("base_revision", d.revision),
+        "units": "mm",
+        "operations": a.get("operations") or [],
+    })
+    if supplied_hash is not None and supplied_hash != expected_hash:
+        raise geo_error("plan_conflict", "План изменён после предпросмотра; пересчитайте его.")
+    action_id = a.get("action_id")
+    if action_id and action_id in d.applied_actions:
+        if d.applied_actions[action_id] != expected_hash:
+            raise geo_error("action_conflict", "action_id уже использован для другого плана.")
+        state = d.state(ACTIVE[0])
+        state["idempotent_replay"] = True
+        return state
     base = a.get("base_revision", d.revision)
     if base != d.revision:
         raise geo_error("plan_stale",
@@ -483,21 +516,59 @@ def cmd_doc_transaction(a):
         except Exception as e:  # noqa: BLE001
             raise geo_error("geometry_error", f"Предпросмотр не удался: {e}")
         return {"mode": "preview", "stats": tmp.stats, "error": tmp.error,
-                "parts": tmp.parts}
-    # apply: одна запись истории на весь пакет
-    _apply_plan_ops_to(d, ops)
+                "parts": tmp.parts, "plan_hash": expected_hash,
+                "base_revision": base,
+                "document_instance_id": d.document_instance_id}
+    # Сначала строим копию. Рабочий документ меняется только на commit boundary.
+    tmp = copy.deepcopy(d)
+    _apply_plan_ops_to(tmp, ops)
+    tmp.rebuild()
+    if tmp.error:
+        raise geo_error(
+            "geometry_error",
+            f"План не применён: {tmp.error.get('message', 'ошибка геометрии')}")
+    current = doc()
+    if current is not d or current.document_instance_id != instance_id or current.revision != base:
+        raise geo_error("plan_stale", "Документ изменился перед применением плана.")
+    if action_id and action_id in d.applied_actions:
+        if d.applied_actions[action_id] != expected_hash:
+            raise geo_error("action_conflict", "action_id уже использован для другого плана.")
+        state = d.state(ACTIVE[0])
+        state["idempotent_replay"] = True
+        return state
+    d.restore(tmp.snapshot())
     d.commit()
-    d.rebuild()
-    if d.error:
-        d.history.pop()
-        d.index -= 1
-        d.restore(d.history[d.index])
-        d.dirty = True
+    d.revision = tmp.revision
+    d.stats = tmp.stats
+    d.mesh = tmp.mesh
+    d.error = None
+    if action_id:
+        d.applied_actions[action_id] = expected_hash
     return d.state(ACTIVE[0])
 
 
 def cmd_ai_providers(a):
     return ai_planner.provider_info()
+
+
+def cmd_ai_configure(a):
+    try:
+        return ai_planner.configure_provider(
+            a.get("provider") or "disabled",
+            a.get("base_url") or "",
+            a.get("model") or "",
+            a.get("api_key"),
+            bool(a.get("clear_api_key")),
+        )
+    except ValueError as error:
+        raise geo_error("ai_settings_invalid", str(error)) from error
+
+
+def cmd_ai_test_connection(a):
+    try:
+        return ai_planner.test_connection()
+    except (ValueError, OSError) as error:
+        raise geo_error("ai_connection_failed", str(error)) from error
 
 
 def cmd_ai_plan(a):
@@ -507,8 +578,13 @@ def cmd_ai_plan(a):
         raise geo_error("bad_request", "Пустой запрос.")
     return ai_planner.ai_plan(
         text, d,
-        lambda ops, base: cmd_doc_transaction(
-            {"operations": ops, "base_revision": base, "mode": "preview"}))
+        lambda ops, base, digest: cmd_doc_transaction({
+            "operations": ops,
+            "base_revision": base,
+            "document_instance_id": d.document_instance_id,
+            "plan_hash": digest,
+            "mode": "preview",
+        }))
 
 
 def cmd_ai_chat(a):
@@ -571,6 +647,8 @@ HANDLERS = {
     "measure": cmd_measure,
     "doc_transaction": cmd_doc_transaction,
     "ai_providers": cmd_ai_providers,
+    "ai_configure": cmd_ai_configure,
+    "ai_test_connection": cmd_ai_test_connection,
     "ai_plan": cmd_ai_plan,
     "ai_chat": cmd_ai_chat,
     "doc_new_tutorial": cmd_doc_new_tutorial,

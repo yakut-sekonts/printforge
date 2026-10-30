@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type {
   CommandDef, DocState, Lesson, MeshData, LessonCheck, GeoError,
-  TemplateDef, EdgeRef, PrintCheck, ImportResult, DocStats,
+  TemplateDef, EdgeRef, PrintCheck, ImportResult, DocStats, AiOperation,
 } from "./types";
 import { backend, expandTilde, parseIpcError } from "./backend";
 import { evalExpression } from "./expr";
@@ -11,6 +11,7 @@ import { ParamsPanel, FilletUi } from "./ParamsPanel";
 import { HelpPanel, TooltipMode } from "./HelpPanel";
 import { Tooltips } from "./Tooltips";
 import { LessonBar, LessonRun, StepStatus } from "./LessonBar";
+import { AiPanel } from "./AiPanel";
 
 const TOOLTIP_KEY = "pf-tooltip-mode";
 const lessonKey = (id: string) => `pf-lesson-${id}`;
@@ -36,6 +37,7 @@ export default function App() {
   const [selectedFace, setSelectedFace] = useState<number | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
   const [whatIsThis, setWhatIsThis] = useState(false);
   const [articleReq, setArticleReq] = useState<{ helpId: string; seq: number } | null>(null);
   const [tooltipMode, setTooltipMode] = useState<TooltipMode>(
@@ -212,6 +214,20 @@ export default function App() {
     }
     if (progressed) setLessonRun(cur);
   }, [advanceIfDone, checkParams]);
+
+  const undoDocument = useCallback(async () => {
+    const state = await runBackend(() => backend.docUndo());
+    if (!state) return;
+    setStatusMsg("Последняя операция отменена");
+    lessonEvent({ type: "command", command_id: "op.undo" });
+  }, [runBackend, lessonEvent]);
+
+  const redoDocument = useCallback(async () => {
+    const state = await runBackend(() => backend.docRedo());
+    if (!state) return;
+    setStatusMsg("Операция повторена");
+    lessonEvent({ type: "command", command_id: "op.redo" });
+  }, [runBackend, lessonEvent]);
 
   useEffect(() => {
     const run = lessonRun;
@@ -436,9 +452,9 @@ export default function App() {
     if (code === "fillet_failed" || code === "reselect_required") {
       void runBackend(() => backend.docClearError());
     } else {
-      void runBackend(() => backend.docUndo());
+      void undoDocument();
     }
-  }, [runBackend]);
+  }, [runBackend, undoDocument]);
 
   // ---------- проверка печати ----------
   const runPrintCheck = useCallback(async (printer: { x: number; y: number; z: number }) => {
@@ -523,9 +539,31 @@ export default function App() {
   }, [lessonEvent]);
 
   const openHelpArticle = useCallback((helpId: string) => {
+    setAiOpen(false);
     setHelpOpen(true);
     setArticleReq((r) => ({ helpId, seq: (r?.seq ?? 0) + 1 }));
   }, []);
+
+  const applyAiPlan = useCallback(async (
+    operations: AiOperation[],
+    baseRevision: number,
+    documentInstanceId: string | number,
+    planHash: string,
+    actionId: string,
+  ): Promise<number | null> => {
+    const state = await runBackend(() => backend.docTransaction({
+      operations,
+      base_revision: baseRevision,
+      document_instance_id: documentInstanceId,
+      plan_hash: planHash,
+      action_id: actionId,
+      mode: "apply",
+    }));
+    if (!state || state.error) return null;
+    lessonEvent({ type: "params", state });
+    setStatusMsg("AI-план применён одной транзакцией");
+    return state.revision;
+  }, [runBackend, lessonEvent]);
 
   const highlightCommand = useCallback((commandId: string) => {
     const el = document.querySelector<HTMLElement>(`[data-cmd="${commandId}"]`);
@@ -541,18 +579,19 @@ export default function App() {
     const template = templates.find((t) => t.command_id === id);
     if (template) { void createFromTemplate(template); return; }
     switch (id) {
-      case "op.undo": void runBackend(() => backend.docUndo()); break;
-      case "op.redo": void runBackend(() => backend.docRedo()); break;
+      case "op.undo": void undoDocument(); break;
+      case "op.redo": void redoDocument(); break;
       case "doc.save": void doSave(); break;
       case "doc.open": void doOpen(); break;
       case "export.stl": void doExport("stl"); break;
       case "export.step": void doExport("step"); break;
       case "export.3mf": void doExport("3mf"); break;
       case "op.fillet": startFillet(); break;
-      case "app.help.open": setHelpOpen((v) => !v); break;
+      case "ai.panel.open": setHelpOpen(false); setAiOpen((v) => !v); break;
+      case "app.help.open": setAiOpen(false); setHelpOpen((v) => !v); break;
       case "app.help.what_is_this": setWhatIsThis((v) => !v); break;
     }
-  }, [commands, templates, createFromTemplate, runBackend, doSave, doOpen, doExport, startFillet]);
+  }, [commands, templates, createFromTemplate, undoDocument, redoDocument, doSave, doOpen, doExport, startFillet]);
 
   // ---------- режим «Что это?» ----------
   useEffect(() => {
@@ -582,9 +621,9 @@ export default function App() {
       if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) {
-          if (docRef.current?.can_redo) void runBackend(() => backend.docRedo());
+          if (docRef.current?.can_redo) void redoDocument();
         } else if (docRef.current?.can_undo) {
-          void runBackend(() => backend.docUndo());
+          void undoDocument();
         }
       } else if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
@@ -594,6 +633,7 @@ export default function App() {
         void doOpen();
       } else if (mod && e.key === "/") {
         e.preventDefault();
+        setAiOpen(false);
         setHelpOpen((v) => !v);
       } else if (e.key === "Escape" && e.shiftKey) {
         e.preventDefault();
@@ -601,12 +641,13 @@ export default function App() {
       } else if (e.key === "Escape") {
         if (filletRef.current.active) cancelFillet();
         else if (whatIsThis) setWhatIsThis(false);
+        else if (aiOpen) setAiOpen(false);
         else if (helpOpen) setHelpOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [whatIsThis, helpOpen, runBackend, doSave, doOpen, cancelFillet]);
+  }, [whatIsThis, helpOpen, aiOpen, undoDocument, redoDocument, doSave, doOpen, cancelFillet]);
 
   const faceAreaValue = mesh && selectedFace != null ? faceArea(mesh, selectedFace) : null;
   const docName = doc?.path ? doc.path.split("/").pop()! : "Без названия";
@@ -699,6 +740,14 @@ export default function App() {
           onOpen={() => void doOpen()}
           onExport={(f) => void doExport(f)}
         />
+        {aiOpen && (
+          <AiPanel
+            documentRevision={doc?.revision ?? 0}
+            onClose={() => setAiOpen(false)}
+            onApply={applyAiPlan}
+            onOpenHelp={() => openHelpArticle("ai-pomoshchnik")}
+          />
+        )}
         {helpOpen && (
           <HelpPanel
             onClose={() => setHelpOpen(false)}

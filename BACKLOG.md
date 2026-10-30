@@ -8,7 +8,7 @@
 - [ ] Минимальный документ (.printforge) и повторное построение из него
 - [ ] Технический экспорт STEP/STL/3MF и чтение результата
 - [ ] Геометрический worker как отдельный процесс (JSON-stdio), обработка падения
-- [ ] Пробная Tauri .app с упакованным backend (PyInstaller sidecar), запуск вне dev-окружения
+- [x] Tauri desktop bundle с упакованным backend (PyInstaller sidecar), запуск вне dev-окружения
 - [ ] ADR-001: стек; lockfiles; STATUS.md
 
 ## M1 — первый пользовательский сценарий (AC-01)
@@ -35,9 +35,10 @@
 - [ ] Бинарный mesh-канал для крупных сеток; восстановление после аварии; perf-замеры TECH-003
 - [ ] Уроки 1, 3, 4 — прогнать при случае; AC-12 полный обход реестра в .app
 
-## M3 — AI v0.2 (следующий)
-- [ ] Провайдеры AI: disabled / Ollama / OpenAI-совместимый endpoint (FreeLLMAPI, ADR-003)
-- [ ] AI через CommandService: план по JSON Schema, preview, одна транзакция, Undo
+## M3 — AI v0.2 (в работе)
+- [x] Провайдеры AI: disabled / локальный Ollama / OpenAI-совместимый endpoint; настройки, `/models` smoke, disclosure данных, Keychain
+- [x] AI через CommandService: план по JSON Schema, preview, одна транзакция, Undo; панель и AC-10 smoke пройдены в browser UI
+- [x] Desktop distribution: DMG macOS arm64/x64, NSIS Windows x64, GitHub Releases, signed Tauri Updater и колокольчик
 - [ ] Справочные ответы AI по встроенному справочнику (локальный поиск, без выдуманных команд)
 - [ ] AC-10, AC-11, оценка качества модели (20 запросов × 3 прогона)
 

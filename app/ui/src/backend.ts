@@ -1,4 +1,7 @@
-import type { DocState, MeshData, ExportResult, ImportResult, PrintCheckResult, EdgeRef, GeoError } from "./types";
+import type {
+  AiConnectionTest, AiOperation, AiPlanResponse, AiProviderConfig, AiProviderInfo,
+  DocState, EdgeRef, ExportResult, GeoError, ImportResult, MeshData, PrintCheckResult,
+} from "./types";
 
 const HOME = "/Users/semenkontsevoy";
 
@@ -12,12 +15,23 @@ export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI__" in window;
 }
 
-async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("Операция отменена", "AbortError");
+}
+
+async function call<T>(command: string, args?: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
   if (isTauri()) {
     const { invoke } = await import("@tauri-apps/api/core");
     try {
-      return (await invoke<T>(command, args)) as T;
+      const result = (await invoke<T>(command, args)) as T;
+      throwIfAborted(signal);
+      return result;
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") throw e;
       throw parseIpcError(e);
     }
   }
@@ -25,6 +39,7 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(args ?? {}),
+    signal,
   });
   const text = await resp.text();
   let data: unknown;
@@ -39,6 +54,16 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 }
 
 export function parseIpcError(e: unknown): GeoError {
+  if (e && typeof e === "object") {
+    const parsed = e as Partial<GeoError>;
+    if (parsed.code || parsed.message) {
+      return {
+        code: parsed.code ?? "error",
+        message: parsed.message ?? "Неизвестная ошибка",
+        detail: parsed.detail,
+      };
+    }
+  }
   const raw = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
   try {
     const parsed = JSON.parse(raw) as Partial<GeoError>;
@@ -83,10 +108,30 @@ export const backend = {
     call<DocState>("doc_align", { part_id: partId, axis, align, value }),
   measure: (args: { type: "bbox" | "volume" | "face_diameter" | "distance"; face_index?: number; p0?: [number, number, number]; p1?: [number, number, number] }) =>
     call<Record<string, unknown>>(`measure`, args as Record<string, unknown>),
-  aiProviders: () => call<AiProviders>("ai_providers"),
+  aiProviders: () => call<AiProviderInfo>("ai_providers"),
+  aiConfigure: (config: AiProviderConfig) => call<AiProviderInfo>(
+    "ai_configure",
+    isTauri()
+      ? {
+          provider: config.provider,
+          baseUrl: config.base_url,
+          model: config.model,
+          apiKey: config.api_key,
+          clearApiKey: config.clear_api_key,
+        }
+      : config as unknown as Record<string, unknown>,
+  ),
+  aiTestConnection: () => call<AiConnectionTest>("ai_test_connection"),
   aiPlan: (text: string, signal?: AbortSignal) =>
     call<AiPlanResponse>("ai_plan", { text }, signal),
-  docTransaction: (args: { operations: AiOperation[]; base_revision: number; mode: "apply" | "preview" }) =>
+  docTransaction: (args: {
+    operations: AiOperation[];
+    base_revision: number;
+    document_instance_id: string | number;
+    plan_hash: string;
+    action_id?: string;
+    mode: "apply" | "preview";
+  }) =>
     call<DocState>("doc_transaction", args as unknown as Record<string, unknown>),
   docFillet: (edge_ref: EdgeRef, radius: number, partId?: string) =>
     call<DocState>("doc_fillet", { edge_ref, radius, part_id: partId }),

@@ -4,17 +4,18 @@
 mod ai;
 
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use tauri::async_runtime::Receiver;
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::Mutex;
 
 const SCHEMA_VERSION: u32 = 3;
-const APP_VERSION: &str = "0.1.0-m2";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---------- геометрический worker ----------
 
@@ -105,6 +106,7 @@ struct Snapshot {
 
 struct Document {
     doc_id: u64,
+    document_instance_id: u64,
     snap: Snapshot,
     history: Vec<Snapshot>,
     index: usize,
@@ -114,13 +116,25 @@ struct Document {
     stats: Option<Value>,
     mesh: Option<Value>,
     error: Option<Value>,
+    applied_actions: HashMap<String, String>,
 }
 
 impl Document {
     fn new() -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let doc_id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self::with_document_id(doc_id)
+    }
+
+    fn with_document_id(doc_id: u64) -> Self {
+        static NEXT_INSTANCE_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         Document {
-            doc_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            doc_id,
+            document_instance_id: NEXT_INSTANCE_ID.fetch_add(
+                1,
+                std::sync::atomic::Ordering::Relaxed,
+            ),
             snap: Snapshot::default(),
             history: vec![Snapshot::default()],
             index: 0,
@@ -130,6 +144,7 @@ impl Document {
             stats: None,
             mesh: None,
             error: None,
+            applied_actions: HashMap::new(),
         }
     }
 
@@ -165,6 +180,7 @@ impl Document {
     fn state(&self, slot: &str) -> Value {
         json!({
             "doc_id": self.doc_id,
+            "document_instance_id": self.document_instance_id,
             "revision": self.revision,
             "dirty": self.dirty,
             "path": self.path.as_ref().map(|p| p.to_string_lossy()),
@@ -217,10 +233,13 @@ async fn current_state() -> Value {
 }
 
 async fn rebuild(app: &tauri::AppHandle, doc: &mut Document) {
+    doc.revision += 1;
     if doc.snap.parts.is_empty() {
+        doc.stats = None;
+        doc.mesh = None;
+        doc.error = None;
         return;
     }
-    doc.revision += 1;
     match worker_call(app, "build", doc.build_params(), doc.revision).await {
         Ok(result) => {
             doc.stats = result.get("stats").cloned();
@@ -531,13 +550,17 @@ async fn measure(app: tauri::AppHandle, measure_type: String, extra: Option<Valu
     worker_call(&app, "measure", call, revision).await
 }
 
-fn apply_plan_ops(snap: &mut Snapshot, ops: &[Value]) {
+fn apply_plan_ops(snap: &mut Snapshot, ops: &[Value]) -> Result<(), String> {
     for op in ops {
         let cid = op.get("command_id").and_then(Value::as_str).unwrap_or("");
-        let params = op.get("parameters").cloned().unwrap_or(json!({}));
+        let params = op.get("parameters").and_then(Value::as_object)
+            .ok_or_else(|| geo_err("plan_invalid", "В операции нет parameters."))?;
         match cid {
             "part.create.from_template" => {
                 let template = params.get("template").and_then(Value::as_str).unwrap_or("");
+                if !TEMPLATES.contains(&template) {
+                    return Err(geo_err("plan_invalid", "Неизвестный шаблон в AI-плане."));
+                }
                 let mut pmap = BTreeMap::new();
                 if let Some(obj) = params.get("params").and_then(Value::as_object) {
                     for (k, v) in obj {
@@ -555,11 +578,10 @@ fn apply_plan_ops(snap: &mut Snapshot, ops: &[Value]) {
                 let tid = op.get("target_id").and_then(Value::as_str).unwrap_or("");
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let value = params.get("value").and_then(Value::as_f64).unwrap_or(0.0);
-                if let Some(part) = snap.parts.iter_mut().find(|p| {
+                let part = snap.parts.iter_mut().find(|p| {
                     p.get("part_id").and_then(Value::as_str) == Some(tid)
-                }) {
-                    part["params"][name] = json!(value);
-                }
+                }).ok_or_else(|| geo_err("plan_invalid", "Целевая деталь не существует."))?;
+                part["params"][name] = json!(value);
             }
             "op.fillet" => {
                 let radius = params.get("radius").and_then(Value::as_f64).unwrap_or(0.0);
@@ -572,9 +594,10 @@ fn apply_plan_ops(snap: &mut Snapshot, ops: &[Value]) {
                     "part_id": tid,
                 }));
             }
-            _ => {}
+            _ => return Err(geo_err("plan_forbidden", "Команда не разрешена для AI.")),
         }
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -582,73 +605,155 @@ async fn doc_transaction(
     app: tauri::AppHandle,
     operations: Vec<Value>,
     base_revision: Option<u64>,
+    document_instance_id: Option<u64>,
+    plan_hash: Option<String>,
+    action_id: Option<String>,
     mode: Option<String>,
 ) -> Result<Value, String> {
-    let (doc_id, revision) = with_store(|s| {
+    let (doc_id, instance_id, revision, snap) = with_store(|s| {
         let doc = active_doc(s);
-        (doc.doc_id, doc.revision)
+        (doc.doc_id, doc.document_instance_id, doc.revision, doc.snap.clone())
     })
     .await;
-    let _ = doc_id;
-    if base_revision.unwrap_or(revision) != revision {
-        return Err(geo_err("plan_stale",
-            "Документ изменился, пока формировалось предложение. Пересчитайте."));
-    }
     if operations.is_empty() {
         return Err(geo_err("plan_invalid", "Пустой набор операций."));
     }
-    if mode.as_deref() == Some("apply") {
-        with_store(|s| {
-            let doc = active_doc(s);
-            let mut next = doc.snap.clone();
-            apply_plan_ops(&mut next, &operations);
-            doc.commit(next);
-        })
-        .await;
-        rebuild_active(&app).await;
-        with_store(|s| {
-            let doc = active_doc(s);
-            if doc.error.is_some() && doc.index > 0 {
-                let err = doc.error.clone();
-                doc.history.pop();
-                doc.index -= 1;
-                doc.snap = doc.history[doc.index].clone();
-                doc.error = err;
-            }
-        })
-        .await;
-        return Ok(current_state().await);
+    if document_instance_id.unwrap_or(instance_id) != instance_id {
+        return Err(geo_err("plan_stale", "План относится к другому открытию документа."));
     }
-    // preview на временной копии документа
-    let mut tmp = with_store(|s| {
-        let doc = active_doc(s);
-        Document {
-            doc_id: doc.doc_id,
-            snap: doc.snap.clone(),
-            history: vec![],
-            index: 0,
-            dirty: false,
-            path: None,
-            revision: doc.revision,
-            stats: None,
-            mesh: None,
-            error: None,
+    let base = base_revision.unwrap_or(revision);
+    let expected_hash = ai::plan_hash(doc_id, instance_id, base, &operations);
+    if plan_hash.as_deref().is_some_and(|value| value != expected_hash) {
+        return Err(geo_err(
+            "plan_conflict",
+            "План изменён после предпросмотра; пересчитайте его.",
+        ));
+    }
+    if let Some(action) = action_id.as_ref() {
+        let replay = with_store(|s| -> Result<Option<Value>, String> {
+            let slot = s.active.clone();
+            let doc = active_doc(s);
+            if let Some(previous_hash) = doc.applied_actions.get(action) {
+                if previous_hash != &expected_hash {
+                    return Err(geo_err(
+                        "action_conflict",
+                        "action_id уже использован для другого плана.",
+                    ));
+                }
+                let mut state = doc.state(&slot);
+                state["idempotent_replay"] = json!(true);
+                return Ok(Some(state));
+            }
+            Ok(None)
+        })
+        .await?;
+        if let Some(state) = replay {
+            return Ok(state);
         }
-    })
-    .await;
-    apply_plan_ops(&mut tmp.snap, &operations);
+    }
+    if base != revision {
+        return Err(geo_err(
+            "plan_stale",
+            "Документ изменился, пока формировалось предложение. Пересчитайте.",
+        ));
+    }
+    let mut candidate = snap;
+    apply_plan_ops(&mut candidate, &operations)?;
+    let mut tmp = Document {
+        doc_id,
+        document_instance_id: instance_id,
+        snap: candidate.clone(),
+        history: vec![],
+        index: 0,
+        dirty: false,
+        path: None,
+        revision: base,
+        stats: None,
+        mesh: None,
+        error: None,
+        applied_actions: HashMap::new(),
+    };
     rebuild(&app, &mut tmp).await;
+    if mode.as_deref() == Some("apply") {
+        if let Some(error) = tmp.error {
+            return Err(error.to_string());
+        }
+        return with_store(|s| -> Result<Value, String> {
+            let slot = s.active.clone();
+            let doc = active_doc(s);
+            if doc.doc_id != doc_id
+                || doc.document_instance_id != instance_id
+                || doc.revision != base
+            {
+                return Err(geo_err("plan_stale", "Документ изменился перед применением плана."));
+            }
+            if let Some(action) = action_id.as_ref() {
+                if let Some(previous_hash) = doc.applied_actions.get(action) {
+                    if previous_hash != &expected_hash {
+                        return Err(geo_err(
+                            "action_conflict",
+                            "action_id уже использован для другого плана.",
+                        ));
+                    }
+                    let mut state = doc.state(&slot);
+                    state["idempotent_replay"] = json!(true);
+                    return Ok(state);
+                }
+            }
+            doc.commit(candidate);
+            doc.revision = tmp.revision;
+            doc.stats = tmp.stats;
+            doc.mesh = tmp.mesh;
+            doc.error = None;
+            if let Some(action) = action_id {
+                doc.applied_actions.insert(action, expected_hash);
+            }
+            Ok(doc.state(&slot))
+        })
+        .await;
+    }
     Ok(json!({
         "mode": "preview",
         "stats": tmp.stats,
         "error": tmp.error,
         "parts": tmp.snap.parts,
+        "plan_hash": expected_hash,
+        "base_revision": base,
+        "document_instance_id": instance_id,
     }))
 }
 
 #[tauri::command]
 async fn ai_providers() -> Result<Value, String> {
     Ok(ai::provider_info())
+}
+
+#[tauri::command]
+async fn ai_configure(
+    app: tauri::AppHandle,
+    provider: String,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+    clear_api_key: Option<bool>,
+) -> Result<Value, String> {
+    let config_dir = app.path().app_config_dir().map_err(|error| error.to_string())?;
+    ai::configure(
+        &config_dir,
+        provider,
+        base_url,
+        model,
+        api_key,
+        clear_api_key.unwrap_or(false),
+    )
+    .map_err(|message| geo_err("ai_settings_invalid", message))
+}
+
+#[tauri::command]
+async fn ai_test_connection() -> Result<Value, String> {
+    ai::test_connection()
+        .await
+        .map_err(|message| geo_err("ai_connection_failed", message))
 }
 
 #[tauri::command]
@@ -660,29 +765,65 @@ async fn ai_plan(app: tauri::AppHandle, text: String) -> Result<Value, String> {
     if text.trim().is_empty() {
         return Err(geo_err("bad_request", "Пустой запрос."));
     }
-    let (doc_id, revision, parts, part_ids) = with_store(|s| {
+    let (doc_id, instance_id, revision, parts, part_ids) = with_store(|s| {
         let doc = active_doc(s);
         let ids: Vec<String> = doc.snap.parts.iter()
             .filter_map(|p| p.get("part_id").and_then(Value::as_str).map(String::from))
             .collect();
-        (doc.doc_id, doc.revision, doc.snap.parts.clone(), ids)
+        (
+            doc.doc_id,
+            doc.document_instance_id,
+            doc.revision,
+            doc.snap.parts.clone(),
+            ids,
+        )
     })
     .await;
     let plan = if info["scripted"] == true {
-        ai::scripted_plan(&text, doc_id, revision, &parts)
+        ai::scripted_plan(&text, doc_id, instance_id, revision, &parts)
     } else {
-        ai::llm_plan(&text, doc_id, revision, &parts).await?
+        ai::llm_plan(
+            &text,
+            doc_id,
+            instance_id,
+            revision,
+            &parts,
+            &part_ids,
+        )
+        .await?
     };
-    if let Some(err) = ai::validate_plan(&plan, doc_id, revision, &part_ids) {
+    if let Some(err) = ai::validate_plan(&plan, doc_id, instance_id, revision, &part_ids) {
         return Err(err.to_string());
     }
     let ops = plan.get("operations").and_then(Value::as_array).cloned().unwrap_or_default();
+    let plan_hash = ai::plan_hash(doc_id, instance_id, revision, &ops);
     let preview = if ops.is_empty() {
         Value::Null
     } else {
-        doc_transaction(app, ops, Some(revision), None).await?
+        doc_transaction(
+            app,
+            ops,
+            Some(revision),
+            Some(instance_id),
+            Some(plan_hash.clone()),
+            None,
+            None,
+        )
+        .await?
     };
-    Ok(json!({"plan": plan, "preview": preview}))
+    static NEXT_ACTION_ID: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+    let action_id = format!(
+        "ai-{}-{}",
+        instance_id,
+        NEXT_ACTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    );
+    Ok(json!({
+        "plan": plan,
+        "preview": preview,
+        "plan_hash": plan_hash,
+        "action_id": action_id,
+    }))
 }
 
 #[tauri::command]
@@ -802,6 +943,7 @@ fn save_document(doc: &Document, target: &PathBuf) -> Result<(), String> {
     });
     let document = json!({
         "schema_version": SCHEMA_VERSION, "units": "mm",
+        "document_id": doc.doc_id,
         "template": doc.snap.parts.first().and_then(|p| p.get("template")),
         "parts": doc.snap.parts,
         "parameters": doc.snap.parts.first().and_then(|p| p.get("params")).cloned().unwrap_or(json!({})),
@@ -849,6 +991,7 @@ async fn doc_open(app: tauri::AppHandle, path: String) -> Result<Value, String> 
         .map_err(|e| e.to_string())?;
     let doc_json: Value = serde_json::from_str(&buf)
         .map_err(|_| geo_err("bad_file", "document.json повреждён."))?;
+    let document_id = doc_json.get("document_id").and_then(Value::as_u64);
     const TEMPLATES: [&str; 4] = ["plate_with_holes", "washer", "bracket_l", "case_with_lid"];
     let template = doc_json
         .get("template")
@@ -890,7 +1033,7 @@ async fn doc_open(app: tauri::AppHandle, path: String) -> Result<Value, String> 
     let p = PathBuf::from(&path);
     with_store(|s| {
         let doc = active_doc(s);
-        *doc = Document::new();
+        *doc = document_id.map(Document::with_document_id).unwrap_or_else(Document::new);
         doc.commit(snap.clone());
         doc.path = Some(p.clone());
         doc.dirty = false;
@@ -1043,7 +1186,12 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|_app| {
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            if let Ok(config_dir) = app.path().app_config_dir() {
+                ai::initialize(&config_dir);
+            }
             spawn_autosave();
             Ok(())
         })
@@ -1060,6 +1208,12 @@ fn main() {
             doc_array_circular,
             doc_align,
             measure,
+            doc_transaction,
+            ai_providers,
+            ai_configure,
+            ai_test_connection,
+            ai_plan,
+            ai_chat,
             doc_set_parameter,
             doc_fillet,
             doc_clear_error,

@@ -51,3 +51,9 @@ export const IconSearch = () => (
 export const IconBook = () => (
   <svg {...S}><path d="M3 3.5A1.5 1.5 0 0 1 4.5 2H13v11.5H4.5A1.5 1.5 0 0 0 3 15z"/><path d="M3 13.5V3.5"/></svg>
 );
+export const IconSparkles = () => (
+  <svg {...S}><path d="m8 1 .9 2.6L11.5 5 8.9 6.4 8 9l-.9-2.6L4.5 5l2.6-1.4z"/><path d="m12.5 9 .5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/><path d="m3 9 .5 1.5 1.5.5-1.5.5L3 13l-.5-1.5L1 11l1.5-.5z"/></svg>
+);
+export const IconBell = () => (
+  <svg {...S}><path d="M3.5 11.5h9l-1.2-1.7V6.6a3.3 3.3 0 0 0-6.6 0v3.2z"/><path d="M6.4 13.2a1.8 1.8 0 0 0 3.2 0"/></svg>
+);

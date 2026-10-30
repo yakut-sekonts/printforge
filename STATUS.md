@@ -1,6 +1,6 @@
 # STATUS.md — статус PrintForge
 
-Обновлено: 2026-10-23. Этап: M2 завершён по основному объёму (уроки 2, 5, 6, 7, 8 пройдены в реальном UI). FreeLLMAPI установлен как fallback-провайдер для M3 (ADR-003). Остаётся: бинарный mesh-канал, восстановление после аварии, perf-замеры, проверка .app внутри WKWebView, M3.
+Обновлено: 2026-10-30. Этап: M3 в работе. AI-конвейер «запрос → проверенный план → preview → одна транзакция → Undo» и пользовательские настройки провайдеров подключены к UI и проверены в browser runtime и собранной `.app`. Остаётся: справочные ответы, полный AC-10/AC-11 и quality gate; из M2 — бинарный mesh-канал, восстановление после аварии и perf-замеры.
 
 ## Что пользователь уже может сделать
 
@@ -9,13 +9,14 @@
 - Изменение параметров с отменой/повтором (одно действие = одна транзакция), сохранение/открытие `.printforge` (v2, читает v1), автосохранение каждые 30 с (в .app), файловые диалоги macOS (в .app).
 - Экспорт STL/STEP/3MF; импорт STEP (точный) и STL (с выбором единиц после показа габарита; режим сетки без BRep-операций).
 - Проверка перед печатью: валидность, тела, объём, габарит vs профиль принтера; «Не проверено» для нереализованного, без общего зелёного статуса.
-- Справка офлайн (22 статьи, все 18 команд), поиск с синонимами, «Что это?», «Показать в интерфейсе», 3 режима подсказок, 8 уроков (1–3 проверены в M1; 4–8 описаны, движок расширен типами operation/error_shown/imported/check_result).
+- Справка офлайн (28 статей, 32 команды), поиск с синонимами, «Что это?», «Показать в интерфейсе», 3 режима подсказок, 9 уроков.
+- AI-помощник: `disabled` по умолчанию, локальный Ollama или OpenAI-совместимый endpoint; UI явно показывает передаваемые данные, проверяет `/models`, хранит API key в системном хранилище и показывает JSON-план с геометрическим preview до применения.
 
 ## Как запустить
 
 - `.app`: команды в README; итог — `app/src-tauri/target/release/bundle/macos/PrintForge.app` (~129 МБ, sidecar внутри).
 - Dev: `scripts/dev_shim.py` + `cd app/ui && npx vite`.
-- Проверки: `backend/.venv/bin/python -m pytest backend/test_worker.py backend/test_templates.py -q` (13/13); `scripts/check_help.py`; инспекторы дизайна — см. DESIGN_SOURCES.md.
+- Проверки: `backend/.venv/bin/python -m pytest backend/test_worker.py backend/test_templates.py backend/test_ai.py -q` (38/38); `cd app/ui && npm run build`; `cd app/src-tauri && cargo check`; `scripts/check_help.py`; инспекторы дизайна — см. DESIGN_SOURCES.md.
 
 ## Выполненные проверки (macOS 27, M3 8 ГБ)
 
@@ -33,7 +34,7 @@
 
 ## Ограничения / непроверенное
 
-- UI внутри итоговой .app не кликался (нет инструмента для WKWebView); прогоны — в браузере на том же dist и контракте. Пометка непроверенного остаётся.
+- Полный AC-12 внутри `.app` ещё не пройден; в WKWebView проверен AI-сценарий M3 и ранее автономность sidecar, остальные команды требуют полного обхода.
 - Уроки 4–8 не прогонялись в UI (движок готов); AC-07/AC-08 повторить на M2-функциях; AC-09 частично (bed_fit проверен worker'ом; импорт сетки с открытым краем — не проверен).
 - Слайсер не установлен (масштаб в слайсере не подтверждён); подписи нет; булевы операции произвольных тел, профили/выдавливание, массивы, разделение, измерения в UI — следующие итерации M2; бинарный mesh-канал (крупные сетки) — отложено.
 
@@ -66,7 +67,42 @@
 - Исправлено: двухфазный импорт читал bbox вместо bbox_mesh (не показывался выбор единиц); импортированная сетка приходила handle'ом и роняла UI (чтение ресурса через doc_get_imported_mesh); урок застревал, когда одно событие закрывает несколько шагов (цикл продвижения в движке); счётчик треугольников пустой для сетки.
 - FreeLLMAPI: установлен и запущен (API :3001/v1, дашборд :5174), ADR-003.
 
+## Последний срез (M3 UI и транзакция, 2026-10-30)
+
+- Добавлена пользовательская AI-панель: статус провайдера, отменяемый запрос, JSON-план в читаемом виде, явные допущения/вопросы, точный preview и применение одной транзакцией.
+- Tauri-команды `ai_providers`, `ai_plan`, `ai_chat` и `doc_transaction` зарегистрированы в `invoke_handler`; TypeScript-контракт AI типизирован, `npm run build` теперь обязательно выполняет `tsc --noEmit`.
+- Исправлен Undo пустого документа в Rust и dev-shim: производные `stats/mesh/error` очищаются, revision увеличивается, устаревший AI-preview сбрасывается. Добавлен regression test.
+- Проверено: pytest 34/34, справка 28 статей/32 команды, TypeScript + Vite build, `cargo check`; в browser UI и собранной `.app` шайба 20×6×4 даёт preview 1143,5 мм³, применяется одной транзакцией и удаляется одним Undo.
+- Собрана `PrintForge.app` 142,61 МиБ со встроенным sidecar; устаревшие заголовок «пробная сборка M0» и bundle identifier с суффиксом `.app` исправлены.
+- Не проверено в этом срезе: Ollama/OpenAI endpoint и полный quality gate 20×3.
+
+## Последний срез (настройки AI-провайдеров, 2026-10-30)
+
+- Добавлены пользовательские профили `disabled`, локальный Ollama и OpenAI-совместимый endpoint. Для Ollama удалённый host запрещён; модель не скачивается автоматически.
+- Не-секретные настройки сохраняются в app config; API key — только в macOS Keychain через `keyring`, не возвращается в UI и не попадает в `ai-settings.json`. Browser dev-shim хранит тестовый key только в памяти процесса.
+- «Сохранить и проверить» делает только `GET /models`; перед отправкой плана UI перечисляет фактический контекст: запрос, шаблоны, размеры и операции, без сетки и файла проекта.
+- Для Ollama план запрашивается с JSON Schema через `response_format`; generic OpenAI-compatible профиль не объявляется schema-capable без проверки и в любом случае проходит собственную валидацию приложения.
+- Исправлены два найденных smoke-тестом дефекта: повторный `parseIpcError` показывал `[object Object]`, а Tauri-команда настройки требовала `camelCase` IPC-параметры.
+- Проверено: pytest 38/38, TypeScript + Vite build, `cargo check`, help index, release bundle 142,83 МиБ; browser UI — default-off, Ollama disclosure/валидация, OpenAI session key; native `.app` — сохранение профиля между перезапусками и Keychain item без секрета в config. Тестовый key после проверки удалён, профиль возвращён в `disabled`.
+- Не проверено: реальная генерация Ollama/FreeLLMAPI (endpoint не был запущен), Windows Credential Manager/Linux Secret Service и quality gate 20×3.
+
 ## Следующие задачи
 
-1. Бинарный mesh-канал; восстановление после аварии; perf-замеры TECH-003; уроки 1, 3, 4 при случае.
-2. M3: AI-помощник через CommandService (план по JSON Schema, preview, одна транзакция, AC-10/AC-11); провайдеры disabled/Ollama/OpenAI-совместимый endpoint (FreeLLMAPI).
+1. M3: справочные ответы по локальному индексу; полный AC-10/AC-11 и quality gate 20×3 на выбранной локальной модели.
+2. Бинарный mesh-канал; восстановление после аварии; perf-замеры TECH-003; уроки 1, 3, 4 при случае; AC-12 внутри `.app`.
+
+## Последний срез (desktop distribution, 2026-10-30)
+
+- Версия desktop нормализована до `0.1.0`; приложение и исходный код подготовлены к поставке по Apache-2.0 через GitHub Releases.
+- Добавлены native release targets: DMG для macOS Apple Silicon/Intel и NSIS для Windows x64; geometry sidecar собирается PyInstaller на runner той же архитектуры.
+- Tauri Updater проверяет обязательную Ed25519 signature, берёт `latest.json` из GitHub Release и показывает обновление через колокольчик: download progress, release notes, установка и restart, блокировка при несохранённом документе.
+- Workflow создаёт draft release; macOS использует ad-hoc signature без notarization, Windows — без Authenticode, в соответствии с open-source моделью Apertone.
+- Полная проверка GitHub matrix и установленного update-перехода ожидает первый draft release; локальные build/check перечислены в `docs/DISTRIBUTION.md`.
+
+## Последний срез (автотесты и traceability, 2026-10-30)
+
+- Добавлен explicit manifest: 85 ID исходного ТЗ + `EXT-001…EXT-012`, без ложных `passed`.
+- Deterministic M3 покрывает production validation, loopback provider adapter, schema repair, real-kernel preview/apply/export/Undo, atomic failure, stale/ABA, plan hash, instance guard и idempotent action.
+- Добавлены независимые F-01…F-04 ожидания и hand-authored F-05 STL fixtures.
+- `scripts/run_test_stage.py` формирует JSON/JUnit/log artifacts и поддерживает полный baseline либо impact-based локальный прогон.
+- Native UI E2E, release smoke, Windows run и live LLM eval остаются явно `blocked/not_run`; детали в `docs/testing/TEST_GAPS.md`.
