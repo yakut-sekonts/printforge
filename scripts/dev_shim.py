@@ -76,7 +76,7 @@ class Doc:
         self.document_instance_id = f"instance-{Doc._instances}"
         self.parts = []          # [{part_id, name, template, params}]
         self.expressions = {}
-        self.operations = []     # v3-операции (boolean/fillet/array/mirror/split/transform)
+        self.operations = []     # v3-операции (boolean/fillet/chamfer/array/mirror/split/transform)
         self.history = []
         self.index = -1
         self.dirty = False
@@ -146,7 +146,7 @@ class Doc:
         # единый v3-путь: реальные part_id во всех статусах и операциях
         ops = []
         for o in self.operations:
-            if o.get("op") == "fillet" and "part_id" not in o:
+            if o.get("op") in ("fillet", "chamfer") and "part_id" not in o:
                 o = {**o, "part_id": self.parts[0]["part_id"]}
             ops.append(o)
         return {"parts": self.parts, "operations": ops}
@@ -216,7 +216,6 @@ def cmd_doc_set_parameter(a):
 
 def _apply_op(a, op):
     d = doc()
-    d.operations = [o for o in d.operations if o.get("op") != op["op"] or op["op"] != "fillet"]
     d.operations.append(op)
     d.commit()
     d.rebuild()
@@ -285,6 +284,49 @@ def cmd_doc_profile_extrude(a):
     return _apply_op(a, op)
 
 
+def cmd_doc_face_feature(a):
+    mode = a.get("mode")
+    if mode not in ("add", "cut"):
+        raise geo_error("bad_params", "Режим элемента должен быть add или cut.")
+    return _apply_op(a, {
+        "op": "face_feature",
+        "target_id": a["target_id"],
+        "mode": mode,
+        "face_ref": a["face_ref"],
+        "profile": a["profile"],
+        "depth": a["depth"],
+    })
+
+
+def cmd_doc_face_dome(a):
+    mode = a.get("mode")
+    if mode not in ("add", "cut"):
+        raise geo_error("bad_params", "Режим сферического сегмента должен быть add или cut.")
+    return _apply_op(a, {
+        "op": "face_dome",
+        "target_id": a["target_id"],
+        "mode": mode,
+        "face_ref": a["face_ref"],
+        "center": a.get("center") or [0, 0],
+        "diameter": a["diameter"],
+        "height": a["height"],
+    })
+
+
+def cmd_doc_sheet_bend(a):
+    return _apply_op(a, {
+        "op": "sheet_bend",
+        "target_id": a["target_id"],
+        "face_ref": a["face_ref"],
+        "bend_axis": a["bend_axis"],
+        "position": a["position"],
+        "angle": a["angle"],
+        "inside_radius": a["inside_radius"],
+        "moving_side": a["moving_side"],
+        "direction": a["direction"],
+    })
+
+
 def cmd_doc_array_circular(a):
     return _apply_op(a, {"op": "array_circular", "part_id": a["part_id"],
                          "count": int(a["count"]),
@@ -316,6 +358,19 @@ def cmd_doc_fillet(a):
     if not isinstance(radius, (int, float)) or radius <= 0:
         raise geo_error("bad_value", "Радиус скругления должен быть больше нуля.")
     op = {"op": "fillet", "radius": radius, "edge_ref": a["edge_ref"]}
+    d = doc()
+    if a.get("part_id"):
+        op["part_id"] = a["part_id"]
+    elif d.parts:
+        op["part_id"] = d.parts[0]["part_id"]
+    return _apply_op(a, op)
+
+
+def cmd_doc_chamfer(a):
+    distance = a.get("distance")
+    if not isinstance(distance, (int, float)) or distance <= 0:
+        raise geo_error("bad_value", "Размер фаски должен быть больше нуля.")
+    op = {"op": "chamfer", "distance": distance, "edge_ref": a["edge_ref"]}
     d = doc()
     if a.get("part_id"):
         op["part_id"] = a["part_id"]
@@ -623,6 +678,7 @@ HANDLERS = {
     "doc_create_plate": cmd_doc_create_plate,
     "doc_set_parameter": cmd_doc_set_parameter,
     "doc_fillet": cmd_doc_fillet,
+    "doc_chamfer": cmd_doc_chamfer,
     "doc_clear_error": cmd_doc_clear_error,
     "doc_undo": cmd_doc_undo,
     "doc_redo": cmd_doc_redo,
@@ -642,6 +698,9 @@ HANDLERS = {
     "doc_split": cmd_doc_split,
     "doc_transform": cmd_doc_transform,
     "doc_profile_extrude": cmd_doc_profile_extrude,
+    "doc_face_feature": cmd_doc_face_feature,
+    "doc_face_dome": cmd_doc_face_dome,
+    "doc_sheet_bend": cmd_doc_sheet_bend,
     "doc_array_circular": cmd_doc_array_circular,
     "doc_align": cmd_doc_align,
     "measure": cmd_measure,

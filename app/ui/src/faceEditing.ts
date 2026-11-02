@@ -1,6 +1,7 @@
-import type { MeshData, PartDef, TemplateDef } from "./types";
-
-export type FaceAxis = "x" | "y" | "z";
+import type {
+  FaceAxis, FaceDomeArgs, FaceFeatureArgs, FaceFeatureProfile, MeshData, PartDef, SheetBendArgs,
+  TemplateDef,
+} from "./types";
 
 export interface FaceAnalysis {
   faceIndex: number;
@@ -11,6 +12,7 @@ export interface FaceAnalysis {
   side: -1 | 1;
   planar: boolean;
   atBoundary: boolean;
+  axisSpan: number;
 }
 
 export interface FaceEditTarget extends FaceAnalysis {
@@ -21,6 +23,34 @@ export interface FaceEditTarget extends FaceAnalysis {
   minimum: number;
   deltaFactor: number;
   symmetric: boolean;
+}
+
+export interface FaceFeatureTarget extends FaceAnalysis {
+  partId: string;
+  uAxis: FaceAxis;
+  vAxis: FaceAxis;
+  uLabel: string;
+  vLabel: string;
+  anchor: [number, number];
+}
+
+export interface FaceFeaturePreview {
+  target: FaceFeatureTarget;
+  args: FaceFeatureArgs;
+}
+
+export interface FaceDomePreview {
+  target: FaceFeatureTarget;
+  args: FaceDomeArgs;
+}
+
+export interface SheetBendPreview {
+  target: FaceFeatureTarget;
+  args: SheetBendArgs;
+  bends: SheetBendArgs[];
+  length: number;
+  width: number;
+  thickness: number;
 }
 
 const AXIS_INDEX: Record<FaceAxis, 0 | 1 | 2> = { x: 0, y: 1, z: 2 };
@@ -103,7 +133,7 @@ export function analyzeFace(mesh: MeshData, faceIndex: number): FaceAnalysis | n
 
   const bounds = meshBounds(mesh);
   const side: -1 | 1 = axis
-    ? (center[AXIS_INDEX[axis]] >= (bounds.min[AXIS_INDEX[axis]] + bounds.max[AXIS_INDEX[axis]]) / 2 ? 1 : -1)
+    ? (averagedNormal[AXIS_INDEX[axis]] >= 0 ? 1 : -1)
     : 1;
   const normal: [number, number, number] = axis
     ? [axis === "x" ? side : 0, axis === "y" ? side : 0, axis === "z" ? side : 0]
@@ -115,7 +145,135 @@ export function analyzeFace(mesh: MeshData, faceIndex: number): FaceAnalysis | n
     : side > 0 ? bounds.max[axisIndex] : bounds.min[axisIndex];
   const atBoundary = axisIndex != null && Math.abs(center[axisIndex] - boundary) <= Math.max(0.05, span * 1e-3);
 
-  return { faceIndex, area, center, normal, axis, side, planar, atBoundary };
+  return { faceIndex, area, center, normal, axis, side, planar, atBoundary, axisSpan: span };
+}
+
+export function resolveFaceFeatureTarget(
+  mesh: MeshData,
+  faceIndex: number,
+  partId: string,
+): FaceFeatureTarget | null {
+  const face = analyzeFace(mesh, faceIndex);
+  if (!face?.planar || !face.axis || !face.atBoundary) return null;
+
+  const bounds = meshBounds(mesh);
+  const axes: Record<FaceAxis, [FaceAxis, FaceAxis]> = {
+    x: ["y", "z"],
+    y: ["x", "z"],
+    z: ["x", "y"],
+  };
+  const [uAxis, vAxis] = axes[face.axis];
+  const uIndex = AXIS_INDEX[uAxis];
+  const vIndex = AXIS_INDEX[vAxis];
+  const boundsCenter = (axis: 0 | 1 | 2) => (bounds.min[axis] + bounds.max[axis]) / 2;
+
+  return {
+    ...face,
+    partId,
+    uAxis,
+    vAxis,
+    uLabel: uAxis.toUpperCase(),
+    vLabel: vAxis.toUpperCase(),
+    anchor: [
+      face.center[uIndex] - boundsCenter(uIndex),
+      face.center[vIndex] - boundsCenter(vIndex),
+    ],
+  };
+}
+
+export function resolveSheetBendTarget(
+  mesh: MeshData,
+  faceIndex: number,
+  partId: string,
+): FaceFeatureTarget | null {
+  const face = analyzeFace(mesh, faceIndex);
+  if (!face?.planar || face.axis !== "z" || face.side !== 1) return null;
+
+  const bounds = meshBounds(mesh);
+  const boundsCenter = (axis: 0 | 1 | 2) => (bounds.min[axis] + bounds.max[axis]) / 2;
+  return {
+    ...face,
+    partId,
+    uAxis: "x",
+    vAxis: "y",
+    uLabel: "X",
+    vLabel: "Y",
+    anchor: [
+      face.center[AXIS_INDEX.x] - boundsCenter(AXIS_INDEX.x),
+      face.center[AXIS_INDEX.y] - boundsCenter(AXIS_INDEX.y),
+    ],
+  };
+}
+
+export function faceFeatureArgs(
+  target: FaceFeatureTarget,
+  mode: "add" | "cut",
+  profile: FaceFeatureProfile,
+  depth: number | "through",
+): FaceFeatureArgs {
+  return {
+    target_id: target.partId,
+    mode,
+    face_ref: {
+      kind: "outer_planar",
+      axis: target.axis!,
+      side: target.side,
+      anchor: target.anchor,
+      selected_area: target.area,
+    },
+    profile,
+    depth,
+  };
+}
+
+export function faceDomeArgs(
+  target: FaceFeatureTarget,
+  mode: "add" | "cut",
+  center: [number, number],
+  diameter: number,
+  height: number,
+): FaceDomeArgs {
+  return {
+    target_id: target.partId,
+    mode,
+    face_ref: {
+      kind: "outer_planar",
+      axis: target.axis!,
+      side: target.side,
+      anchor: target.anchor,
+      selected_area: target.area,
+    },
+    center,
+    diameter,
+    height,
+  };
+}
+
+export function sheetBendArgs(
+  target: FaceFeatureTarget,
+  bendAxis: "x" | "y",
+  position: number,
+  angle: number,
+  insideRadius: number,
+  movingSide: -1 | 1,
+  direction: -1 | 1,
+): SheetBendArgs {
+  return {
+    target_id: target.partId,
+    face_ref: {
+      kind: "outer_planar",
+      axis: target.axis!,
+      side: target.side,
+      anchor: target.anchor,
+      selected_area: target.area,
+    },
+    bend_axis: bendAxis,
+    position,
+    angle,
+    inside_radius: insideRadius,
+    moving_side: movingSide,
+    direction,
+  };
 }
 
 function parameterValue(part: PartDef, template: TemplateDef, name: string): number | null {

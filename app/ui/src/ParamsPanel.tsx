@@ -1,14 +1,23 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type {
-  DocState, GeoError, TemplateDef, EdgeRef, PrintCheck, ImportResult,
+  DocState, EdgeFeatureKind, GeoError, TemplateDef, EdgeRef, FaceDomeArgs, FaceFeatureArgs,
+  FaceFeatureProfile, FaceProfileKind, PrintCheck, ImportResult, Operation, SheetBendArgs,
 } from "./types";
-import type { FaceEditTarget } from "./faceEditing";
+import {
+  faceDomeArgs as buildFaceDomeArgs, faceFeatureArgs as buildFaceFeatureArgs,
+  sheetBendArgs as buildSheetBendArgs,
+} from "./faceEditing";
+import type {
+  FaceDomePreview, FaceEditTarget, FaceFeaturePreview, FaceFeatureTarget, SheetBendPreview,
+} from "./faceEditing";
 import { evalExpression } from "./expr";
 
-export interface FilletUi {
+export interface EdgeToolUi {
   active: boolean;
+  kind: EdgeFeatureKind;
   selected: EdgeRef | null;
-  radius: string;
+  partId: string | null;
+  size: string;
 }
 
 export interface PushPullUi {
@@ -24,6 +33,15 @@ interface Props {
   selectedFace: number | null;
   faceArea: number | null;
   pushPull: PushPullUi;
+  faceFeatureTarget: FaceFeatureTarget | null;
+  sheetBendTarget: FaceFeatureTarget | null;
+  faceFeatureReason: string | null;
+  onFaceFeaturePreview: (preview: FaceFeaturePreview | null) => void;
+  onApplyFaceFeature: (args: FaceFeatureArgs) => void;
+  onFaceDomePreview: (preview: FaceDomePreview | null) => void;
+  onApplyFaceDome: (args: FaceDomeArgs) => void;
+  onSheetBendPreview: (preview: SheetBendPreview | null) => void;
+  onApplySheetBend: (args: SheetBendArgs) => void;
   onPushPullValue: (value: string) => void;
   onApplyPushPull: () => void;
   onCancelPushPull: () => void;
@@ -53,13 +71,14 @@ interface Props {
   onMeasure: () => void;
   onMeasureFace: () => void;
   onMeasureDistance: (p0: [number, number, number], p1: [number, number, number]) => void;
-  // скругление
-  fillet: FilletUi;
-  onStartFillet: () => void;
+  // обработка рёбер
+  edgeTool: EdgeToolUi;
+  onStartEdgeTool: (kind: EdgeFeatureKind) => void;
   onSelectEdge: (e: EdgeRef) => void;
-  onFilletRadius: (v: string) => void;
-  onApplyFillet: () => void;
-  onCancelFillet: () => void;
+  onEdgeToolKind: (kind: EdgeFeatureKind) => void;
+  onEdgeToolSize: (value: string) => void;
+  onApplyEdgeTool: () => void;
+  onCancelEdgeTool: () => void;
   onClearError: () => void;
   // проверка печати
   printChecks: PrintCheck[] | null;
@@ -97,6 +116,40 @@ function sameEdge(a: EdgeRef, b: EdgeRef): boolean {
     a.midpoint.every((v, i) => Math.abs(v - b.midpoint[i]) < 1e-6);
 }
 
+function isSupportedFlatBendCut(operation: Operation, targetId: string | undefined): boolean {
+  return operation.op === "face_feature" && operation.target_id === targetId &&
+    operation.mode === "cut" && operation.depth === "through" &&
+    operation.face_ref?.kind === "outer_planar" && operation.face_ref.axis === "z" &&
+    operation.face_ref.side === 1 && !!operation.profile &&
+    ["rectangle", "circle", "ring", "slot"].includes(operation.profile.kind);
+}
+
+function flatCutBendSpan(
+  operation: Operation,
+  bendAxis: "x" | "y",
+): { center: number; extent: number } | null {
+  const profile = operation.profile;
+  const anchor = operation.face_ref?.anchor;
+  if (!profile || !anchor) return null;
+  const axisIndex = bendAxis === "x" ? 0 : 1;
+  const center = Number(anchor[axisIndex]) + Number(profile.center?.[axisIndex]);
+  let extent: number;
+  if (profile.kind === "rectangle") {
+    extent = Number(bendAxis === "x" ? profile.width : profile.height) / 2;
+  } else if (profile.kind === "circle") {
+    extent = Number(profile.diameter) / 2;
+  } else if (profile.kind === "ring") {
+    extent = Number(profile.outer_diameter) / 2;
+  } else if (profile.kind === "slot") {
+    extent = Number(bendAxis === "x" ? profile.length : profile.width) / 2;
+  } else {
+    return null;
+  }
+  return Number.isFinite(center) && Number.isFinite(extent) && extent > 0
+    ? { center, extent }
+    : null;
+}
+
 export function ParamsPanel(props: Props) {
   const { doc, templates, selectedPartId } = props;
   // активная деталь: выбранная или первая
@@ -130,6 +183,28 @@ export function ParamsPanel(props: Props) {
   const [profileMode, setProfileMode] = useState<"add" | "cut">("add");
   const [profileDepth, setProfileDepth] = useState("5");
   const [profileThrough, setProfileThrough] = useState(true);
+  const [faceFeatureOpen, setFaceFeatureOpen] = useState(false);
+  const [faceFeatureMode, setFaceFeatureMode] = useState<"add" | "cut">("cut");
+  const [faceFeatureKind, setFaceFeatureKind] = useState<FaceProfileKind>("circle");
+  const [faceFeatureDims, setFaceFeatureDims] = useState({
+    width: "10", height: "8", diameter: "8", outer_diameter: "12",
+    inner_diameter: "6", length: "20",
+  });
+  const [faceFeatureCenter, setFaceFeatureCenter] = useState({ u: "0", v: "0" });
+  const [faceFeatureDepth, setFaceFeatureDepth] = useState("4");
+  const [faceFeatureThrough, setFaceFeatureThrough] = useState(true);
+  const [faceDomeOpen, setFaceDomeOpen] = useState(false);
+  const [faceDomeMode, setFaceDomeMode] = useState<"add" | "cut">("add");
+  const [faceDomeDiameter, setFaceDomeDiameter] = useState("20");
+  const [faceDomeHeight, setFaceDomeHeight] = useState("4");
+  const [faceDomeCenter, setFaceDomeCenter] = useState({ u: "0", v: "0" });
+  const [sheetBendOpen, setSheetBendOpen] = useState(false);
+  const [sheetBendAxis, setSheetBendAxis] = useState<"x" | "y">("x");
+  const [sheetBendPosition, setSheetBendPosition] = useState("0");
+  const [sheetBendAngle, setSheetBendAngle] = useState("90");
+  const [sheetBendRadius, setSheetBendRadius] = useState("5");
+  const [sheetBendMovingSide, setSheetBendMovingSide] = useState<-1 | 1>(1);
+  const [sheetBendDirection, setSheetBendDirection] = useState<-1 | 1>(1);
   const [circCount, setCircCount] = useState("4");
   const [circAngle, setCircAngle] = useState("360");
   const [circCenter, setCircCenter] = useState({ x: "0", y: "0", z: "0" });
@@ -148,6 +223,16 @@ export function ParamsPanel(props: Props) {
     setMultiHint(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc, template, selectedPartId]);
+
+  useEffect(() => {
+    setFaceFeatureOpen(false);
+    setFaceDomeOpen(false);
+    setSheetBendOpen(false);
+    props.onFaceFeaturePreview(null);
+    props.onFaceDomePreview(null);
+    props.onSheetBendPreview(null);
+  }, [props.selectedFace, props.onFaceFeaturePreview, props.onFaceDomePreview,
+    props.onSheetBendPreview]);
 
   const changedFields = useMemo(() => {
     if (!doc || !template) return [];
@@ -197,13 +282,288 @@ export function ParamsPanel(props: Props) {
     : null;
   const booleanReady = liveParts.length >= 2 && !!targetPart && !!toolPart;
   const num = (s: string) => Number(s.replace(",", ".")) || 0;
+  const faceNumber = (value: string) => Number(value.replace(",", "."));
+
+  const faceFeatureProfile = useMemo<FaceFeatureProfile>(() => {
+    const profile: FaceFeatureProfile = {
+      kind: faceFeatureKind,
+      center: [faceNumber(faceFeatureCenter.u), faceNumber(faceFeatureCenter.v)],
+    };
+    if (faceFeatureKind === "rectangle") {
+      profile.width = faceNumber(faceFeatureDims.width);
+      profile.height = faceNumber(faceFeatureDims.height);
+    } else if (faceFeatureKind === "circle") {
+      profile.diameter = faceNumber(faceFeatureDims.diameter);
+    } else if (faceFeatureKind === "ring") {
+      profile.outer_diameter = faceNumber(faceFeatureDims.outer_diameter);
+      profile.inner_diameter = faceNumber(faceFeatureDims.inner_diameter);
+    } else {
+      profile.width = faceNumber(faceFeatureDims.width);
+      profile.length = faceNumber(faceFeatureDims.length);
+    }
+    return profile;
+  }, [faceFeatureKind, faceFeatureDims, faceFeatureCenter]);
+
+  const faceFeatureError = useMemo(() => {
+    if (!props.faceFeatureTarget) return "Выберите поддерживаемую внешнюю плоскую грань.";
+    if (!faceFeatureProfile.center.every(Number.isFinite)) return "Смещения U и V должны быть числами.";
+    const positive = (value: number | undefined) => value != null && Number.isFinite(value) && value > 0;
+    if (faceFeatureProfile.kind === "rectangle" &&
+        (!positive(faceFeatureProfile.width) || !positive(faceFeatureProfile.height))) {
+      return "Ширина и высота профиля должны быть больше нуля.";
+    }
+    if (faceFeatureProfile.kind === "circle" && !positive(faceFeatureProfile.diameter)) {
+      return "Диаметр должен быть больше нуля.";
+    }
+    if (faceFeatureProfile.kind === "ring" &&
+        (!positive(faceFeatureProfile.outer_diameter) || !positive(faceFeatureProfile.inner_diameter) ||
+         faceFeatureProfile.inner_diameter! >= faceFeatureProfile.outer_diameter!)) {
+      return "Внутренний диаметр должен быть меньше наружного.";
+    }
+    if (faceFeatureProfile.kind === "slot" &&
+        (!positive(faceFeatureProfile.width) || !positive(faceFeatureProfile.length) ||
+         faceFeatureProfile.length! <= faceFeatureProfile.width!)) {
+      return "Длина паза должна быть больше его ширины.";
+    }
+    const depth = faceNumber(faceFeatureDepth);
+    if (!(faceFeatureMode === "cut" && faceFeatureThrough) && (!Number.isFinite(depth) || depth <= 0)) {
+      return "Глубина должна быть больше нуля.";
+    }
+    if (faceFeatureMode === "cut" && !faceFeatureThrough &&
+        depth >= props.faceFeatureTarget.axisSpan - 0.01) {
+      return "Для такой глубины выберите сквозной вырез.";
+    }
+    return null;
+  }, [props.faceFeatureTarget, faceFeatureProfile, faceFeatureDepth, faceFeatureMode, faceFeatureThrough]);
+
+  const faceFeatureRequest = useMemo<FaceFeatureArgs | null>(() => {
+    if (!props.faceFeatureTarget || faceFeatureError) return null;
+    const depth = faceFeatureMode === "cut" && faceFeatureThrough
+      ? "through"
+      : faceNumber(faceFeatureDepth);
+    return buildFaceFeatureArgs(props.faceFeatureTarget, faceFeatureMode, faceFeatureProfile, depth);
+  }, [props.faceFeatureTarget, faceFeatureError, faceFeatureMode, faceFeatureThrough,
+    faceFeatureDepth, faceFeatureProfile]);
+
+  useEffect(() => {
+    props.onFaceFeaturePreview(
+      faceFeatureOpen && faceFeatureRequest
+        ? { target: props.faceFeatureTarget!, args: faceFeatureRequest }
+        : null,
+    );
+    return () => props.onFaceFeaturePreview(null);
+  }, [faceFeatureOpen, faceFeatureRequest, props.faceFeatureTarget, props.onFaceFeaturePreview]);
+
+  const faceDomeError = useMemo(() => {
+    if (!props.faceFeatureTarget) return "Выберите поддерживаемую внешнюю плоскую грань.";
+    const center = [faceNumber(faceDomeCenter.u), faceNumber(faceDomeCenter.v)];
+    const diameter = faceNumber(faceDomeDiameter);
+    const height = faceNumber(faceDomeHeight);
+    if (!center.every(Number.isFinite)) return "Смещения U и V должны быть числами.";
+    if (!Number.isFinite(diameter) || diameter <= 0) return "Диаметр должен быть больше нуля.";
+    if (!Number.isFinite(height) || height <= 0) return "Высота должна быть больше нуля.";
+    if (height > diameter / 2) return "Высота не должна превышать половину диаметра.";
+    if (faceDomeMode === "cut" && height >= props.faceFeatureTarget.axisSpan - 0.01) {
+      return "Глубина вмятины достигает противоположной стороны.";
+    }
+    return null;
+  }, [props.faceFeatureTarget, faceDomeCenter, faceDomeDiameter, faceDomeHeight, faceDomeMode]);
+
+  const faceDomeRequest = useMemo<FaceDomeArgs | null>(() => {
+    if (!props.faceFeatureTarget || faceDomeError) return null;
+    return buildFaceDomeArgs(
+      props.faceFeatureTarget,
+      faceDomeMode,
+      [faceNumber(faceDomeCenter.u), faceNumber(faceDomeCenter.v)],
+      faceNumber(faceDomeDiameter),
+      faceNumber(faceDomeHeight),
+    );
+  }, [props.faceFeatureTarget, faceDomeError, faceDomeMode, faceDomeCenter,
+    faceDomeDiameter, faceDomeHeight]);
+
+  useEffect(() => {
+    props.onFaceDomePreview(
+      faceDomeOpen && faceDomeRequest
+        ? { target: props.faceFeatureTarget!, args: faceDomeRequest }
+        : null,
+    );
+    return () => props.onFaceDomePreview(null);
+  }, [faceDomeOpen, faceDomeRequest, props.faceFeatureTarget, props.onFaceDomePreview]);
+
+  const sheetBendDimensions = useMemo(() => {
+    const value = (name: string) => {
+      const direct = activePart?.params[name];
+      if (typeof direct === "number" && Number.isFinite(direct)) return direct;
+      const fallback = template?.params.find((parameter) => parameter.name === name)?.default;
+      return typeof fallback === "number" && Number.isFinite(fallback) ? fallback : 0;
+    };
+    return {
+      length: value("length"),
+      width: value("width"),
+      thickness: value("height"),
+      holeDiameter: value("hole_diameter"),
+      holeOffset: value("hole_offset"),
+    };
+  }, [activePart, template]);
+
+  const existingSheetBends = useMemo(() => (doc?.operations ?? [])
+    .filter((operation) => operation.op === "sheet_bend" &&
+      operation.target_id === activePart?.part_id)
+    .map((operation) => operation as unknown as SheetBendArgs),
+  [activePart?.part_id, doc?.operations]);
+
+  const flatSheetCuts = useMemo(() => (doc?.operations ?? [])
+    .filter((operation) => isSupportedFlatBendCut(operation, activePart?.part_id)),
+  [activePart?.part_id, doc?.operations]);
+
+  const sheetBendStructuralReason = useMemo(() => {
+    if (activePart?.template !== "plate_with_holes") return "Изгиб пока доступен только для пластины.";
+    if (!props.sheetBendTarget) {
+      return "Для изгиба выберите верхнюю плоскую грань пластины.";
+    }
+    let bendStarted = false;
+    for (const operation of doc?.operations ?? []) {
+      if (operation.op === "face_feature" && !bendStarted &&
+          isSupportedFlatBendCut(operation, activePart?.part_id)) {
+        continue;
+      }
+      if (operation.op === "sheet_bend" && operation.target_id === activePart?.part_id) {
+        bendStarted = true;
+        continue;
+      }
+      return "Перед изгибом допустимы сквозные вырезы; затем изгибы должны идти подряд.";
+    }
+    if (existingSheetBends.length >= 4) {
+      return "Поддерживаются до четырёх последовательных линий изгиба.";
+    }
+    return null;
+  }, [activePart, doc?.operations, existingSheetBends, props.sheetBendTarget]);
+
+  const sheetBendError = useMemo(() => {
+    if (sheetBendStructuralReason) return sheetBendStructuralReason;
+    const position = faceNumber(sheetBendPosition);
+    const angle = faceNumber(sheetBendAngle);
+    const radius = faceNumber(sheetBendRadius);
+    if (![position, angle, radius].every(Number.isFinite)) return "Положение, угол и радиус должны быть числами.";
+    if (angle < 5 || angle > 170) return "Угол должен быть от 5° до 170°.";
+    if (radius <= 0) return "Внутренний радиус должен быть больше нуля.";
+    const developedLength = sheetBendAxis === "x"
+      ? sheetBendDimensions.length
+      : sheetBendDimensions.width;
+    const developedToBend = position + developedLength / 2;
+    const bendAllowance = (radius + sheetBendDimensions.thickness / 2) * angle * Math.PI / 180;
+    const zoneMin = developedToBend - bendAllowance / 2;
+    const zoneMax = developedToBend + bendAllowance / 2;
+    if (zoneMin <= 0.01 || zoneMax >= developedLength - 0.01) {
+      return "Линия изгиба слишком близко к краю для этих угла и радиуса.";
+    }
+    if (sheetBendDimensions.holeDiameter > 0) {
+      const holeRadius = sheetBendDimensions.holeDiameter / 2;
+      const holeCoordinate = developedLength / 2 - sheetBendDimensions.holeOffset;
+      for (const originalCoordinate of [-holeCoordinate, holeCoordinate]) {
+        const developedHole = originalCoordinate + developedLength / 2;
+        if (developedHole + holeRadius >= zoneMin && developedHole - holeRadius <= zoneMax) {
+          return "Зона изгиба пересекает отверстие.";
+        }
+      }
+    }
+    for (const operation of flatSheetCuts) {
+      const span = flatCutBendSpan(operation, sheetBendAxis);
+      if (!span) return "Параметры пользовательского выреза повреждены.";
+      const developedCut = span.center + developedLength / 2;
+      if (developedCut + span.extent >= zoneMin && developedCut - span.extent <= zoneMax) {
+        if (operation.profile?.kind !== "rectangle" && operation.profile?.kind !== "circle" &&
+            operation.profile?.kind !== "ring" && operation.profile?.kind !== "slot") {
+          return "Криволинейную bend-зону пока могут пересекать прямоугольный, круглый, кольцевой through-вырез или паз.";
+        }
+        if (operation.profile?.kind === "circle" || operation.profile?.kind === "ring" ||
+            operation.profile?.kind === "slot") {
+          const crossesExistingZone = existingSheetBends.some((existing) => {
+            if (existing.bend_axis !== sheetBendAxis) return false;
+            const existingCenter = existing.position + developedLength / 2;
+            const existingAllowance = (existing.inside_radius + sheetBendDimensions.thickness / 2) *
+              existing.angle * Math.PI / 180;
+            const existingZoneMin = existingCenter - existingAllowance / 2;
+            const existingZoneMax = existingCenter + existingAllowance / 2;
+            return developedCut + span.extent >= existingZoneMin &&
+              developedCut - span.extent <= existingZoneMax;
+          });
+          if (crossesExistingZone) {
+            return "Круглый, кольцевой through-вырез или паз пока может пересекать только одну криволинейную bend-зону.";
+          }
+        }
+      }
+    }
+    if (existingSheetBends.length > 0) {
+      if (existingSheetBends.some((existing) => existing.bend_axis !== sheetBendAxis)) {
+        return "Последовательные изгибы должны быть параллельны и использовать одну ось.";
+      }
+      for (const existing of existingSheetBends) {
+        const existingCenter = existing.position + developedLength / 2;
+        const existingAllowance = (existing.inside_radius + sheetBendDimensions.thickness / 2) *
+          existing.angle * Math.PI / 180;
+        const existingZoneMin = existingCenter - existingAllowance / 2;
+        const existingZoneMax = existingCenter + existingAllowance / 2;
+        if (zoneMin < existingZoneMax + 0.01 && zoneMax > existingZoneMin - 0.01) {
+          return "Зоны последовательных изгибов пересекаются.";
+        }
+      }
+      const ordered = [
+        ...existingSheetBends.map((existing) => ({
+          position: existing.position,
+          movingSide: existing.moving_side,
+        })),
+        { position, movingSide: sheetBendMovingSide },
+      ].sort((left, right) => left.position - right.position);
+      let positiveSideStarted = false;
+      for (const bend of ordered) {
+        if (bend.movingSide > 0) positiveSideStarted = true;
+        else if (positiveSideStarted) {
+          return "Левая группа линий должна сгибать −ось, правая — +ось.";
+        }
+      }
+    }
+    return null;
+  }, [sheetBendStructuralReason, sheetBendPosition, sheetBendAngle, sheetBendRadius,
+    sheetBendAxis, sheetBendDimensions, sheetBendMovingSide, existingSheetBends, flatSheetCuts]);
+
+  const sheetBendRequest = useMemo<SheetBendArgs | null>(() => {
+    if (!props.sheetBendTarget || sheetBendError) return null;
+    return buildSheetBendArgs(
+      props.sheetBendTarget,
+      sheetBendAxis,
+      faceNumber(sheetBendPosition),
+      faceNumber(sheetBendAngle),
+      faceNumber(sheetBendRadius),
+      sheetBendMovingSide,
+      sheetBendDirection,
+    );
+  }, [props.sheetBendTarget, sheetBendError, sheetBendAxis, sheetBendPosition,
+    sheetBendAngle, sheetBendRadius, sheetBendMovingSide, sheetBendDirection]);
+
+  useEffect(() => {
+    props.onSheetBendPreview(
+      sheetBendOpen && sheetBendRequest
+        ? {
+            target: props.sheetBendTarget!,
+            args: sheetBendRequest,
+            bends: [...existingSheetBends, sheetBendRequest],
+            length: sheetBendDimensions.length,
+            width: sheetBendDimensions.width,
+            thickness: sheetBendDimensions.thickness,
+          }
+        : null,
+    );
+    return () => props.onSheetBendPreview(null);
+  }, [sheetBendOpen, sheetBendRequest, existingSheetBends, sheetBendDimensions, props.sheetBendTarget,
+    props.onSheetBendPreview]);
 
   const err: GeoError | null = doc?.error ?? null;
-  const isFilletError = err?.code === "fillet_failed" || err?.code === "reselect_required";
+  const isEdgeError = err?.code === "fillet_failed" || err?.code === "chamfer_failed" ||
+    err?.code === "dome_failed" || err?.code === "bend_failed" || err?.code === "reselect_required";
   const edges = doc?.stats?.edges ?? [];
-  const filletedEdges = (doc?.operations ?? [])
-    .filter((o) => o.op === "fillet" && o.edge_ref)
-    .map((o) => o.edge_ref!);
+  const edgeOperations = (doc?.operations ?? [])
+    .filter((operation) => (operation.op === "fillet" || operation.op === "chamfer") && operation.edge_ref);
 
   const savePrinter = (p: { x: string; y: string; z: string }) => {
     setPrinter(p);
@@ -231,7 +591,7 @@ export function ParamsPanel(props: Props) {
               {detailOpen && <pre className="error-detail">{err.detail}</pre>}
             </>
           )}
-          {isFilletError ? (
+          {isEdgeError ? (
             <button className="btn" data-cmd="error.close" aria-label="Закрыть ошибку" onClick={props.onClearError}>
               Закрыть
             </button>
@@ -317,32 +677,389 @@ export function ParamsPanel(props: Props) {
           ) : props.pushPull.reason ? (
             <p className="push-pull-hint">{props.pushPull.reason}</p>
           ) : null}
+          {props.faceFeatureTarget && (<>
+            <div className="face-feature-panel">
+              <div className="face-feature-heading">
+                <div>
+                  <strong>Элемент на грани</strong>
+                  <span>
+                    {props.faceFeatureTarget.side > 0 ? "+" : "−"}
+                    {props.faceFeatureTarget.axis?.toUpperCase()} · локальные оси {props.faceFeatureTarget.uLabel}/{props.faceFeatureTarget.vLabel}
+                  </span>
+                </div>
+                {!faceFeatureOpen && (
+                  <button
+                    className="btn"
+                    data-cmd="op.profile"
+                    onClick={() => {
+                      setFaceDomeOpen(false);
+                      setSheetBendOpen(false);
+                      props.onFaceDomePreview(null);
+                      props.onSheetBendPreview(null);
+                      setFaceFeatureOpen(true);
+                    }}
+                  >
+                    Создать
+                  </button>
+                )}
+              </div>
+              {faceFeatureOpen && (
+                <div className="face-feature-form">
+                  <div className="op-row">
+                    <select
+                      value={faceFeatureMode}
+                      aria-label="Режим элемента на грани"
+                      onChange={(event) => setFaceFeatureMode(event.target.value as "add" | "cut")}
+                    >
+                      <option value="cut">Вырез / отверстие</option>
+                      <option value="add">Добавить объём</option>
+                    </select>
+                    <select
+                      value={faceFeatureKind}
+                      aria-label="Профиль элемента на грани"
+                      onChange={(event) => setFaceFeatureKind(event.target.value as FaceProfileKind)}
+                    >
+                      <option value="circle">Окружность</option>
+                      <option value="rectangle">Прямоугольник</option>
+                      <option value="slot">Паз</option>
+                      <option value="ring">Кольцо</option>
+                    </select>
+                  </div>
+                  <div className="op-row">
+                    {faceFeatureKind === "rectangle" && (<>
+                      <div className="param-input op-field">
+                        <input inputMode="decimal" value={faceFeatureDims.width} aria-label="Ширина профиля на грани, мм" onChange={(event) => setFaceFeatureDims({ ...faceFeatureDims, width: event.target.value })} />
+                        <span className="param-unit">ширина</span>
+                      </div>
+                      <div className="param-input op-field">
+                        <input inputMode="decimal" value={faceFeatureDims.height} aria-label="Высота профиля на грани, мм" onChange={(event) => setFaceFeatureDims({ ...faceFeatureDims, height: event.target.value })} />
+                        <span className="param-unit">высота</span>
+                      </div>
+                    </>)}
+                    {faceFeatureKind === "circle" && (
+                      <div className="param-input op-field">
+                        <input inputMode="decimal" value={faceFeatureDims.diameter} aria-label="Диаметр отверстия на грани, мм" onChange={(event) => setFaceFeatureDims({ ...faceFeatureDims, diameter: event.target.value })} />
+                        <span className="param-unit">Ø, мм</span>
+                      </div>
+                    )}
+                    {faceFeatureKind === "ring" && (<>
+                      <div className="param-input op-field">
+                        <input inputMode="decimal" value={faceFeatureDims.outer_diameter} aria-label="Наружный диаметр кольца на грани, мм" onChange={(event) => setFaceFeatureDims({ ...faceFeatureDims, outer_diameter: event.target.value })} />
+                        <span className="param-unit">Ø нар.</span>
+                      </div>
+                      <div className="param-input op-field">
+                        <input inputMode="decimal" value={faceFeatureDims.inner_diameter} aria-label="Внутренний диаметр кольца на грани, мм" onChange={(event) => setFaceFeatureDims({ ...faceFeatureDims, inner_diameter: event.target.value })} />
+                        <span className="param-unit">Ø вн.</span>
+                      </div>
+                    </>)}
+                    {faceFeatureKind === "slot" && (<>
+                      <div className="param-input op-field">
+                        <input inputMode="decimal" value={faceFeatureDims.width} aria-label="Ширина паза на грани, мм" onChange={(event) => setFaceFeatureDims({ ...faceFeatureDims, width: event.target.value })} />
+                        <span className="param-unit">ширина</span>
+                      </div>
+                      <div className="param-input op-field">
+                        <input inputMode="decimal" value={faceFeatureDims.length} aria-label="Длина паза на грани, мм" onChange={(event) => setFaceFeatureDims({ ...faceFeatureDims, length: event.target.value })} />
+                        <span className="param-unit">длина</span>
+                      </div>
+                    </>)}
+                  </div>
+                  <div className="op-row">
+                    <div className="param-input op-field">
+                      <input inputMode="decimal" value={faceFeatureCenter.u} aria-label={`Смещение по ${props.faceFeatureTarget.uLabel}, мм`} onChange={(event) => setFaceFeatureCenter({ ...faceFeatureCenter, u: event.target.value })} />
+                      <span className="param-unit">{props.faceFeatureTarget.uLabel}, мм</span>
+                    </div>
+                    <div className="param-input op-field">
+                      <input inputMode="decimal" value={faceFeatureCenter.v} aria-label={`Смещение по ${props.faceFeatureTarget.vLabel}, мм`} onChange={(event) => setFaceFeatureCenter({ ...faceFeatureCenter, v: event.target.value })} />
+                      <span className="param-unit">{props.faceFeatureTarget.vLabel}, мм</span>
+                    </div>
+                  </div>
+                  {faceFeatureMode === "cut" && (
+                    <label className="keep-tool">
+                      <input type="checkbox" checked={faceFeatureThrough} onChange={(event) => setFaceFeatureThrough(event.target.checked)} />
+                      Сквозной вырез
+                    </label>
+                  )}
+                  {(faceFeatureMode === "add" || !faceFeatureThrough) && (
+                    <div className="param-input op-field face-feature-depth">
+                      <input inputMode="decimal" value={faceFeatureDepth} aria-label="Глубина элемента на грани, мм" onChange={(event) => setFaceFeatureDepth(event.target.value)} />
+                      <span className="param-unit">глубина, мм</span>
+                    </div>
+                  )}
+                  {faceFeatureError ? (
+                    <p className="error-inline" role="alert">{faceFeatureError}</p>
+                  ) : (
+                    <p className="face-feature-preview">Предпросмотр показан на сцене. Рабочая модель ещё не изменена.</p>
+                  )}
+                  <div className="push-pull-actions">
+                    <button
+                      className="btn btn-primary"
+                      data-cmd="op.profile"
+                      disabled={!faceFeatureRequest}
+                      onClick={() => {
+                        if (!faceFeatureRequest) return;
+                        props.onFaceFeaturePreview(null);
+                        props.onApplyFaceFeature(faceFeatureRequest);
+                        setFaceFeatureOpen(false);
+                      }}
+                    >
+                      {faceFeatureMode === "add" ? "Добавить" : "Вырезать"}
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={() => {
+                        setFaceFeatureOpen(false);
+                        props.onFaceFeaturePreview(null);
+                      }}
+                    >
+                      Отмена
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="face-feature-panel">
+              <div className="face-feature-heading">
+                <div>
+                  <strong>Выпуклость / вмятина</strong>
+                  <span>Сферический сегмент с точными размерами</span>
+                </div>
+                {!faceDomeOpen && (
+                  <button
+                    className="btn"
+                    data-cmd="op.face_dome"
+                    onClick={() => {
+                      setFaceFeatureOpen(false);
+                      setSheetBendOpen(false);
+                      props.onFaceFeaturePreview(null);
+                      props.onSheetBendPreview(null);
+                      setFaceDomeOpen(true);
+                    }}
+                  >
+                    Создать
+                  </button>
+                )}
+              </div>
+              {faceDomeOpen && (
+                <div className="face-feature-form">
+                  <select
+                    value={faceDomeMode}
+                    aria-label="Режим сферического сегмента"
+                    onChange={(event) => setFaceDomeMode(event.target.value as "add" | "cut")}
+                  >
+                    <option value="add">Выпуклость</option>
+                    <option value="cut">Вмятина</option>
+                  </select>
+                  <div className="op-row">
+                    <div className="param-input op-field">
+                      <input inputMode="decimal" value={faceDomeDiameter} aria-label="Диаметр сферического сегмента, мм" onChange={(event) => setFaceDomeDiameter(event.target.value)} />
+                      <span className="param-unit">Ø, мм</span>
+                    </div>
+                    <div className="param-input op-field">
+                      <input inputMode="decimal" value={faceDomeHeight} aria-label="Высота сферического сегмента, мм" onChange={(event) => setFaceDomeHeight(event.target.value)} />
+                      <span className="param-unit">высота, мм</span>
+                    </div>
+                  </div>
+                  <div className="op-row">
+                    <div className="param-input op-field">
+                      <input inputMode="decimal" value={faceDomeCenter.u} aria-label={`Смещение выпуклости по ${props.faceFeatureTarget.uLabel}, мм`} onChange={(event) => setFaceDomeCenter({ ...faceDomeCenter, u: event.target.value })} />
+                      <span className="param-unit">{props.faceFeatureTarget.uLabel}, мм</span>
+                    </div>
+                    <div className="param-input op-field">
+                      <input inputMode="decimal" value={faceDomeCenter.v} aria-label={`Смещение выпуклости по ${props.faceFeatureTarget.vLabel}, мм`} onChange={(event) => setFaceDomeCenter({ ...faceDomeCenter, v: event.target.value })} />
+                      <span className="param-unit">{props.faceFeatureTarget.vLabel}, мм</span>
+                    </div>
+                  </div>
+                  {faceDomeError ? (
+                    <p className="error-inline" role="alert">{faceDomeError}</p>
+                  ) : (
+                    <p className="face-feature-preview">Предпросмотр показан на сцене. Рабочая модель ещё не изменена.</p>
+                  )}
+                  <div className="push-pull-actions">
+                    <button
+                      className="btn btn-primary"
+                      data-cmd="op.face_dome"
+                      disabled={!faceDomeRequest}
+                      onClick={() => {
+                        if (!faceDomeRequest) return;
+                        props.onFaceDomePreview(null);
+                        props.onApplyFaceDome(faceDomeRequest);
+                        setFaceDomeOpen(false);
+                      }}
+                    >
+                      {faceDomeMode === "add" ? "Создать выпуклость" : "Создать вмятину"}
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={() => {
+                        setFaceDomeOpen(false);
+                        props.onFaceDomePreview(null);
+                      }}
+                    >
+                      Отмена
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </>)}
+          {props.sheetBendTarget && (
+            <div className="face-feature-panel">
+              <div className="face-feature-heading">
+                <div>
+                  <strong>Точный изгиб</strong>
+                  <span>Sheet metal: угол, радиус и линия изгиба</span>
+                </div>
+                {!sheetBendOpen && (
+                  <button
+                    className="btn"
+                    data-cmd="op.sheet_bend"
+                    disabled={!!sheetBendStructuralReason}
+                    title={sheetBendStructuralReason ?? "Создать изгиб"}
+                    onClick={() => {
+                      setFaceFeatureOpen(false);
+                      setFaceDomeOpen(false);
+                      props.onFaceFeaturePreview(null);
+                      props.onFaceDomePreview(null);
+                      setSheetBendOpen(true);
+                    }}
+                  >
+                    Создать
+                  </button>
+                )}
+              </div>
+              {!sheetBendOpen && sheetBendStructuralReason && (
+                <p className="push-pull-hint">{sheetBendStructuralReason}</p>
+              )}
+              {sheetBendOpen && (
+                <div className="face-feature-form">
+                  <div className="op-row">
+                    <select
+                      value={sheetBendAxis}
+                      aria-label="Направление изгиба"
+                      onChange={(event) => setSheetBendAxis(event.target.value as "x" | "y")}
+                    >
+                      <option value="x">Сгибать по X · линия вдоль Y</option>
+                      <option value="y">Сгибать по Y · линия вдоль X</option>
+                    </select>
+                    <select
+                      value={sheetBendMovingSide}
+                      aria-label="Подвижная сторона изгиба"
+                      onChange={(event) => setSheetBendMovingSide(Number(event.target.value) as -1 | 1)}
+                    >
+                      <option value={1}>{`Сгибать +${sheetBendAxis.toUpperCase()}`}</option>
+                      <option value={-1}>{`Сгибать −${sheetBendAxis.toUpperCase()}`}</option>
+                    </select>
+                  </div>
+                  <div className="op-row">
+                    <div className="param-input op-field">
+                      <input inputMode="decimal" value={sheetBendPosition} aria-label="Положение линии изгиба, мм" onChange={(event) => setSheetBendPosition(event.target.value)} />
+                      <span className="param-unit">позиция, мм</span>
+                    </div>
+                    <div className="param-input op-field">
+                      <input inputMode="decimal" value={sheetBendAngle} aria-label="Угол изгиба, градусы" onChange={(event) => setSheetBendAngle(event.target.value)} />
+                      <span className="param-unit">угол, °</span>
+                    </div>
+                  </div>
+                  <div className="op-row">
+                    <div className="param-input op-field">
+                      <input inputMode="decimal" value={sheetBendRadius} aria-label="Внутренний радиус изгиба, мм" onChange={(event) => setSheetBendRadius(event.target.value)} />
+                      <span className="param-unit">R вн., мм</span>
+                    </div>
+                    <select
+                      value={sheetBendDirection}
+                      aria-label="Направление изгиба по Z"
+                      onChange={(event) => setSheetBendDirection(Number(event.target.value) as -1 | 1)}
+                    >
+                      <option value={1}>Вверх, +Z</option>
+                      <option value={-1}>Вниз, −Z</option>
+                    </select>
+                  </div>
+                  {sheetBendError ? (
+                    <p className="error-inline" role="alert">{sheetBendError}</p>
+                  ) : (
+                    <p className="face-feature-preview">
+                      Синий preview не показывает контуры вырезов. Прямоугольный through-вырез может пересекать до двух bend-зон, круглый, кольцевой или паз — одну.
+                    </p>
+                  )}
+                  <div className="push-pull-actions">
+                    <button
+                      className="btn btn-primary"
+                      data-cmd="op.sheet_bend"
+                      disabled={!sheetBendRequest}
+                      onClick={() => {
+                        if (!sheetBendRequest) return;
+                        props.onSheetBendPreview(null);
+                        props.onApplySheetBend(sheetBendRequest);
+                        setSheetBendOpen(false);
+                      }}
+                    >
+                      Создать изгиб
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={() => {
+                        setSheetBendOpen(false);
+                        props.onSheetBendPreview(null);
+                      }}
+                    >
+                      Отмена
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {!props.faceFeatureTarget && !props.sheetBendTarget && props.faceFeatureReason ? (
+            <p className="push-pull-hint">{props.faceFeatureReason}</p>
+          ) : null}
         </section>
       )}
 
       <section className="tool-section">
-        <h3 className="panel-section">Скругление</h3>
-        {!props.fillet.active ? (
-          <button
-            className="btn" data-cmd="op.fillet" aria-label="Скруглить ребро"
-            disabled={!doc?.stats?.is_valid || !!doc?.error}
-            onClick={props.onStartFillet}
-          >
-            Скруглить
-          </button>
+        <h3 className="panel-section">Обработка рёбер</h3>
+        {!props.edgeTool.active ? (
+          <div className="fillet-actions">
+            <button
+              className="btn" data-cmd="op.fillet" aria-label="Скруглить ребро"
+              disabled={!doc?.stats?.is_valid || !!doc?.error}
+              onClick={() => props.onStartEdgeTool("fillet")}
+            >
+              Скругление
+            </button>
+            <button
+              className="btn" data-cmd="op.chamfer" aria-label="Создать фаску на ребре"
+              disabled={!doc?.stats?.is_valid || !!doc?.error}
+              onClick={() => props.onStartEdgeTool("chamfer")}
+            >
+              Фаска
+            </button>
+          </div>
         ) : (
           <div className="fillet-panel">
+            <select
+              aria-label="Тип обработки ребра"
+              value={props.edgeTool.kind}
+              onChange={(event) => props.onEdgeToolKind(event.target.value as EdgeFeatureKind)}
+            >
+              <option value="fillet">Скругление</option>
+              <option value="chamfer">Фаска</option>
+            </select>
+            <p className="edge-pick-hint">
+              Щёлкните прямое ребро на модели или выберите любое доступное ребро в списке.
+            </p>
             {edges.length === 0 && <p className="panel-empty">Рёбра не найдены.</p>}
             <ul className="edge-list">
               {edges.map((e, i) => {
-                const done = filletedEdges.some((f) => sameEdge(f, e));
-                const sel = props.fillet.selected && sameEdge(props.fillet.selected, e);
+                const applied = edgeOperations.filter((operation) => sameEdge(operation.edge_ref!, e));
+                const sel = props.edgeTool.selected && sameEdge(props.edgeTool.selected, e);
+                const appliedLabel = applied.map((operation) =>
+                  operation.op === "fillet" ? "скруглено" : "фаска").join(", ");
                 return (
                   <li key={i}>
                     <button
                       className={`edge-row ${sel ? "edge-selected" : ""}`}
-                      data-cmd="op.fillet"
-                      aria-label={`Ребро ${e.kind}, длина ${fmtNum(e.length)} мм${done ? ", уже скруглено" : ""}`}
+                      data-cmd={props.edgeTool.kind === "fillet" ? "op.fillet" : "op.chamfer"}
+                      aria-label={`Ребро ${e.kind}, длина ${fmtNum(e.length)} мм${appliedLabel ? `, ${appliedLabel}` : ""}`}
                       onClick={() => props.onSelectEdge(e)}
                     >
                       <span className="edge-kind">{e.kind}</span>
@@ -350,35 +1067,38 @@ export function ParamsPanel(props: Props) {
                       <span className="edge-mid">
                         ({e.midpoint.map((v) => fmtNum(v)).join("; ")})
                       </span>
-                      {done && <span className="history-badge">скруглено</span>}
+                      {appliedLabel && <span className="history-badge">{appliedLabel}</span>}
                     </button>
                   </li>
                 );
               })}
             </ul>
             <div className="param-field">
-              <label htmlFor="fillet-radius">Радиус</label>
+              <label htmlFor="edge-feature-size">
+                {props.edgeTool.kind === "fillet" ? "Радиус" : "Размер фаски"}
+              </label>
               <div className="param-input">
                 <input
-                  id="fillet-radius" inputMode="decimal"
-                  value={props.fillet.radius}
-                  aria-label="Радиус скругления, мм"
-                  onChange={(e) => props.onFilletRadius(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") props.onApplyFillet(); }}
+                  id="edge-feature-size" inputMode="decimal"
+                  value={props.edgeTool.size}
+                  aria-label={props.edgeTool.kind === "fillet" ? "Радиус скругления, мм" : "Размер фаски, мм"}
+                  onChange={(e) => props.onEdgeToolSize(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") props.onApplyEdgeTool(); }}
                 />
                 <span className="param-unit">мм</span>
               </div>
             </div>
             <div className="fillet-actions">
               <button
-                className="btn btn-primary" data-cmd="op.fillet"
-                aria-label="Применить скругление"
-                disabled={!props.fillet.selected}
-                onClick={props.onApplyFillet}
+                className="btn btn-primary"
+                data-cmd={props.edgeTool.kind === "fillet" ? "op.fillet" : "op.chamfer"}
+                aria-label={props.edgeTool.kind === "fillet" ? "Применить скругление" : "Применить фаску"}
+                disabled={!props.edgeTool.selected}
+                onClick={props.onApplyEdgeTool}
               >
-                Применить скругление
+                {props.edgeTool.kind === "fillet" ? "Применить скругление" : "Применить фаску"}
               </button>
-              <button className="btn" aria-label="Отменить выбор ребра" onClick={props.onCancelFillet}>Отмена</button>
+              <button className="btn" aria-label="Отменить выбор ребра" onClick={props.onCancelEdgeTool}>Отмена</button>
             </div>
           </div>
         )}

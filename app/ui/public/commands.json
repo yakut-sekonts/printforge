@@ -170,6 +170,22 @@
       ]
     },
     {
+      "command_id": "op.chamfer",
+      "title": "Создать фаску",
+      "help_id": "skruglenie",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте или выберите деталь",
+      "params": [
+        {
+          "name": "distance",
+          "unit": "mm",
+          "min": 0.01,
+          "desc": "Размер фаски"
+        }
+      ]
+    },
+    {
       "command_id": "io.import",
       "title": "Импортировать модель",
       "help_id": "import-modeley",
@@ -296,6 +312,60 @@
       "availability": "requires_body",
       "disabled_reason": "Сначала создайте деталь",
       "params": []
+    },
+    {
+      "command_id": "op.face_dome",
+      "title": "Создать выпуклость или вмятину",
+      "help_id": "vypuklost-vmyatina",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте и выберите деталь",
+      "params": [
+        {
+          "name": "diameter",
+          "unit": "mm",
+          "min": 0.01,
+          "desc": "Диаметр основания сферического сегмента"
+        },
+        {
+          "name": "height",
+          "unit": "mm",
+          "min": 0.01,
+          "desc": "Высота выпуклости или глубина вмятины"
+        },
+        {
+          "name": "center",
+          "unit": "mm",
+          "desc": "Смещения центра по локальным осям U/V"
+        }
+      ]
+    },
+    {
+      "command_id": "op.sheet_bend",
+      "title": "Создать точный изгиб пластины",
+      "help_id": "izgib-plastiny",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Выберите верхнюю грань пластины; изгибы должны идти первыми и подряд",
+      "params": [
+        {
+          "name": "position",
+          "unit": "mm",
+          "desc": "Положение линии изгиба относительно центра пластины"
+        },
+        {
+          "name": "angle",
+          "unit": "deg",
+          "min": 5,
+          "desc": "Угол изгиба от 5° до 170°"
+        },
+        {
+          "name": "inside_radius",
+          "unit": "mm",
+          "min": 0.01,
+          "desc": "Внутренний радиус изгиба"
+        }
+      ]
     },
     {
       "command_id": "op.array_circular",

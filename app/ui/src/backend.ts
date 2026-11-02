@@ -1,6 +1,7 @@
 import type {
   AiConnectionTest, AiOperation, AiPlanResponse, AiProviderConfig, AiProviderInfo,
-  DocState, EdgeRef, ExportResult, GeoError, ImportResult, MeshData, PrintCheckResult,
+  DocState, EdgeRef, ExportResult, FaceDomeArgs, FaceFeatureArgs, GeoError, ImportResult, MeshData,
+  PrintCheckResult, SheetBendArgs,
 } from "./types";
 
 const HOME = "/Users/semenkontsevoy";
@@ -102,6 +103,12 @@ export const backend = {
     depth?: number | "through";
     target_id?: string;
   }) => call<DocState>("doc_profile_extrude", args as Record<string, unknown>),
+  docFaceFeature: (args: FaceFeatureArgs) =>
+    call<DocState>("doc_face_feature", args as unknown as Record<string, unknown>),
+  docFaceDome: (args: FaceDomeArgs) =>
+    call<DocState>("doc_face_dome", args as unknown as Record<string, unknown>),
+  docSheetBend: (args: SheetBendArgs) =>
+    call<DocState>("doc_sheet_bend", args as unknown as Record<string, unknown>),
   docArrayCircular: (partId: string, count: number, angle?: number, center?: [number, number, number]) =>
     call<DocState>("doc_array_circular", { part_id: partId, count, angle, center }),
   docAlign: (partId: string, axis: "x" | "y" | "z", align: "center" | "min" | "max", value: number) =>
@@ -135,6 +142,8 @@ export const backend = {
     call<DocState>("doc_transaction", args as unknown as Record<string, unknown>),
   docFillet: (edge_ref: EdgeRef, radius: number, partId?: string) =>
     call<DocState>("doc_fillet", { edge_ref, radius, part_id: partId }),
+  docChamfer: (edge_ref: EdgeRef, distance: number, partId?: string) =>
+    call<DocState>("doc_chamfer", { edge_ref, distance, part_id: partId }),
   docClearError: () => call<DocState>("doc_clear_error"),
   docUndo: () => call<DocState>("doc_undo"),
   docRedo: () => call<DocState>("doc_redo"),

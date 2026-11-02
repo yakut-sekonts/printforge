@@ -1,15 +1,22 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type {
   CommandDef, DocState, Lesson, MeshData, LessonCheck, GeoError,
-  TemplateDef, EdgeRef, PrintCheck, ImportResult, DocStats, AiOperation,
+  TemplateDef, EdgeRef, EdgeFeatureKind, FaceDomeArgs, FaceFeatureArgs, PrintCheck, ImportResult,
+  DocStats, AiOperation, SheetBendArgs,
 } from "./types";
 import { backend, expandTilde, parseIpcError } from "./backend";
 import { evalExpression } from "./expr";
 import { Viewport, faceArea, ViewName } from "./viewport";
-import { pushPullDelta, pushPullValue, resolveFaceEditTarget } from "./faceEditing";
+import {
+  pushPullDelta, pushPullValue, resolveFaceEditTarget, resolveFaceFeatureTarget,
+  resolveSheetBendTarget,
+} from "./faceEditing";
+import type {
+  FaceDomePreview, FaceFeaturePreview, FaceFeatureTarget, SheetBendPreview,
+} from "./faceEditing";
 import { TopBar, LeftPanel, StatusBar, EmptyState, cmdEnabled } from "./components";
 import { ParamsPanel } from "./ParamsPanel";
-import type { FilletUi, PushPullUi } from "./ParamsPanel";
+import type { EdgeToolUi, PushPullUi } from "./ParamsPanel";
 import { HelpPanel, TooltipMode } from "./HelpPanel";
 import { Tooltips } from "./Tooltips";
 import { LessonBar, LessonRun, StepStatus } from "./LessonBar";
@@ -50,13 +57,22 @@ export default function App() {
   const [savePath, setSavePath] = useState("~/plate.printforge");
   const [openPath, setOpenPath] = useState("~/plate.printforge");
   const [exportPath, setExportPath] = useState("~/plate.stl");
-  const [fillet, setFillet] = useState<FilletUi>({ active: false, selected: null, radius: "2" });
+  const [edgeTool, setEdgeTool] = useState<EdgeToolUi>({
+    active: false,
+    kind: "fillet",
+    selected: null,
+    partId: null,
+    size: "2",
+  });
   const [pushPull, setPushPull] = useState<PushPullUi>({
     target: null,
     value: "",
     dragging: false,
     reason: null,
   });
+  const [faceFeatureTarget, setFaceFeatureTarget] = useState<FaceFeatureTarget | null>(null);
+  const [sheetBendTarget, setSheetBendTarget] = useState<FaceFeatureTarget | null>(null);
+  const [faceFeatureReason, setFaceFeatureReason] = useState<string | null>(null);
   const [printChecks, setPrintChecks] = useState<PrintCheck[] | null>(null);
   const [printBusy, setPrintBusy] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
@@ -73,7 +89,8 @@ export default function App() {
   const meshToken = useRef(0);
   const docRef = useRef<DocState | null>(null);
   const lessonRef = useRef<LessonRun | null>(null);
-  const filletRef = useRef(fillet);
+  const edgeToolRef = useRef(edgeTool);
+  const edgeSelectHandlerRef = useRef<(edge: EdgeRef) => void>(() => {});
   const pushPullRef = useRef(pushPull);
   const pushPullHandlersRef = useRef({
     start: () => {},
@@ -82,7 +99,7 @@ export default function App() {
   });
   docRef.current = doc;
   lessonRef.current = lessonRun;
-  filletRef.current = fillet;
+  edgeToolRef.current = edgeTool;
   pushPullRef.current = pushPull;
 
   // ---------- загрузка реестров ----------
@@ -106,6 +123,7 @@ export default function App() {
         vp.setSelectedFace(face);
         if (face != null) lessonEvent({ type: "face_selected" });
       },
+      onSelectEdge: (edge) => edgeSelectHandlerRef.current(edge),
       onPushPullStart: () => pushPullHandlersRef.current.start(),
       onPushPullPreview: (delta) => pushPullHandlersRef.current.preview(delta),
       onPushPullCommit: (delta) => pushPullHandlersRef.current.commit(delta),
@@ -120,6 +138,18 @@ export default function App() {
   useEffect(() => {
     viewportRef.current?.setMesh(mesh);
   }, [mesh]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    viewport.setEdgeSelectionMode(edgeTool.active, doc?.stats?.edges ?? []);
+    if (edgeTool.active && edgeTool.selected) {
+      const prefix = edgeTool.kind === "fillet" ? "R" : "C";
+      viewport.setEdgeMarker(edgeTool.selected, `${prefix}${edgeTool.size} мм`);
+    } else {
+      viewport.setEdgeMarker(null);
+    }
+  }, [edgeTool.active, edgeTool.kind, edgeTool.selected, edgeTool.size, doc?.stats?.edges, mesh]);
 
   useEffect(() => {
     document.body.classList.toggle("what-is-this", whatIsThis);
@@ -398,24 +428,43 @@ export default function App() {
     viewport?.setSelectedFace(selectedFace);
     if (selectedFace == null || !mesh || !doc) {
       viewport?.setPushPullHandle(null);
+      viewport?.setFaceFeaturePreview(null);
+      viewport?.setFaceDomePreview(null);
+      viewport?.setSheetBendPreview(null);
       setPushPull({ target: null, value: "", dragging: false, reason: null });
+      setFaceFeatureTarget(null);
+      setSheetBendTarget(null);
+      setFaceFeatureReason(null);
       return;
     }
 
     let reason: string | null = null;
     let target = null;
+    let featureTarget: FaceFeatureTarget | null = null;
+    let bendTarget: FaceFeatureTarget | null = null;
+    let featureReason: string | null = null;
     const parts = doc.parts ?? [];
     if (importedStats) {
       reason = "Push/Pull для импортированной сетки пока недоступен.";
+      featureReason = "Элементы на грани для импортированной сетки пока недоступны.";
     } else if (parts.length !== 1) {
       reason = "Push/Pull пока доступен для одного параметрического тела.";
-    } else if ((doc.operations ?? []).some((operation) => operation.op !== "fillet")) {
-      reason = "Push/Pull недоступен после операций, меняющих топологию тела.";
+      featureReason = "Элемент на грани пока доступен для одного параметрического тела.";
     } else {
       const part = parts[0];
+      featureTarget = resolveFaceFeatureTarget(mesh, selectedFace, part.part_id);
+      bendTarget = resolveSheetBendTarget(mesh, selectedFace, part.part_id);
+      if (!featureTarget) {
+        featureReason = "Выберите внешнюю плоскую грань на границе детали.";
+      }
       const template = templates.find((candidate) => candidate.template_id === part.template);
-      if (template) target = resolveFaceEditTarget(mesh, selectedFace, part, template);
-      if (!target) reason = "Эта грань пока не связана с редактируемым размером.";
+      if ((doc.operations ?? []).some((operation) =>
+        operation.op !== "fillet" && operation.op !== "chamfer")) {
+        reason = "Push/Pull недоступен после операций, меняющих топологию тела.";
+      } else {
+        if (template) target = resolveFaceEditTarget(mesh, selectedFace, part, template);
+        if (!target) reason = "Эта грань пока не связана с редактируемым размером.";
+      }
     }
 
     viewport?.setPushPullHandle(target);
@@ -425,6 +474,9 @@ export default function App() {
       dragging: false,
       reason,
     });
+    setFaceFeatureTarget(featureTarget);
+    setSheetBendTarget(bendTarget);
+    setFaceFeatureReason(featureReason);
   }, [selectedFace, mesh, doc, templates, importedStats]);
 
   // сброс выбора детали, если она исчезла из живых тел
@@ -479,6 +531,45 @@ export default function App() {
 
   const runProfileExtrude = useCallback(async (args: Parameters<typeof backend.docProfileExtrude>[0]) => {
     await runBackend(() => backend.docProfileExtrude(args));
+  }, [runBackend]);
+
+  const previewFaceFeature = useCallback((preview: FaceFeaturePreview | null) => {
+    viewportRef.current?.setFaceFeaturePreview(preview);
+  }, []);
+
+  const runFaceFeature = useCallback(async (args: FaceFeatureArgs) => {
+    viewportRef.current?.setFaceFeaturePreview(null);
+    const state = await runBackend(() => backend.docFaceFeature(args));
+    if (!state || state.error) return;
+    setSelectedFace(null);
+    viewportRef.current?.setSelectedFace(null);
+    setStatusMsg(args.mode === "add" ? "Выдавливание на грани создано" : "Вырез на грани создан");
+  }, [runBackend]);
+
+  const previewFaceDome = useCallback((preview: FaceDomePreview | null) => {
+    viewportRef.current?.setFaceDomePreview(preview);
+  }, []);
+
+  const runFaceDome = useCallback(async (args: FaceDomeArgs) => {
+    viewportRef.current?.setFaceDomePreview(null);
+    const state = await runBackend(() => backend.docFaceDome(args));
+    if (!state || state.error) return;
+    setSelectedFace(null);
+    viewportRef.current?.setSelectedFace(null);
+    setStatusMsg(args.mode === "add" ? "Выпуклость создана" : "Вмятина создана");
+  }, [runBackend]);
+
+  const previewSheetBend = useCallback((preview: SheetBendPreview | null) => {
+    viewportRef.current?.setSheetBendPreview(preview);
+  }, []);
+
+  const runSheetBend = useCallback(async (args: SheetBendArgs) => {
+    viewportRef.current?.setSheetBendPreview(null);
+    const state = await runBackend(() => backend.docSheetBend(args));
+    if (!state || state.error) return;
+    setSelectedFace(null);
+    viewportRef.current?.setSelectedFace(null);
+    setStatusMsg(`Изгиб ${args.angle}° создан`);
   }, [runBackend]);
 
   const runArrayCircular = useCallback(async (count: number, angle: number, center: [number, number, number]) => {
@@ -541,39 +632,67 @@ export default function App() {
     }
   }, []);
 
-  // ---------- скругление ----------
-  const startFillet = useCallback(() => {
-    setFillet({ active: true, selected: null, radius: filletRef.current.radius });
+  // ---------- обработка рёбер ----------
+  const startEdgeTool = useCallback((kind: EdgeFeatureKind) => {
+    setEdgeTool((current) => ({ ...current, active: true, kind, selected: null, partId: null }));
+    setSelectedFace(null);
+    viewportRef.current?.setSelectedFace(null);
   }, []);
 
-  const cancelFillet = useCallback(() => {
-    setFillet((f) => ({ ...f, active: false, selected: null }));
+  const cancelEdgeTool = useCallback(() => {
+    setEdgeTool((current) => ({ ...current, active: false, selected: null, partId: null }));
+    viewportRef.current?.setEdgeSelectionMode(false, []);
     viewportRef.current?.setEdgeMarker(null);
   }, []);
 
   const selectEdge = useCallback((e: EdgeRef) => {
-    setFillet((f) => ({ ...f, selected: e }));
-    viewportRef.current?.setEdgeMarker(e);
-  }, []);
+    if (!edgeToolRef.current.active) return;
+    const liveParts = docRef.current?.stats?.parts ?? [];
+    let firstSolid = 0;
+    let edgePartId: string | null = null;
+    for (const part of liveParts) {
+      const nextSolid = firstSolid + part.solid_count;
+      if (e.solid_index >= firstSolid && e.solid_index < nextSolid) {
+        edgePartId = part.part_id;
+        break;
+      }
+      firstSolid = nextSolid;
+    }
+    setEdgeTool((current) => ({
+      ...current,
+      selected: e,
+      partId: edgePartId ?? activePartId() ?? null,
+    }));
+  }, [activePartId]);
+  edgeSelectHandlerRef.current = selectEdge;
 
-  const applyFillet = useCallback(async () => {
-    const f = filletRef.current;
-    if (!f.selected) return;
-    const radius = Number(f.radius.replace(",", "."));
-    if (!Number.isFinite(radius) || radius <= 0) {
-      setStatusMsg("Радиус должен быть положительным числом");
+  const applyEdgeTool = useCallback(async () => {
+    const current = edgeToolRef.current;
+    if (!current.selected) return;
+    const size = Number(current.size.replace(",", "."));
+    if (!Number.isFinite(size) || size <= 0) {
+      setStatusMsg(current.kind === "fillet"
+        ? "Радиус должен быть положительным числом"
+        : "Размер фаски должен быть положительным числом");
       return;
     }
-    const state = await runBackend(() => backend.docFillet(f.selected!, radius, activePartId()));
+    const state = await runBackend(() => current.kind === "fillet"
+      ? backend.docFillet(current.selected!, size, current.partId ?? activePartId())
+      : backend.docChamfer(current.selected!, size, current.partId ?? activePartId()));
     if (state && !state.error) {
-      cancelFillet();
-      lessonEvent({ type: "operation", op: "fillet", radius });
+      cancelEdgeTool();
+      setStatusMsg(current.kind === "fillet" ? "Скругление создано" : "Фаска создана");
+      if (current.kind === "fillet") {
+        lessonEvent({ type: "operation", op: "fillet", radius: size });
+      }
     }
-  }, [runBackend, cancelFillet, lessonEvent, activePartId]);
+  }, [runBackend, cancelEdgeTool, lessonEvent, activePartId]);
 
   const clearErrorOrUndo = useCallback(() => {
     const code = docRef.current?.error?.code;
-    if (code === "fillet_failed" || code === "reselect_required") {
+    if (code === "fillet_failed" || code === "chamfer_failed" || code === "dome_failed" ||
+        code === "bend_failed" ||
+        code === "reselect_required") {
       void runBackend(() => backend.docClearError());
     } else {
       void undoDocument();
@@ -710,12 +829,13 @@ export default function App() {
       case "export.stl": void doExport("stl"); break;
       case "export.step": void doExport("step"); break;
       case "export.3mf": void doExport("3mf"); break;
-      case "op.fillet": startFillet(); break;
+      case "op.fillet": startEdgeTool("fillet"); break;
+      case "op.chamfer": startEdgeTool("chamfer"); break;
       case "ai.panel.open": setHelpOpen(false); setAiOpen((v) => !v); break;
       case "app.help.open": setAiOpen(false); setHelpOpen((v) => !v); break;
       case "app.help.what_is_this": setWhatIsThis((v) => !v); break;
     }
-  }, [commands, templates, createFromTemplate, undoDocument, redoDocument, doSave, doOpen, doExport, startFillet]);
+  }, [commands, templates, createFromTemplate, undoDocument, redoDocument, doSave, doOpen, doExport, startEdgeTool]);
 
   // ---------- режим «Что это?» ----------
   useEffect(() => {
@@ -771,7 +891,7 @@ export default function App() {
           Math.abs(pushPullValueNumber - pushPullState.target.current) >= 1e-9
         );
         if (pushPullPending) cancelPushPull();
-        else if (filletRef.current.active) cancelFillet();
+        else if (edgeToolRef.current.active) cancelEdgeTool();
         else if (whatIsThis) setWhatIsThis(false);
         else if (aiOpen) setAiOpen(false);
         else if (helpOpen) setHelpOpen(false);
@@ -779,7 +899,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [whatIsThis, helpOpen, aiOpen, undoDocument, redoDocument, doSave, doOpen, cancelFillet, cancelPushPull]);
+  }, [whatIsThis, helpOpen, aiOpen, undoDocument, redoDocument, doSave, doOpen, cancelEdgeTool, cancelPushPull]);
 
   const faceAreaValue = mesh && selectedFace != null ? faceArea(mesh, selectedFace) : null;
   const docName = doc?.path ? doc.path.split("/").pop()! : "Без названия";
@@ -836,6 +956,15 @@ export default function App() {
           selectedFace={selectedFace}
           faceArea={faceAreaValue}
           pushPull={pushPull}
+          faceFeatureTarget={faceFeatureTarget}
+          sheetBendTarget={sheetBendTarget}
+          faceFeatureReason={faceFeatureReason}
+          onFaceFeaturePreview={previewFaceFeature}
+          onApplyFaceFeature={(args) => void runFaceFeature(args)}
+          onFaceDomePreview={previewFaceDome}
+          onApplyFaceDome={(args) => void runFaceDome(args)}
+          onSheetBendPreview={previewSheetBend}
+          onApplySheetBend={(args) => void runSheetBend(args)}
           onPushPullValue={updatePushPullValue}
           onApplyPushPull={applyPushPull}
           onCancelPushPull={cancelPushPull}
@@ -855,12 +984,13 @@ export default function App() {
           onMeasure={() => void runMeasure()}
           onMeasureFace={() => void runMeasureFace()}
           onMeasureDistance={(p0, p1) => void runMeasureDistance(p0, p1)}
-          fillet={fillet}
-          onStartFillet={startFillet}
+          edgeTool={edgeTool}
+          onStartEdgeTool={startEdgeTool}
           onSelectEdge={selectEdge}
-          onFilletRadius={(v) => setFillet((f) => ({ ...f, radius: v }))}
-          onApplyFillet={() => void applyFillet()}
-          onCancelFillet={cancelFillet}
+          onEdgeToolKind={(kind) => setEdgeTool((current) => ({ ...current, kind }))}
+          onEdgeToolSize={(size) => setEdgeTool((current) => ({ ...current, size }))}
+          onApplyEdgeTool={() => void applyEdgeTool()}
+          onCancelEdgeTool={cancelEdgeTool}
           onClearError={clearErrorOrUndo}
           printChecks={printChecks}
           printBusy={printBusy}

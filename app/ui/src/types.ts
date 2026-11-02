@@ -16,7 +16,75 @@ export interface EdgeRef {
 export interface Operation {
   op: string;
   radius?: number;
+  distance?: number;
   edge_ref?: EdgeRef;
+  target_id?: string;
+  mode?: "add" | "cut";
+  face_ref?: FaceFeatureRef;
+  profile?: FaceFeatureProfile;
+  depth?: number | "through";
+  center?: [number, number];
+  diameter?: number;
+  height?: number;
+  bend_axis?: "x" | "y";
+  position?: number;
+  angle?: number;
+  inside_radius?: number;
+  moving_side?: -1 | 1;
+  direction?: -1 | 1;
+}
+
+export type EdgeFeatureKind = "fillet" | "chamfer";
+
+export type FaceAxis = "x" | "y" | "z";
+
+export interface FaceFeatureRef {
+  kind: "outer_planar";
+  axis: FaceAxis;
+  side: -1 | 1;
+  anchor: [number, number];
+  selected_area: number;
+}
+
+export type FaceProfileKind = "rectangle" | "circle" | "ring" | "slot";
+
+export interface FaceFeatureProfile {
+  kind: FaceProfileKind;
+  center: [number, number];
+  width?: number;
+  height?: number;
+  diameter?: number;
+  outer_diameter?: number;
+  inner_diameter?: number;
+  length?: number;
+}
+
+export interface FaceFeatureArgs {
+  target_id: string;
+  mode: "add" | "cut";
+  face_ref: FaceFeatureRef;
+  profile: FaceFeatureProfile;
+  depth: number | "through";
+}
+
+export interface FaceDomeArgs {
+  target_id: string;
+  mode: "add" | "cut";
+  face_ref: FaceFeatureRef;
+  center: [number, number];
+  diameter: number;
+  height: number;
+}
+
+export interface SheetBendArgs {
+  target_id: string;
+  face_ref: FaceFeatureRef;
+  bend_axis: "x" | "y";
+  position: number;
+  angle: number;
+  inside_radius: number;
+  moving_side: -1 | 1;
+  direction: -1 | 1;
 }
 
 export interface PartDef {

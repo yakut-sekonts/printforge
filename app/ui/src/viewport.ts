@@ -1,13 +1,16 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { MeshData, FaceRange, EdgeRef } from "./types";
-import type { FaceEditTarget } from "./faceEditing";
+import type { FaceAxis, FaceRange, FaceFeatureProfile, MeshData, EdgeRef } from "./types";
+import type {
+  FaceDomePreview, FaceEditTarget, FaceFeaturePreview, SheetBendPreview,
+} from "./faceEditing";
 
 export type ViewName = "top" | "front" | "side" | "iso";
 
 export interface ViewportEvents {
   onHoverFace: (face: number | null) => void;
   onSelectFace: (face: number | null) => void;
+  onSelectEdge: (edge: EdgeRef) => void;
   onPushPullStart: () => void;
   onPushPullPreview: (delta: number) => void;
   onPushPullCommit: (delta: number) => void;
@@ -33,6 +36,255 @@ const COLOR = {
 
 function docToThree(x: number, y: number, z: number): [number, number, number] {
   return [x, z, -y];
+}
+
+function pointSegmentDistance(point: THREE.Vector2, start: THREE.Vector2, end: THREE.Vector2): number {
+  const segment = end.clone().sub(start);
+  const lengthSquared = segment.lengthSq();
+  if (lengthSquared <= 1e-9) return point.distanceTo(start);
+  const amount = Math.max(0, Math.min(1, point.clone().sub(start).dot(segment) / lengthSquared));
+  return point.distanceTo(start.clone().add(segment.multiplyScalar(amount)));
+}
+
+function axisVector(axis: FaceAxis): [number, number, number] {
+  if (axis === "x") return [1, 0, 0];
+  if (axis === "y") return [0, 1, 0];
+  return [0, 0, 1];
+}
+
+function faceFeatureShape(profile: FaceFeatureProfile): THREE.Shape {
+  const shape = new THREE.Shape();
+  if (profile.kind === "rectangle") {
+    const halfWidth = (profile.width ?? 0) / 2;
+    const halfHeight = (profile.height ?? 0) / 2;
+    shape.moveTo(-halfWidth, -halfHeight);
+    shape.lineTo(halfWidth, -halfHeight);
+    shape.lineTo(halfWidth, halfHeight);
+    shape.lineTo(-halfWidth, halfHeight);
+    shape.closePath();
+    return shape;
+  }
+  if (profile.kind === "slot") {
+    const radius = (profile.width ?? 0) / 2;
+    const halfStraight = ((profile.length ?? 0) - (profile.width ?? 0)) / 2;
+    shape.moveTo(-halfStraight, -radius);
+    shape.lineTo(halfStraight, -radius);
+    shape.absarc(halfStraight, 0, radius, -Math.PI / 2, Math.PI / 2, false);
+    shape.lineTo(-halfStraight, radius);
+    shape.absarc(-halfStraight, 0, radius, Math.PI / 2, Math.PI * 1.5, false);
+    shape.closePath();
+    return shape;
+  }
+  const outerRadius = profile.kind === "ring"
+    ? (profile.outer_diameter ?? 0) / 2
+    : (profile.diameter ?? 0) / 2;
+  shape.absarc(0, 0, outerRadius, 0, Math.PI * 2, false);
+  if (profile.kind === "ring") {
+    const hole = new THREE.Path();
+    hole.absarc(0, 0, (profile.inner_diameter ?? 0) / 2, 0, Math.PI * 2, true);
+    shape.holes.push(hole);
+  }
+  return shape;
+}
+
+function faceDomeGeometry(diameter: number, height: number): THREE.BufferGeometry {
+  const segments = 48;
+  const rings = 16;
+  const baseRadius = diameter / 2;
+  const sphereRadius = (baseRadius * baseRadius + height * height) / (2 * height);
+  const sphereCenter = height - sphereRadius;
+  const positions: number[] = [];
+  const indices: number[] = [];
+
+  for (let ring = 0; ring < rings; ring += 1) {
+    const z = height * ring / rings;
+    const radius = Math.sqrt(Math.max(0, sphereRadius * sphereRadius - (z - sphereCenter) ** 2));
+    for (let segment = 0; segment < segments; segment += 1) {
+      const angle = segment * Math.PI * 2 / segments;
+      positions.push(radius * Math.cos(angle), radius * Math.sin(angle), z);
+    }
+  }
+  const apex = positions.length / 3;
+  positions.push(0, 0, height);
+  const baseCenter = positions.length / 3;
+  positions.push(0, 0, 0);
+
+  for (let ring = 0; ring < rings - 1; ring += 1) {
+    for (let segment = 0; segment < segments; segment += 1) {
+      const next = (segment + 1) % segments;
+      const currentRing = ring * segments;
+      const nextRing = (ring + 1) * segments;
+      indices.push(
+        currentRing + segment, currentRing + next, nextRing + segment,
+        currentRing + next, nextRing + next, nextRing + segment,
+      );
+    }
+  }
+  const lastRing = (rings - 1) * segments;
+  for (let segment = 0; segment < segments; segment += 1) {
+    const next = (segment + 1) % segments;
+    indices.push(lastRing + segment, lastRing + next, apex);
+    indices.push(baseCenter, next, segment);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function sheetBendGeometry(preview: SheetBendPreview): THREE.BufferGeometry {
+  const { args, bends, length, width, thickness } = preview;
+  const developedLength = args.bend_axis === "x" ? length : width;
+  const stationWidth = args.bend_axis === "x" ? width : length;
+  const specs = bends.map((bend) => {
+    const angle = THREE.MathUtils.degToRad(bend.angle);
+    const delta = bend.direction * angle;
+    const allowance = (bend.inside_radius + thickness / 2) * angle;
+    const center = bend.position + developedLength / 2;
+    return {
+      ...bend,
+      delta,
+      pathRadius: bend.direction > 0 ? bend.inside_radius : bend.inside_radius + thickness,
+      zoneStart: center - allowance / 2,
+      zoneEnd: center + allowance / 2,
+    };
+  }).sort((left, right) => left.position - right.position);
+
+  const advance = (
+    point: [number, number],
+    tangentAngle: number,
+    delta: number,
+    radius: number,
+  ): [number, number] => {
+    const absoluteDelta = Math.abs(delta);
+    const localX = radius * Math.sin(absoluteDelta);
+    const localZ = Math.sign(delta) * radius * (1 - Math.cos(absoluteDelta));
+    const cosine = Math.cos(tangentAngle);
+    const sine = Math.sin(tangentAngle);
+    return [
+      point[0] + localX * cosine - localZ * sine,
+      point[1] + localX * sine + localZ * cosine,
+    ];
+  };
+
+  type SectionPiece = {
+    kind: "straight" | "bend";
+    start: number;
+    end: number;
+    point: [number, number];
+    angle: number;
+    delta: number;
+    radius: number;
+  };
+  const pieces: SectionPiece[] = [];
+  let tangentAngle = -specs
+    .filter((spec) => spec.moving_side < 0)
+    .reduce((total, spec) => total + spec.delta, 0);
+  let point: [number, number] = [0, 0];
+  let cursor = 0;
+  for (const spec of specs) {
+    const straightLength = spec.zoneStart - cursor;
+    pieces.push({
+      kind: "straight", start: cursor, end: spec.zoneStart,
+      point, angle: tangentAngle, delta: 0, radius: 0,
+    });
+    point = [
+      point[0] + straightLength * Math.cos(tangentAngle),
+      point[1] + straightLength * Math.sin(tangentAngle),
+    ];
+    pieces.push({
+      kind: "bend", start: spec.zoneStart, end: spec.zoneEnd,
+      point, angle: tangentAngle, delta: spec.delta, radius: spec.pathRadius,
+    });
+    point = advance(point, tangentAngle, spec.delta, spec.pathRadius);
+    tangentAngle += spec.delta;
+    cursor = spec.zoneEnd;
+  }
+  pieces.push({
+    kind: "straight", start: cursor, end: developedLength,
+    point, angle: tangentAngle, delta: 0, radius: 0,
+  });
+
+  const pointAt = (developed: number): [number, number, number] => {
+    const piece = pieces.find((candidate) =>
+      developed >= candidate.start - 1e-9 && developed <= candidate.end + 1e-9) ?? pieces[pieces.length - 1];
+    if (piece.kind === "straight") {
+      const distance = developed - piece.start;
+      return [
+        piece.point[0] + distance * Math.cos(piece.angle),
+        piece.point[1] + distance * Math.sin(piece.angle),
+        piece.angle,
+      ];
+    }
+    const fraction = (developed - piece.start) / (piece.end - piece.start);
+    const localDelta = piece.delta * Math.max(0, Math.min(1, fraction));
+    const bendPoint = advance(piece.point, piece.angle, localDelta, piece.radius);
+    return [bendPoint[0], bendPoint[1], piece.angle + localDelta];
+  };
+
+  const negativeSpecs = specs.filter((spec) => spec.moving_side < 0);
+  const positiveSpecs = specs.filter((spec) => spec.moving_side > 0);
+  const anchorDeveloped = negativeSpecs.length === 0
+    ? 0
+    : positiveSpecs.length === 0
+      ? developedLength
+      : (negativeSpecs[negativeSpecs.length - 1].zoneEnd + positiveSpecs[0].zoneStart) / 2;
+  const anchor = pointAt(anchorDeveloped);
+  const shiftX = -developedLength / 2 + anchorDeveloped - anchor[0];
+  const shiftZ = -anchor[1];
+  const stationPositions = [0];
+  const bendSegments = 24;
+  for (const spec of specs) {
+    stationPositions.push(spec.zoneStart);
+    for (let index = 1; index < bendSegments; index += 1) {
+      stationPositions.push(spec.zoneStart + (spec.zoneEnd - spec.zoneStart) * index / bendSegments);
+    }
+    stationPositions.push(spec.zoneEnd);
+  }
+  stationPositions.push(developedLength);
+
+  const transformPoint = (x: number, y: number, z: number): [number, number, number] => {
+    if (args.bend_axis === "y") return [-y, x, z];
+    return [x, y, z];
+  };
+  const section = (developed: number) => {
+    const [rawX, rawZ, localAngle] = pointAt(developed);
+    const innerX = rawX + shiftX;
+    const innerZ = thickness + rawZ + shiftZ;
+    const outerX = innerX + thickness * Math.sin(localAngle);
+    const outerZ = innerZ - thickness * Math.cos(localAngle);
+    return [
+      transformPoint(innerX, -stationWidth / 2, innerZ),
+      transformPoint(innerX, stationWidth / 2, innerZ),
+      transformPoint(outerX, -stationWidth / 2, outerZ),
+      transformPoint(outerX, stationWidth / 2, outerZ),
+    ];
+  };
+
+  const positions: number[] = [];
+  const indices: number[] = [];
+  for (const developed of stationPositions) {
+    for (const point of section(developed)) positions.push(...docToThree(...point));
+  }
+  for (let station = 0; station < stationPositions.length - 1; station += 1) {
+    const current = station * 4;
+    const next = current + 4;
+    indices.push(
+      current, next, current + 1, current + 1, next, next + 1,
+      current + 2, current + 3, next + 2, current + 3, next + 3, next + 2,
+      current, current + 2, next, current + 2, next + 2, next,
+      current + 1, next + 1, current + 3, current + 3, next + 1, next + 3,
+    );
+  }
+  const last = (stationPositions.length - 1) * 4;
+  indices.push(0, 1, 2, 1, 3, 2, last, last + 2, last + 1, last + 1, last + 2, last + 3);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
 }
 
 function makeTextSprite(text: string): THREE.Sprite {
@@ -101,9 +353,14 @@ export class Viewport {
   private hoverOverlay: THREE.Object3D | null = null;
   private selOverlay: THREE.Object3D | null = null;
   private edgeMarker: THREE.Group | null = null;
+  private edgeSelectionActive = false;
+  private selectableEdges: EdgeRef[] = [];
   private pushPullGroup: THREE.Group | null = null;
   private pushPullTarget: FaceEditTarget | null = null;
   private pushPullLabel: THREE.Sprite | null = null;
+  private faceFeatureGroup: THREE.Group | null = null;
+  private faceDomeGroup: THREE.Group | null = null;
+  private sheetBendGroup: THREE.Group | null = null;
   private pushPullDrag: {
     pointerId: number;
     startX: number;
@@ -268,6 +525,35 @@ export class Viewport {
       .some((hit) => hit.object.userData.pushPullHandle === true);
   }
 
+  private pickEdge(e: PointerEvent): EdgeRef | null {
+    if (!this.edgeSelectionActive) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const pointer = new THREE.Vector2(e.clientX - rect.left, e.clientY - rect.top);
+    let best: { edge: EdgeRef; distance: number; depth: number } | null = null;
+    for (const edge of this.selectableEdges) {
+      if (edge.kind !== "LINE" || !edge.p0 || !edge.p1) continue;
+      const startProjected = new THREE.Vector3(...docToThree(...edge.p0)).project(this.camera);
+      const endProjected = new THREE.Vector3(...docToThree(...edge.p1)).project(this.camera);
+      if (startProjected.z < -1 || startProjected.z > 1 || endProjected.z < -1 || endProjected.z > 1) continue;
+      const start = new THREE.Vector2(
+        (startProjected.x + 1) * rect.width / 2,
+        (1 - startProjected.y) * rect.height / 2,
+      );
+      const end = new THREE.Vector2(
+        (endProjected.x + 1) * rect.width / 2,
+        (1 - endProjected.y) * rect.height / 2,
+      );
+      const distance = pointSegmentDistance(pointer, start, end);
+      const depth = (startProjected.z + endProjected.z) / 2;
+      if (distance > 12) continue;
+      if (!best || distance < best.distance - 1 ||
+          (Math.abs(distance - best.distance) <= 1 && depth < best.depth)) {
+        best = { edge, distance, depth };
+      }
+    }
+    return best?.edge ?? null;
+  }
+
   private pushPullScreenScale(target: FaceEditTarget): {
     direction: THREE.Vector2;
     pixelsPerMm: number;
@@ -319,6 +605,13 @@ export class Viewport {
       this.events.onPushPullPreview(this.pushPullDrag.delta);
       return;
     }
+    if (this.edgeSelectionActive) {
+      const edge = this.pickEdge(e);
+      this.renderer.domElement.style.cursor = edge ? "crosshair" : "default";
+      this.setHoverFace(null);
+      this.events.onHoverFace(null);
+      return;
+    }
     const overHandle = this.pickPushPullHandle(e);
     this.renderer.domElement.style.cursor = overHandle ? "grab" : "default";
     const face = this.pickFace(e);
@@ -354,6 +647,11 @@ export class Viewport {
   }
 
   private onClick(e: PointerEvent) {
+    if (this.edgeSelectionActive) {
+      const edge = this.pickEdge(e);
+      if (edge) this.events.onSelectEdge(edge);
+      return;
+    }
     const face = this.pickFace(e);
     this.events.onSelectFace(face);
   }
@@ -374,9 +672,15 @@ export class Viewport {
     this.scene.add(this.hoverOverlay);
   }
 
-  // Подсветка выбранного ребра для op.fillet: линия вдоль ребра (--sel-edge)
+  setEdgeSelectionMode(active: boolean, edges: EdgeRef[]) {
+    this.edgeSelectionActive = active;
+    this.selectableEdges = active ? edges : [];
+    if (!active) this.renderer.domElement.style.cursor = "default";
+  }
+
+  // Подсветка выбранного ребра для edge feature: линия вдоль ребра (--sel-edge)
   // с маркерами концов; fallback — крест в середине.
-  setEdgeMarker(edge: EdgeRef | null) {
+  setEdgeMarker(edge: EdgeRef | null, labelText?: string) {
     if (this.edgeMarker) {
       this.scene.remove(this.edgeMarker);
       this.edgeMarker = null;
@@ -422,6 +726,11 @@ export class Viewport {
     dot.position.set(x, y, z);
     dot.renderOrder = 18;
     group.add(dot);
+    if (labelText) {
+      const label = makeTextSprite(labelText);
+      label.position.set(x, y + 7, z);
+      group.add(label);
+    }
     this.edgeMarker = group;
     this.scene.add(group);
   }
@@ -544,6 +853,175 @@ export class Viewport {
     this.render();
   }
 
+  setFaceFeaturePreview(preview: FaceFeaturePreview | null) {
+    if (this.faceFeatureGroup) {
+      this.scene.remove(this.faceFeatureGroup);
+      disposeObject(this.faceFeatureGroup);
+      this.faceFeatureGroup = null;
+    }
+    if (!preview) {
+      this.render();
+      return;
+    }
+
+    const { target, args } = preview;
+    const depth = args.depth === "through" ? target.axisSpan + 2 : args.depth;
+    const geometry = new THREE.ExtrudeGeometry(faceFeatureShape(args.profile), {
+      depth,
+      bevelEnabled: false,
+      curveSegments: 32,
+    });
+    const directionSign = args.mode === "add" ? 1 : -1;
+    const normalDoc = target.normal.map((value) => value * directionSign) as [number, number, number];
+    const uDoc = axisVector(target.uAxis);
+    const vDoc: [number, number, number] = [
+      normalDoc[1] * uDoc[2] - normalDoc[2] * uDoc[1],
+      normalDoc[2] * uDoc[0] - normalDoc[0] * uDoc[2],
+      normalDoc[0] * uDoc[1] - normalDoc[1] * uDoc[0],
+    ];
+    const uThree = new THREE.Vector3(...docToThree(...uDoc));
+    const vThree = new THREE.Vector3(...docToThree(...vDoc));
+    const normalThree = new THREE.Vector3(...docToThree(...normalDoc));
+    geometry.applyMatrix4(new THREE.Matrix4().makeBasis(uThree, vThree, normalThree));
+
+    const profileCenter = args.profile.center;
+    const vOffsetAxis = axisVector(target.vAxis);
+    const centerDoc: [number, number, number] = [
+      target.center[0] + uDoc[0] * profileCenter[0] + vOffsetAxis[0] * profileCenter[1],
+      target.center[1] + uDoc[1] * profileCenter[0] + vOffsetAxis[1] * profileCenter[1],
+      target.center[2] + uDoc[2] * profileCenter[0] + vOffsetAxis[2] * profileCenter[1],
+    ];
+    geometry.translate(...docToThree(...centerDoc));
+
+    const group = new THREE.Group();
+    const color = args.mode === "add" ? COLOR.selFace : 0xb91c1c;
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: args.mode === "add" ? 0.34 : 0.24,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }));
+    mesh.renderOrder = 12;
+    group.add(mesh);
+    const outline = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geometry, 12),
+      new THREE.LineBasicMaterial({ color, depthTest: false }),
+    );
+    outline.renderOrder = 13;
+    group.add(outline);
+    const label = makeTextSprite(args.mode === "add" ? `+${depth} мм` : `−${depth} мм`);
+    const labelPosition = new THREE.Vector3(...docToThree(...centerDoc));
+    label.position.copy(labelPosition.add(new THREE.Vector3(0, 10, 0)));
+    group.add(label);
+    this.faceFeatureGroup = group;
+    this.scene.add(group);
+    this.render();
+  }
+
+  setFaceDomePreview(preview: FaceDomePreview | null) {
+    if (this.faceDomeGroup) {
+      this.scene.remove(this.faceDomeGroup);
+      disposeObject(this.faceDomeGroup);
+      this.faceDomeGroup = null;
+    }
+    if (!preview) {
+      this.render();
+      return;
+    }
+
+    const { target, args } = preview;
+    const geometry = faceDomeGeometry(args.diameter, args.height);
+    const directionSign = args.mode === "add" ? 1 : -1;
+    const normalDoc = target.normal.map((value) => value * directionSign) as [number, number, number];
+    const uDoc = axisVector(target.uAxis);
+    const vDoc: [number, number, number] = [
+      normalDoc[1] * uDoc[2] - normalDoc[2] * uDoc[1],
+      normalDoc[2] * uDoc[0] - normalDoc[0] * uDoc[2],
+      normalDoc[0] * uDoc[1] - normalDoc[1] * uDoc[0],
+    ];
+    geometry.applyMatrix4(new THREE.Matrix4().makeBasis(
+      new THREE.Vector3(...docToThree(...uDoc)),
+      new THREE.Vector3(...docToThree(...vDoc)),
+      new THREE.Vector3(...docToThree(...normalDoc)),
+    ));
+
+    const vOffsetAxis = axisVector(target.vAxis);
+    const centerDoc: [number, number, number] = [
+      target.center[0] + uDoc[0] * args.center[0] + vOffsetAxis[0] * args.center[1],
+      target.center[1] + uDoc[1] * args.center[0] + vOffsetAxis[1] * args.center[1],
+      target.center[2] + uDoc[2] * args.center[0] + vOffsetAxis[2] * args.center[1],
+    ];
+    geometry.translate(...docToThree(...centerDoc));
+
+    const group = new THREE.Group();
+    const color = args.mode === "add" ? COLOR.selFace : 0xb91c1c;
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: args.mode === "add" ? 0.36 : 0.25,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }));
+    mesh.renderOrder = 12;
+    group.add(mesh);
+    const outline = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geometry, 12),
+      new THREE.LineBasicMaterial({ color, depthTest: false }),
+    );
+    outline.renderOrder = 13;
+    group.add(outline);
+    const label = makeTextSprite(`${args.mode === "add" ? "+" : "−"}${args.height} мм`);
+    label.position.copy(new THREE.Vector3(...docToThree(...centerDoc)).add(new THREE.Vector3(0, 10, 0)));
+    group.add(label);
+    this.faceDomeGroup = group;
+    this.scene.add(group);
+    this.render();
+  }
+
+  setSheetBendPreview(preview: SheetBendPreview | null) {
+    if (this.sheetBendGroup) {
+      this.scene.remove(this.sheetBendGroup);
+      disposeObject(this.sheetBendGroup);
+      this.sheetBendGroup = null;
+    }
+    if (!preview) {
+      this.render();
+      return;
+    }
+    const geometry = sheetBendGeometry(preview);
+    const group = new THREE.Group();
+    const color = 0x2563eb;
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.3,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }));
+    mesh.renderOrder = 12;
+    group.add(mesh);
+    const outline = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geometry, 10),
+      new THREE.LineBasicMaterial({ color, depthTest: false }),
+    );
+    outline.renderOrder = 13;
+    group.add(outline);
+    const label = makeTextSprite(
+      `${preview.bends.length} ${preview.bends.length === 1 ? "изгиб" : "изгиба"} · ${preview.args.angle}°  R${preview.args.inside_radius}`,
+    );
+    const bounds = new THREE.Box3().setFromBufferAttribute(
+      geometry.getAttribute("position") as THREE.BufferAttribute,
+    );
+    const labelPosition = bounds.getCenter(new THREE.Vector3());
+    labelPosition.y = bounds.max.y + 8;
+    label.position.copy(labelPosition);
+    group.add(label);
+    this.sheetBendGroup = group;
+    this.scene.add(group);
+    this.render();
+  }
+
   setMesh(data: MeshData | null) {
     if (this.mesh) {
       this.scene.remove(this.mesh);
@@ -552,7 +1030,11 @@ export class Viewport {
     }
     this.setHoverFace(null);
     this.setSelectedFace(null);
+    this.setEdgeMarker(null);
     this.setPushPullHandle(null);
+    this.setFaceFeaturePreview(null);
+    this.setFaceDomePreview(null);
+    this.setSheetBendPreview(null);
     this.faceRanges = data?.face_ranges ?? [];
     if (!data) {
       this.rebuildDimensions(null);
@@ -694,6 +1176,9 @@ export class Viewport {
   }
 
   dispose() {
+    this.setFaceFeaturePreview(null);
+    this.setFaceDomePreview(null);
+    this.setSheetBendPreview(null);
     this.resizeObs.disconnect();
     this.controls.dispose();
     this.renderer.dispose();

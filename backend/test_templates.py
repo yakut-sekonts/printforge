@@ -141,6 +141,29 @@ def test_ac04_bracket_and_fillet(worker):
     assert r3["stats"]["is_valid"]
 
 
+def test_bracket_chamfer_and_excessive_distance(worker):
+    base = build(worker, "bracket_l")
+    edges = [edge for edge in base["stats"]["edges"]
+             if edge["kind"] == "LINE" and edge["length"] > 29]
+    assert edges
+    edge_ref = edges[0]
+
+    chamfered = build(worker, "bracket_l", operations=[{
+        "op": "chamfer", "distance": 1.5, "edge_ref": edge_ref,
+    }])
+    assert chamfered["stats"]["is_valid"]
+    assert chamfered["stats"]["volume"] < base["stats"]["volume"]
+
+    failed = worker.call("build", {
+        "template": "bracket_l",
+        "params": {},
+        "operations": [{"op": "chamfer", "distance": 50, "edge_ref": edge_ref}],
+    })
+    assert failed["ok"] is False
+    assert failed["error"]["code"] == "chamfer_failed"
+    assert "50" in failed["error"]["message"]
+
+
 def test_edge_reselect_required(worker):
     resp = worker.call("build", {"template": "bracket_l", "params": {},
                                  "operations": [{"op": "fillet", "radius": 2.0,
@@ -322,6 +345,652 @@ def test_profile_extrude_and_slot(worker):
     r2 = worker.call("build", doc2)
     exp = 80 * 40 * 6 - (4 * 16 * 6 + math.pi * 4 * 6)
     assert abs(r2["result"]["stats"]["volume"] - exp) <= 1
+
+
+def test_face_feature_add_and_cut(worker):
+    base = 80 * 40 * 6
+    add_doc = {
+        "parts": [{"part_id": "a", "template": "plate_with_holes",
+                   "params": {"hole_diameter": 0}}],
+        "operations": [{
+            "op": "face_feature", "target_id": "a", "mode": "add", "depth": 4,
+            "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                         "anchor": [0, 0], "selected_area": 3200},
+            "profile": {"kind": "circle", "diameter": 10, "center": [5, -3]},
+        }],
+    }
+    added = worker.call("build", add_doc)
+    assert added["ok"], added.get("error")
+    expected_added = base + math.pi * 5**2 * 4
+    assert added["result"]["stats"]["volume"] == pytest.approx(expected_added, abs=1e-3)
+    assert added["result"]["stats"]["bbox"][5] == pytest.approx(10, abs=1e-3)
+    assert added["result"]["stats"]["solid_count"] == 1
+
+    through_doc = {
+        "parts": [{"part_id": "a", "template": "plate_with_holes",
+                   "params": {"hole_diameter": 0}}],
+        "operations": [{
+            "op": "face_feature", "target_id": "a", "mode": "cut", "depth": "through",
+            "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                         "anchor": [0, 0], "selected_area": 3200},
+            "profile": {"kind": "circle", "diameter": 8, "center": [0, 0]},
+        }],
+    }
+    through = worker.call("build", through_doc)
+    assert through["ok"], through.get("error")
+    expected_through = base - math.pi * 4**2 * 6
+    assert through["result"]["stats"]["volume"] == pytest.approx(expected_through, abs=1e-3)
+
+
+def test_face_feature_side_and_invalid_blind_depth(worker):
+    base = 80 * 40 * 6
+    side_doc = {
+        "parts": [{"part_id": "a", "template": "plate_with_holes",
+                   "params": {"hole_diameter": 0}}],
+        "operations": [{
+            "op": "face_feature", "target_id": "a", "mode": "add", "depth": 5,
+            "face_ref": {"kind": "outer_planar", "axis": "x", "side": 1,
+                         "anchor": [0, 0], "selected_area": 240},
+            "profile": {"kind": "rectangle", "width": 10, "height": 4,
+                        "center": [0, 0]},
+        }],
+    }
+    side = worker.call("build", side_doc)
+    assert side["ok"], side.get("error")
+    assert side["result"]["stats"]["volume"] == pytest.approx(base + 200, abs=1e-3)
+    assert side["result"]["stats"]["bbox"][3] == pytest.approx(45, abs=1e-3)
+
+    invalid = {
+        "parts": [{"part_id": "a", "template": "plate_with_holes",
+                   "params": {"hole_diameter": 0}}],
+        "operations": [{
+            "op": "face_feature", "target_id": "a", "mode": "cut", "depth": 6,
+            "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                         "anchor": [0, 0], "selected_area": 3200},
+            "profile": {"kind": "circle", "diameter": 8, "center": [0, 0]},
+        }],
+    }
+    response = worker.call("build", invalid)
+    assert response["ok"] is False
+    assert response["error"]["code"] == "bad_params"
+    assert "сквозной" in response["error"]["message"].lower()
+
+
+def test_face_dome_add_cut_and_constraints(worker):
+    base = 80 * 40 * 6
+    diameter = 20
+    height = 4
+    cap_volume = math.pi * height * (3 * (diameter / 2) ** 2 + height ** 2) / 6
+    common = {
+        "target_id": "a",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200},
+        "center": [0, 0],
+        "diameter": diameter,
+        "height": height,
+    }
+    part = [{"part_id": "a", "template": "plate_with_holes",
+             "params": {"hole_diameter": 0}}]
+
+    added = worker.call("build", {
+        "parts": part,
+        "operations": [{"op": "face_dome", "mode": "add", **common}],
+    })
+    assert added["ok"], added.get("error")
+    assert added["result"]["stats"]["volume"] == pytest.approx(base + cap_volume, abs=1e-3)
+    assert added["result"]["stats"]["bbox"][5] == pytest.approx(10, abs=1e-3)
+    assert added["result"]["stats"]["solid_count"] == 1
+
+    cut = worker.call("build", {
+        "parts": part,
+        "operations": [{"op": "face_dome", "mode": "cut", **common}],
+    })
+    assert cut["ok"], cut.get("error")
+    assert cut["result"]["stats"]["volume"] == pytest.approx(base - cap_volume, abs=1e-3)
+
+    excessive_height = worker.call("build", {
+        "parts": part,
+        "operations": [{"op": "face_dome", "mode": "add", **common, "height": 11}],
+    })
+    assert excessive_height["ok"] is False
+    assert excessive_height["error"]["code"] == "bad_params"
+
+    through_dent = worker.call("build", {
+        "parts": part,
+        "operations": [{"op": "face_dome", "mode": "cut", **common, "height": 6}],
+    })
+    assert through_dent["ok"] is False
+    assert through_dent["error"]["code"] == "bad_params"
+
+
+def test_sheet_bend_preserves_volume_and_holes(worker):
+    base_volume = 80 * 40 * 6 - 4 * math.pi * 2**2 * 6
+    common = {
+        "op": "sheet_bend",
+        "target_id": "a",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200 - 4 * math.pi * 2**2},
+        "position": 0,
+        "angle": 90,
+        "inside_radius": 5,
+        "moving_side": 1,
+        "direction": 1,
+    }
+    parts = [{"part_id": "a", "template": "plate_with_holes", "params": {}}]
+
+    bent_x = worker.call("build", {
+        "parts": parts,
+        "operations": [{**common, "bend_axis": "x"}],
+    })
+    assert bent_x["ok"], bent_x.get("error")
+    stats_x = bent_x["result"]["stats"]
+    assert stats_x["volume"] == pytest.approx(base_volume, abs=1e-3)
+    assert stats_x["solid_count"] == 1
+    assert stats_x["bbox"][5] == pytest.approx(44.7168, abs=1e-3)
+    assert stats_x["bbox"][3] == pytest.approx(4.7168, abs=1e-3)
+
+    bent_y_down = worker.call("build", {
+        "parts": parts,
+        "operations": [{
+            **common,
+            "bend_axis": "y",
+            "inside_radius": 3,
+            "moving_side": -1,
+            "direction": -1,
+        }],
+    })
+    assert bent_y_down["ok"], bent_y_down.get("error")
+    stats_y = bent_y_down["result"]["stats"]
+    assert stats_y["volume"] == pytest.approx(base_volume, abs=1e-3)
+    assert stats_y["bbox"][2] < -15
+    assert stats_y["bbox"][5] == pytest.approx(6, abs=1e-3)
+
+    crosses_hole = worker.call("build", {
+        "parts": parts,
+        "operations": [{**common, "bend_axis": "x", "position": -30}],
+    })
+    assert crosses_hole["ok"] is False
+    assert crosses_hole["error"]["code"] == "bend_failed"
+    assert "отверст" in crosses_hole["error"]["message"].lower()
+
+
+def test_parallel_sheet_bends_rebuild_one_parametric_blank(worker):
+    base_volume = 80 * 40 * 6 - 4 * math.pi * 2**2 * 6
+    common = {
+        "op": "sheet_bend",
+        "target_id": "a",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200 - 4 * math.pi * 2**2},
+        "bend_axis": "x",
+        "angle": 90,
+        "inside_radius": 3,
+        "direction": 1,
+    }
+    parts = [{"part_id": "a", "template": "plate_with_holes", "params": {}}]
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {**common, "position": 20, "moving_side": 1},
+            {**common, "position": -20, "moving_side": -1},
+        ],
+    })
+    assert response["ok"], response.get("error")
+    stats = response["result"]["stats"]
+    assert stats["volume"] == pytest.approx(base_volume, abs=1e-3)
+    assert stats["solid_count"] == 1
+    assert stats["bbox"] == pytest.approx(
+        [-24.287611, -20, 0, 24.287611, 20, 24.287611], abs=1e-3)
+
+    wrong_axis = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {**common, "position": 20, "moving_side": 1},
+            {**common, "bend_axis": "y", "position": -10, "moving_side": -1},
+        ],
+    })
+    assert wrong_axis["ok"] is False
+    assert wrong_axis["error"]["code"] == "bend_failed"
+    assert "параллель" in wrong_axis["error"]["message"].lower()
+
+    overlapping = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {**common, "position": 4, "moving_side": 1},
+            {**common, "position": -4, "moving_side": -1},
+        ],
+    })
+    assert overlapping["ok"] is False
+    assert overlapping["error"]["code"] == "bend_failed"
+    assert "пересека" in overlapping["error"]["message"].lower()
+
+    wrong_sides = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {**common, "position": -20, "moving_side": 1},
+            {**common, "position": 20, "moving_side": -1},
+        ],
+    })
+    assert wrong_sides["ok"] is False
+    assert wrong_sides["error"]["code"] == "bend_failed"
+    assert "левая" in wrong_sides["error"]["message"].lower()
+
+
+def test_parallel_sheet_bend_cascade_supports_four_lines(worker):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    common = {
+        "op": "sheet_bend",
+        "target_id": "a",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200},
+        "bend_axis": "x",
+        "angle": 45,
+        "inside_radius": 1,
+    }
+    positions = [-30, -10, 10, 30]
+    directions = [1, -1, 1, -1]
+    cascade = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {**common, "position": position, "moving_side": 1,
+             "direction": direction}
+            for position, direction in zip(positions, directions)
+        ],
+    })
+    assert cascade["ok"], cascade.get("error")
+    assert cascade["result"]["stats"]["volume"] == pytest.approx(80 * 40 * 6, abs=1e-3)
+    assert cascade["result"]["stats"]["solid_count"] == 1
+    assert cascade["result"]["stats"]["bbox"][5] > 10
+
+    central_anchor = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {**common, "position": position,
+             "moving_side": -1 if position < 0 else 1,
+             "direction": 1}
+            for position in positions
+        ],
+    })
+    assert central_anchor["ok"], central_anchor.get("error")
+    assert central_anchor["result"]["stats"]["volume"] == pytest.approx(
+        80 * 40 * 6, abs=1e-3)
+    assert central_anchor["result"]["stats"]["solid_count"] == 1
+
+    conflicting_anchor = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {**common, "position": -20, "moving_side": 1, "direction": 1},
+            {**common, "position": 20, "moving_side": -1, "direction": 1},
+        ],
+    })
+    assert conflicting_anchor["ok"] is False
+    assert conflicting_anchor["error"]["code"] == "bend_failed"
+    assert "левая группа" in conflicting_anchor["error"]["message"].lower()
+
+    too_many = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {**common, "position": position, "moving_side": 1, "direction": 1,
+             "angle": 20}
+            for position in [-32, -16, 0, 16, 32]
+        ],
+    })
+    assert too_many["ok"] is False
+    assert too_many["error"]["code"] == "bend_failed"
+    assert "четырёх" in too_many["error"]["message"].lower()
+
+
+def test_sheet_bend_preserves_flat_through_cuts(worker):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    circle_cut = {
+        "op": "face_feature",
+        "target_id": "a",
+        "mode": "cut",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200},
+        "profile": {"kind": "circle", "diameter": 8, "center": [30, 0]},
+        "depth": "through",
+    }
+    bend = {
+        "op": "sheet_bend",
+        "target_id": "a",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200 - math.pi * 4**2},
+        "bend_axis": "x",
+        "angle": 90,
+        "inside_radius": 3,
+        "direction": 1,
+    }
+    expected_volume = 80 * 40 * 6 - math.pi * 4**2 * 6
+
+    one_bend = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            circle_cut,
+            {**bend, "position": 20, "moving_side": 1},
+        ],
+    })
+    assert one_bend["ok"], one_bend.get("error")
+    assert one_bend["result"]["stats"]["volume"] == pytest.approx(
+        expected_volume, abs=1e-3)
+
+    two_bends = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            circle_cut,
+            {**bend, "position": 20, "moving_side": 1},
+            {**bend, "position": -20, "moving_side": -1},
+        ],
+    })
+    assert two_bends["ok"], two_bends.get("error")
+    assert two_bends["result"]["stats"]["volume"] == pytest.approx(
+        expected_volume, abs=1e-3)
+
+    rectangle_cut = {
+        **circle_cut,
+        "profile": {"kind": "rectangle", "width": 8, "height": 4,
+                    "center": [0, 12]},
+    }
+    bent_y = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            rectangle_cut,
+            {**bend, "bend_axis": "y", "position": 0, "moving_side": 1},
+        ],
+    })
+    assert bent_y["ok"], bent_y.get("error")
+    assert bent_y["result"]["stats"]["volume"] == pytest.approx(
+        80 * 40 * 6 - 8 * 4 * 6, abs=1e-3)
+
+
+@pytest.mark.parametrize(("profile", "cut_area", "solid_count"), [
+    ({"kind": "rectangle", "width": 8, "height": 6}, 48, 1),
+    ({"kind": "circle", "diameter": 8}, math.pi * 4**2, 1),
+    ({"kind": "ring", "outer_diameter": 10, "inner_diameter": 6},
+     math.pi * (5**2 - 3**2), 2),
+    ({"kind": "slot", "width": 4, "length": 12},
+     (12 - 4) * 4 + math.pi * 2**2, 1),
+])
+def test_sheet_bend_preserves_each_supported_flat_cut_profile(
+        worker, profile, cut_area, solid_count):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {
+                "op": "face_feature",
+                "target_id": "a",
+                "mode": "cut",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200},
+                "profile": {**profile, "center": [30, 0]},
+                "depth": "through",
+            },
+            {
+                "op": "sheet_bend",
+                "target_id": "a",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200 - cut_area},
+                "bend_axis": "x",
+                "position": 0,
+                "angle": 90,
+                "inside_radius": 3,
+                "moving_side": 1,
+                "direction": 1,
+            },
+        ],
+    })
+    assert response["ok"], response.get("error")
+    assert response["result"]["stats"]["volume"] == pytest.approx(
+        80 * 40 * 6 - cut_area * 6, abs=1e-3)
+    assert response["result"]["stats"]["solid_count"] == solid_count
+
+
+@pytest.mark.parametrize(("bend_axis", "profile", "bends"), [
+    ("x", {"kind": "rectangle", "width": 12, "height": 8, "center": [0, 0]}, [
+        {"position": 0, "moving_side": 1},
+    ]),
+    ("y", {"kind": "rectangle", "width": 8, "height": 12, "center": [0, 0]}, [
+        {"position": 0, "moving_side": 1},
+    ]),
+    ("x", {"kind": "rectangle", "width": 50, "height": 8, "center": [0, 0]}, [
+        {"position": 20, "moving_side": 1},
+        {"position": -20, "moving_side": -1},
+    ]),
+])
+def test_rectangular_through_cut_crosses_curved_bend_zones(
+        worker, bend_axis, profile, bends):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    cut_area = profile["width"] * profile["height"]
+    common_bend = {
+        "op": "sheet_bend",
+        "target_id": "a",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200 - cut_area},
+        "bend_axis": bend_axis,
+        "angle": 90,
+        "inside_radius": 3,
+        "direction": 1,
+    }
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {
+                "op": "face_feature",
+                "target_id": "a",
+                "mode": "cut",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200},
+                "profile": profile,
+                "depth": "through",
+            },
+            *[{**common_bend, **bend} for bend in bends],
+        ],
+    })
+    assert response["ok"], response.get("error")
+    assert response["result"]["stats"]["volume"] == pytest.approx(
+        80 * 40 * 6 - cut_area * 6, abs=1e-3)
+    assert response["result"]["stats"]["solid_count"] == 1
+
+
+@pytest.mark.parametrize(("bend_axis", "direction"), [
+    ("x", 1),
+    ("y", -1),
+])
+def test_circular_through_cut_crosses_curved_bend_zone(
+        worker, bend_axis, direction):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    cut_area = math.pi * 4**2
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {
+                "op": "face_feature",
+                "target_id": "a",
+                "mode": "cut",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200},
+                "profile": {"kind": "circle", "diameter": 8, "center": [0, 0]},
+                "depth": "through",
+            },
+            {
+                "op": "sheet_bend",
+                "target_id": "a",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200 - cut_area},
+                "bend_axis": bend_axis,
+                "position": 0,
+                "angle": 90,
+                "inside_radius": 3,
+                "moving_side": 1,
+                "direction": direction,
+            },
+        ],
+    })
+    assert response["ok"], response.get("error")
+    assert response["result"]["stats"]["volume"] == pytest.approx(
+        80 * 40 * 6 - cut_area * 6, abs=1e-3)
+    assert response["result"]["stats"]["solid_count"] == 1
+    assert response["result"]["stats"]["is_valid"] is True
+
+
+@pytest.mark.parametrize(("bend_axis", "direction"), [
+    ("x", 1),
+    ("y", -1),
+])
+def test_slot_through_cut_crosses_curved_bend_zone(
+        worker, bend_axis, direction):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    cut_area = (12 - 4) * 4 + math.pi * 2**2
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {
+                "op": "face_feature",
+                "target_id": "a",
+                "mode": "cut",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200},
+                "profile": {"kind": "slot", "width": 4, "length": 12,
+                            "center": [0, 0]},
+                "depth": "through",
+            },
+            {
+                "op": "sheet_bend",
+                "target_id": "a",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200 - cut_area},
+                "bend_axis": bend_axis,
+                "position": 0,
+                "angle": 90,
+                "inside_radius": 3,
+                "moving_side": 1,
+                "direction": direction,
+            },
+        ],
+    })
+    assert response["ok"], response.get("error")
+    assert response["result"]["stats"]["volume"] == pytest.approx(
+        80 * 40 * 6 - cut_area * 6, abs=1e-3)
+    assert response["result"]["stats"]["solid_count"] == 1
+    assert response["result"]["stats"]["is_valid"] is True
+
+
+@pytest.mark.parametrize(("bend_axis", "direction"), [
+    ("x", 1),
+    ("y", -1),
+])
+def test_ring_through_cut_crosses_curved_bend_zone(
+        worker, bend_axis, direction):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    ring_area = math.pi * (5**2 - 3**2)
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {
+                "op": "face_feature",
+                "target_id": "a",
+                "mode": "cut",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200},
+                "profile": {"kind": "ring", "outer_diameter": 10,
+                            "inner_diameter": 6, "center": [0, 0]},
+                "depth": "through",
+            },
+            {
+                "op": "sheet_bend",
+                "target_id": "a",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200 - ring_area},
+                "bend_axis": bend_axis,
+                "position": 0,
+                "angle": 90,
+                "inside_radius": 3,
+                "moving_side": 1,
+                "direction": direction,
+            },
+        ],
+    })
+    assert response["ok"], response.get("error")
+    assert response["result"]["stats"]["volume"] == pytest.approx(
+        80 * 40 * 6 - ring_area * 6, abs=1e-3)
+    assert response["result"]["stats"]["solid_count"] == 2
+    assert response["result"]["stats"]["is_valid"] is True
+
+
+@pytest.mark.parametrize(("profile", "cut_area"), [
+    ({"kind": "circle", "diameter": 32, "center": [0, 0]}, math.pi * 16**2),
+    ({"kind": "ring", "outer_diameter": 32, "inner_diameter": 8,
+      "center": [0, 0]}, math.pi * (16**2 - 4**2)),
+    ({"kind": "slot", "width": 4, "length": 32, "center": [0, 0]},
+     (32 - 4) * 4 + math.pi * 2**2),
+])
+def test_profiled_through_cut_rejects_multiple_curved_bend_zones(
+        worker, profile, cut_area):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    cut_area = math.pi * 16**2
+    common_bend = {
+        "op": "sheet_bend",
+        "target_id": "a",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200 - cut_area},
+        "bend_axis": "x",
+        "angle": 90,
+        "inside_radius": 3,
+        "direction": 1,
+    }
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {
+                "op": "face_feature",
+                "target_id": "a",
+                "mode": "cut",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200},
+                "profile": profile,
+                "depth": "through",
+            },
+            {**common_bend, "position": -12, "moving_side": -1},
+            {**common_bend, "position": 12, "moving_side": 1},
+        ],
+    })
+    assert response["ok"] is False
+    assert response["error"]["code"] == "bend_failed"
+    assert "только одну" in response["error"]["message"].lower()
+
+
+def test_sheet_bend_rejects_unsupported_prior_operation(worker):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {"op": "transform", "part_id": "a", "translate": [1, 0, 0]},
+            {
+                "op": "sheet_bend",
+                "target_id": "a",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200},
+                "bend_axis": "x",
+                "position": 0,
+                "angle": 90,
+                "inside_radius": 5,
+                "moving_side": 1,
+                "direction": 1,
+            },
+        ],
+    })
+    assert response["ok"] is False
+    assert response["error"]["code"] == "bend_failed"
+    assert "сквозные вырезы" in response["error"]["message"].lower()
 
 
 def test_circular_array_and_align(worker):

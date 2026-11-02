@@ -163,7 +163,9 @@ impl Document {
         let first_id = self.snap.parts.first()
             .and_then(|p| p.get("part_id")).and_then(Value::as_str).map(String::from);
         let ops: Vec<Value> = self.snap.operations.iter().map(|op| {
-            if op.get("op") == Some(&json!("fillet")) && op.get("part_id").is_none() {
+            if matches!(op.get("op").and_then(Value::as_str), Some("fillet" | "chamfer"))
+                && op.get("part_id").is_none()
+            {
                 let mut o = op.clone();
                 o["part_id"] = json!(first_id);
                 o
@@ -337,9 +339,6 @@ async fn apply_op(app: &tauri::AppHandle, op: Value) -> Result<Value, String> {
     with_store(|s| {
         let doc = active_doc(s);
         let mut next = doc.snap.clone();
-        if op.get("op") == Some(&json!("fillet")) {
-            next.operations.retain(|o| o.get("op") != Some(&json!("fillet")));
-        }
         next.operations.push(op);
         doc.commit(next);
     })
@@ -475,6 +474,28 @@ async fn doc_fillet(
 }
 
 #[tauri::command]
+async fn doc_chamfer(
+    app: tauri::AppHandle,
+    edge_ref: Value,
+    distance: f64,
+    part_id: Option<String>,
+) -> Result<Value, String> {
+    if !distance.is_finite() || distance <= 0.0 {
+        return Err(geo_err(
+            "bad_value",
+            "Размер фаски должен быть больше нуля.",
+        ));
+    }
+    apply_op(
+        &app,
+        json!({
+            "op": "chamfer", "distance": distance, "edge_ref": edge_ref, "part_id": part_id,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
 async fn doc_profile_extrude(
     app: tauri::AppHandle,
     mode: String,
@@ -496,6 +517,95 @@ async fn doc_profile_extrude(
         op["target_id"] = json!(t);
     }
     apply_op(&app, op).await
+}
+
+#[tauri::command]
+async fn doc_face_feature(
+    app: tauri::AppHandle,
+    target_id: String,
+    mode: String,
+    face_ref: Value,
+    profile: Value,
+    depth: Value,
+) -> Result<Value, String> {
+    if mode != "add" && mode != "cut" {
+        return Err(geo_err(
+            "bad_params",
+            "Режим элемента должен быть add или cut.",
+        ));
+    }
+    apply_op(
+        &app,
+        json!({
+            "op": "face_feature",
+            "target_id": target_id,
+            "mode": mode,
+            "face_ref": face_ref,
+            "profile": profile,
+            "depth": depth,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn doc_face_dome(
+    app: tauri::AppHandle,
+    target_id: String,
+    mode: String,
+    face_ref: Value,
+    center: Value,
+    diameter: f64,
+    height: f64,
+) -> Result<Value, String> {
+    if mode != "add" && mode != "cut" {
+        return Err(geo_err(
+            "bad_params",
+            "Режим сферического сегмента должен быть add или cut.",
+        ));
+    }
+    apply_op(
+        &app,
+        json!({
+            "op": "face_dome",
+            "target_id": target_id,
+            "mode": mode,
+            "face_ref": face_ref,
+            "center": center,
+            "diameter": diameter,
+            "height": height,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn doc_sheet_bend(
+    app: tauri::AppHandle,
+    target_id: String,
+    face_ref: Value,
+    bend_axis: String,
+    position: f64,
+    angle: f64,
+    inside_radius: f64,
+    moving_side: i32,
+    direction: i32,
+) -> Result<Value, String> {
+    apply_op(
+        &app,
+        json!({
+            "op": "sheet_bend",
+            "target_id": target_id,
+            "face_ref": face_ref,
+            "bend_axis": bend_axis,
+            "position": position,
+            "angle": angle,
+            "inside_radius": inside_radius,
+            "moving_side": moving_side,
+            "direction": direction,
+        }),
+    )
+    .await
 }
 
 fn mode_is_cut(op: &Value) -> bool {
@@ -1212,6 +1322,9 @@ fn main() {
             doc_split,
             doc_transform,
             doc_profile_extrude,
+            doc_face_feature,
+            doc_face_dome,
+            doc_sheet_bend,
             doc_array_circular,
             doc_align,
             measure,
@@ -1223,6 +1336,7 @@ fn main() {
             ai_chat,
             doc_set_parameter,
             doc_fillet,
+            doc_chamfer,
             doc_clear_error,
             doc_undo,
             doc_redo,

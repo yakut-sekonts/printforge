@@ -9,7 +9,7 @@
 - bracket_l: L-кронштейн из двух блоков с общим началом координат (AC-04).
 - case_with_lid: корпус со стенкой/дном + крышка с бортиком и зазором (AC-03).
 
-Операции поверх шаблона: fillet (выбор ребра мягкой геометрической
+Операции поверх шаблона: fillet/chamfer (выбор ребра мягкой геометрической
 ссылкой; честная ошибка OCC, без молчаливого подбора другого значения).
 
 Прочее: export_stl/step/3mf, import_step/stl, print_check.
@@ -206,21 +206,48 @@ def match_edge(part, ref):
     return candidates[0][1]
 
 
+def _apply_edge_feature(part, operation):
+    kind = operation.get("op")
+    if kind == "fillet":
+        parameter = "radius"
+        parameter_label = "Радиус скругления"
+        error_code = "fillet_failed"
+        action = lambda shape, value, edge: shape.fillet(radius=value, edge_list=[edge])
+    elif kind == "chamfer":
+        parameter = "distance"
+        parameter_label = "Размер фаски"
+        error_code = "chamfer_failed"
+        action = lambda shape, value, edge: shape.chamfer(
+            length=value, length2=None, edge_list=[edge])
+    else:
+        raise GeometryError("unknown_op", f"Неизвестная операция ребра: {kind}")
+
+    try:
+        value = float(operation[parameter])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", f"{parameter_label} должен быть числом больше нуля.") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise GeometryError("bad_params", f"{parameter_label} должен быть числом больше нуля.")
+
+    edge = match_edge(part, operation["edge_ref"])
+    try:
+        result = action(part, value, edge)
+    except Exception as exc:  # noqa: BLE001
+        feature = "Радиус" if kind == "fillet" else "Размер фаски"
+        raise GeometryError(
+            error_code,
+            f"{feature} {value:g} мм слишком велик для выбранного ребра. "
+            "Уменьшите значение или выберите другое ребро.",
+            detail=str(exc).split("\n")[0]) from exc
+    if not result.is_valid or not result.solids():
+        raise GeometryError(error_code, "Операция создаёт некорректную геометрию.")
+    return result
+
+
 def apply_operations(part, operations):
     for op in operations or []:
-        if op.get("op") == "fillet":
-            r = float(op["radius"])
-            if r <= 0:
-                raise GeometryError("bad_params", "Радиус скругления должен быть больше нуля.")
-            edge = match_edge(part, op["edge_ref"])
-            try:
-                part = part.fillet(radius=r, edge_list=[edge])
-            except Exception as e:  # noqa: BLE001
-                raise GeometryError(
-                    "fillet_failed",
-                    f"Радиус {r:g} мм слишком велик для выбранного ребра. "
-                    "Уменьшите радиус или выберите другое ребро.",
-                    detail=str(e).split("\n")[0]) from e
+        if op.get("op") in ("fillet", "chamfer"):
+            part = _apply_edge_feature(part, op)
         else:
             raise GeometryError("unknown_op", f"Неизвестная операция: {op.get('op')}")
     return part
@@ -328,6 +355,854 @@ def profile_prism(profile, plane, depth):
     return base * prism
 
 
+def _positive_profile_value(profile, name, label):
+    try:
+        value = float(profile[name])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", f"{label} должен быть числом больше нуля.") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise GeometryError("bad_params", f"{label} должен быть числом больше нуля.")
+    return value
+
+
+def _face_profile_prism(profile, depth):
+    from build123d import Align, Box, Cylinder, Pos
+    alignment = (Align.CENTER, Align.CENTER, Align.MIN)
+    kind = profile.get("kind")
+    if kind == "rectangle":
+        width = _positive_profile_value(profile, "width", "Ширина профиля")
+        height = _positive_profile_value(profile, "height", "Высота профиля")
+        return Box(width, height, depth, align=alignment)
+    if kind == "circle":
+        diameter = _positive_profile_value(profile, "diameter", "Диаметр отверстия")
+        return Cylinder(radius=diameter / 2, height=depth, align=alignment)
+    if kind == "ring":
+        outer = _positive_profile_value(profile, "outer_diameter", "Наружный диаметр")
+        inner = _positive_profile_value(profile, "inner_diameter", "Внутренний диаметр")
+        if inner >= outer:
+            raise GeometryError("bad_params", "Внутренний диаметр кольца должен быть меньше наружного.")
+        outer_shape = Cylinder(radius=outer / 2, height=depth, align=alignment)
+        inner_shape = Pos(0, 0, -0.01) * Cylinder(
+            radius=inner / 2, height=depth + 0.02, align=alignment)
+        return outer_shape - inner_shape
+    if kind == "slot":
+        width = _positive_profile_value(profile, "width", "Ширина паза")
+        length = _positive_profile_value(profile, "length", "Длина паза")
+        if length <= width:
+            raise GeometryError("bad_params", "Длина паза должна быть больше его ширины.")
+        straight = length - width
+        radius = width / 2
+        return (
+            Box(straight, width, depth, align=alignment)
+            + Pos(-straight / 2, 0, 0) * Cylinder(radius=radius, height=depth, align=alignment)
+            + Pos(straight / 2, 0, 0) * Cylinder(radius=radius, height=depth, align=alignment)
+        )
+    raise GeometryError("bad_params", f"Неизвестный профиль: {kind}")
+
+
+def _apply_face_feature(target, operation):
+    from build123d import Plane
+    face_ref = operation.get("face_ref") or {}
+    if face_ref.get("kind") != "outer_planar":
+        raise GeometryError("reselect_required", "Грань больше не поддерживается. Выберите внешнюю плоскую грань заново.")
+    axis = face_ref.get("axis")
+    if axis not in ("x", "y", "z"):
+        raise GeometryError("bad_params", "Неизвестная ось выбранной грани.")
+    side = face_ref.get("side")
+    if side not in (-1, 1):
+        raise GeometryError("bad_params", "Неизвестная сторона выбранной грани.")
+    mode = operation.get("mode")
+    if mode not in ("add", "cut"):
+        raise GeometryError("bad_params", "Режим элемента должен быть add или cut.")
+
+    bounding_box = target.bounding_box()
+    minimum = {"x": bounding_box.min.X, "y": bounding_box.min.Y, "z": bounding_box.min.Z}
+    maximum = {"x": bounding_box.max.X, "y": bounding_box.max.Y, "z": bounding_box.max.Z}
+    span = maximum[axis] - minimum[axis]
+    anchor = face_ref.get("anchor") or [0, 0]
+    center = (operation.get("profile") or {}).get("center") or [0, 0]
+    if len(anchor) != 2 or len(center) != 2:
+        raise GeometryError("bad_params", "Координаты элемента на грани должны содержать U и V.")
+    try:
+        offsets = [float(anchor[index]) + float(center[index]) for index in range(2)]
+    except (TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", "Координаты элемента на грани должны быть числами.") from exc
+    if not all(math.isfinite(value) for value in offsets):
+        raise GeometryError("bad_params", "Координаты элемента на грани должны быть конечными числами.")
+
+    axis_pairs = {"x": ("y", "z"), "y": ("x", "z"), "z": ("x", "y")}
+    u_axis, v_axis = axis_pairs[axis]
+    origin = {
+        name: (minimum[name] + maximum[name]) / 2
+        for name in ("x", "y", "z")
+    }
+    origin[u_axis] += offsets[0]
+    origin[v_axis] += offsets[1]
+    boundary = maximum[axis] if side > 0 else minimum[axis]
+    epsilon = 0.01
+
+    depth_value = operation.get("depth")
+    if depth_value == "through":
+        if mode != "cut":
+            raise GeometryError("bad_params", "Сквозная глубина доступна только для выреза.")
+        depth = span + 2 * epsilon
+    else:
+        try:
+            depth = float(depth_value)
+        except (TypeError, ValueError) as exc:
+            raise GeometryError("bad_params", "Глубина должна быть числом больше нуля.") from exc
+        if not math.isfinite(depth) or depth <= 0:
+            raise GeometryError("bad_params", "Глубина должна быть числом больше нуля.")
+        if mode == "cut" and depth >= span - epsilon:
+            raise GeometryError(
+                "bad_params",
+                "Глубина глухого отверстия достигает противоположной стороны. Выберите сквозной вырез.")
+        depth += epsilon
+
+    direction = side if mode == "add" else -side
+    origin[axis] = boundary - side * epsilon if mode == "add" else boundary + side * epsilon
+    unit = {
+        "x": (1, 0, 0),
+        "y": (0, 1, 0),
+        "z": (0, 0, 1),
+    }
+    normal = tuple(component * direction for component in unit[axis])
+    tool = Plane(
+        origin=(origin["x"], origin["y"], origin["z"]),
+        x_dir=unit[u_axis],
+        z_dir=normal,
+    ).location * _face_profile_prism(operation.get("profile") or {}, depth)
+
+    initial_volume = target.volume
+    result = target + tool if mode == "add" else target - tool
+    volume_delta = result.volume - initial_volume
+    if mode == "add" and (volume_delta <= 1e-6 or len(result.solids()) != 1):
+        raise GeometryError(
+            "feature_failed",
+            "Профиль не соединяется с выбранной гранью одним телом. Измените размеры или положение.")
+    if mode == "cut" and volume_delta >= -1e-6:
+        raise GeometryError(
+            "feature_failed",
+            "Профиль не пересекает выбранную грань. Измените положение или размеры.")
+    if not result.is_valid or not result.solids():
+        raise GeometryError("feature_failed", "Операция создаёт некорректную геометрию.")
+    return result
+
+
+def _apply_face_dome(target, operation):
+    from build123d import Align, Plane, Sphere
+    face_ref = operation.get("face_ref") or {}
+    if face_ref.get("kind") != "outer_planar":
+        raise GeometryError(
+            "reselect_required",
+            "Грань больше не поддерживается. Выберите внешнюю плоскую грань заново.")
+    axis = face_ref.get("axis")
+    if axis not in ("x", "y", "z"):
+        raise GeometryError("bad_params", "Неизвестная ось выбранной грани.")
+    side = face_ref.get("side")
+    if side not in (-1, 1):
+        raise GeometryError("bad_params", "Неизвестная сторона выбранной грани.")
+    mode = operation.get("mode")
+    if mode not in ("add", "cut"):
+        raise GeometryError("bad_params", "Режим сферического сегмента должен быть add или cut.")
+
+    diameter = _positive_profile_value(
+        operation, "diameter", "Диаметр сферического сегмента")
+    height = _positive_profile_value(
+        operation, "height", "Высота сферического сегмента")
+    base_radius = diameter / 2
+    if height > base_radius + 1e-9:
+        raise GeometryError(
+            "bad_params",
+            "Высота выпуклости или вмятины не должна превышать половину диаметра.")
+
+    bounding_box = target.bounding_box()
+    minimum = {"x": bounding_box.min.X, "y": bounding_box.min.Y, "z": bounding_box.min.Z}
+    maximum = {"x": bounding_box.max.X, "y": bounding_box.max.Y, "z": bounding_box.max.Z}
+    span = maximum[axis] - minimum[axis]
+    if mode == "cut" and height >= span - 0.01:
+        raise GeometryError(
+            "bad_params",
+            "Глубина вмятины достигает противоположной стороны. Уменьшите высоту.")
+
+    anchor = face_ref.get("anchor") or [0, 0]
+    center = operation.get("center") or [0, 0]
+    if len(anchor) != 2 or len(center) != 2:
+        raise GeometryError("bad_params", "Координаты сегмента должны содержать U и V.")
+    try:
+        offsets = [float(anchor[index]) + float(center[index]) for index in range(2)]
+    except (TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", "Координаты сегмента должны быть числами.") from exc
+    if not all(math.isfinite(value) for value in offsets):
+        raise GeometryError("bad_params", "Координаты сегмента должны быть конечными числами.")
+
+    axis_pairs = {"x": ("y", "z"), "y": ("x", "z"), "z": ("x", "y")}
+    u_axis, v_axis = axis_pairs[axis]
+    origin = {name: (minimum[name] + maximum[name]) / 2 for name in ("x", "y", "z")}
+    origin[u_axis] += offsets[0]
+    origin[v_axis] += offsets[1]
+    origin[axis] = maximum[axis] if side > 0 else minimum[axis]
+    for local_axis in (u_axis, v_axis):
+        coordinate = origin[local_axis]
+        if (coordinate - base_radius < minimum[local_axis] - 1e-6 or
+                coordinate + base_radius > maximum[local_axis] + 1e-6):
+            raise GeometryError(
+                "dome_failed",
+                "Основание сферического сегмента выходит за границы детали. Уменьшите диаметр или измените положение.")
+
+    sphere_radius = (base_radius ** 2 + height ** 2) / (2 * height)
+    if not math.isfinite(sphere_radius):
+        raise GeometryError("bad_params", "Размеры сферического сегмента слишком велики.")
+    angle_ratio = max(-1.0, min(1.0, (sphere_radius - height) / sphere_radius))
+    base_angle = math.degrees(math.asin(angle_ratio))
+    cap = Sphere(
+        sphere_radius,
+        arc_size1=base_angle,
+        arc_size2=90,
+        align=(Align.CENTER, Align.CENTER, Align.MIN),
+    )
+    direction = side if mode == "add" else -side
+    unit = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}
+    normal = tuple(component * direction for component in unit[axis])
+    tool = Plane(
+        origin=(origin["x"], origin["y"], origin["z"]),
+        x_dir=unit[u_axis],
+        z_dir=normal,
+    ).location * cap
+
+    initial_volume = target.volume
+    result = target + tool if mode == "add" else target - tool
+    actual_delta = abs(result.volume - initial_volume)
+    expected_delta = cap.volume
+    if (len(result.solids()) != len(target.solids()) or
+            abs(actual_delta - expected_delta) > max(1e-4, expected_delta * 1e-6)):
+        raise GeometryError(
+            "dome_failed",
+            "Основание сферического сегмента не полностью лежит на выбранной грани. Измените размер или положение.")
+    if not result.is_valid or not result.solids():
+        raise GeometryError("dome_failed", "Операция создаёт некорректную геометрию.")
+    return result
+
+
+def _flat_sheet_feature_data(operation, bend_axis):
+    face_ref = operation.get("face_ref") or {}
+    if (operation.get("op") != "face_feature" or
+            operation.get("mode") != "cut" or operation.get("depth") != "through" or
+            face_ref.get("kind") != "outer_planar" or
+            face_ref.get("axis") != "z" or face_ref.get("side") != 1):
+        raise GeometryError(
+            "bend_failed",
+            "Перед изгибом поддерживаются только сквозные вырезы на верхней грани пластины.")
+
+    anchor = face_ref.get("anchor") or [0, 0]
+    profile = operation.get("profile") or {}
+    center = profile.get("center") or [0, 0]
+    if len(anchor) != 2 or len(center) != 2:
+        raise GeometryError(
+            "bend_failed", "Координаты выреза должны содержать U и V.")
+    try:
+        center_x = float(anchor[0]) + float(center[0])
+        center_y = float(anchor[1]) + float(center[1])
+    except (TypeError, ValueError) as exc:
+        raise GeometryError(
+            "bend_failed", "Координаты выреза должны быть числами.") from exc
+    if not all(math.isfinite(value) for value in (center_x, center_y)):
+        raise GeometryError(
+            "bend_failed", "Координаты выреза должны быть конечными числами.")
+
+    kind = profile.get("kind")
+    if kind == "rectangle":
+        half_x = _positive_profile_value(profile, "width", "Ширина профиля") / 2
+        half_y = _positive_profile_value(profile, "height", "Высота профиля") / 2
+    elif kind == "circle":
+        radius = _positive_profile_value(profile, "diameter", "Диаметр отверстия") / 2
+        half_x = half_y = radius
+    elif kind == "ring":
+        outer = _positive_profile_value(profile, "outer_diameter", "Наружный диаметр")
+        inner = _positive_profile_value(profile, "inner_diameter", "Внутренний диаметр")
+        if inner >= outer:
+            raise GeometryError(
+                "bad_params", "Внутренний диаметр кольца должен быть меньше наружного.")
+        half_x = half_y = outer / 2
+    elif kind == "slot":
+        width = _positive_profile_value(profile, "width", "Ширина паза")
+        length = _positive_profile_value(profile, "length", "Длина паза")
+        if length <= width:
+            raise GeometryError("bad_params", "Длина паза должна быть больше его ширины.")
+        half_x = length / 2
+        half_y = width / 2
+    else:
+        raise GeometryError(
+            "bend_failed", "Профиль выреза не поддерживается переносом через изгиб.")
+
+    return {
+        "profile": profile,
+        "kind": kind,
+        "center_x": center_x,
+        "center_y": center_y,
+        "developed_center": center_x if bend_axis == "x" else center_y,
+        "developed_extent": half_x if bend_axis == "x" else half_y,
+        "station_width": 2 * (half_y if bend_axis == "x" else half_x),
+        "canonical_width": center_y if bend_axis == "x" else -center_x,
+    }
+
+
+def _apply_sheet_bends(part_info, operations, flat_features=None):
+    from build123d import (Align, Box, Cylinder, Edge, Plane, Pos, Rectangle,
+                          Rotation, Side, Solid, Wire)
+    from build123d import make_brake_formed
+
+    if part_info.get("template") != "plate_with_holes":
+        raise GeometryError(
+            "bend_failed",
+            "Точный изгиб доступен только для пластины.")
+    if not operations or len(operations) > 4:
+        raise GeometryError(
+            "bend_failed",
+            "Поддерживаются от одной до четырёх последовательных линий изгиба.")
+
+    params = part_info["params"]
+    thickness = params["height"]
+    bend_axis = operations[0].get("bend_axis")
+    if bend_axis not in ("x", "y"):
+        raise GeometryError("bad_params", "Ось изгиба должна быть X или Y.")
+    length = params["length"] if bend_axis == "x" else params["width"]
+    station_width = params["width"] if bend_axis == "x" else params["length"]
+    bends = []
+    for operation in operations:
+        face_ref = operation.get("face_ref") or {}
+        if (face_ref.get("kind") != "outer_planar" or
+                face_ref.get("axis") != "z" or face_ref.get("side") != 1):
+            raise GeometryError(
+                "reselect_required",
+                "Для следующего изгиба выберите верхнюю плоскую грань неподвижного участка.")
+        if operation.get("bend_axis") != bend_axis:
+            raise GeometryError(
+                "bend_failed",
+                "Последовательные изгибы должны быть параллельны и использовать одну ось.")
+        try:
+            position = float(operation.get("position", 0))
+            angle = float(operation["angle"])
+            inside_radius = float(operation["inside_radius"])
+            moving_side = int(operation.get("moving_side", 1))
+            direction = int(operation.get("direction", 1))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GeometryError("bad_params", "Параметры изгиба повреждены.") from exc
+        if not all(math.isfinite(value) for value in (position, angle, inside_radius)):
+            raise GeometryError("bad_params", "Параметры изгиба должны быть конечными числами.")
+        if angle < 5 or angle > 170:
+            raise GeometryError("bad_params", "Угол изгиба должен быть от 5° до 170°.")
+        if inside_radius <= 0:
+            raise GeometryError("bad_params", "Внутренний радиус изгиба должен быть больше нуля.")
+        if moving_side not in (-1, 1) or direction not in (-1, 1):
+            raise GeometryError("bad_params", "Направление и подвижная сторона изгиба повреждены.")
+        developed_position = position + length / 2
+        angle_radians = math.radians(angle)
+        bend_allowance = (inside_radius + thickness / 2) * angle_radians
+        zone_start = developed_position - bend_allowance / 2
+        zone_end = developed_position + bend_allowance / 2
+        if zone_start <= 0.01 or zone_end >= length - 0.01:
+            raise GeometryError(
+                "bend_failed",
+                "Линия изгиба слишком близко к краю для заданных угла, радиуса и толщины.")
+        bends.append({
+            "position": position,
+            "angle": angle_radians,
+            "delta": direction * angle_radians,
+            "inside_radius": inside_radius,
+            "path_radius": inside_radius if direction > 0 else inside_radius + thickness,
+            "moving_side": moving_side,
+            "direction": direction,
+            "zone_start": zone_start,
+            "zone_end": zone_end,
+        })
+
+    bends.sort(key=lambda bend: bend["position"])
+    for left, right in zip(bends, bends[1:]):
+        if left["zone_end"] >= right["zone_start"] - 0.01:
+            raise GeometryError(
+                "bend_failed",
+                "Зоны последовательных изгибов пересекаются. Разнесите линии или уменьшите радиус.")
+    positive_side_started = False
+    for bend in bends:
+        if bend["moving_side"] > 0:
+            positive_side_started = True
+        elif positive_side_started:
+            raise GeometryError(
+                "bend_failed",
+                "Левая группа линий должна сгибать −ось, правая — +ось.")
+
+    def advance(point, tangent_angle, delta, radius):
+        absolute_delta = abs(delta)
+        local_x = radius * math.sin(absolute_delta)
+        local_z = math.copysign(radius * (1 - math.cos(absolute_delta)), delta)
+        cosine = math.cos(tangent_angle)
+        sine = math.sin(tangent_angle)
+        return (
+            point[0] + local_x * cosine - local_z * sine,
+            point[1] + local_x * sine + local_z * cosine,
+        )
+
+    tangent_angle = -sum(
+        bend["delta"] for bend in bends if bend["moving_side"] < 0)
+    point = (0.0, 0.0)
+    developed_cursor = 0.0
+    edges = []
+    path_sections = []
+    straight_segments = []
+    for bend in bends:
+        straight_end = bend["zone_start"]
+        straight_length = straight_end - developed_cursor
+        tangent = (math.cos(tangent_angle), math.sin(tangent_angle))
+        line_end = (
+            point[0] + straight_length * tangent[0],
+            point[1] + straight_length * tangent[1],
+        )
+        edges.append(Edge.make_line(point, line_end))
+        straight_segments.append({
+            "start": developed_cursor,
+            "end": straight_end,
+            "point": point,
+            "angle": tangent_angle,
+        })
+        path_sections.append({
+            "kind": "straight",
+            "start": developed_cursor,
+            "end": straight_end,
+            "point": point,
+            "angle": tangent_angle,
+        })
+        point = line_end
+        arc_start = point
+        arc_start_angle = tangent_angle
+        arc_end = advance(point, tangent_angle, bend["delta"], bend["path_radius"])
+        edges.append(Edge.make_tangent_arc(point, tangent, arc_end))
+        path_sections.append({
+            "kind": "arc",
+            "start": bend["zone_start"],
+            "end": bend["zone_end"],
+            "point": arc_start,
+            "angle": arc_start_angle,
+            "delta": bend["delta"],
+            "radius": bend["path_radius"],
+        })
+        point = arc_end
+        tangent_angle += bend["delta"]
+        developed_cursor = bend["zone_end"]
+
+    final_length = length - developed_cursor
+    tangent = (math.cos(tangent_angle), math.sin(tangent_angle))
+    final_point = (
+        point[0] + final_length * tangent[0],
+        point[1] + final_length * tangent[1],
+    )
+    edges.append(Edge.make_line(point, final_point))
+    straight_segments.append({
+        "start": developed_cursor,
+        "end": length,
+        "point": point,
+        "angle": tangent_angle,
+    })
+    path_sections.append({
+        "kind": "straight",
+        "start": developed_cursor,
+        "end": length,
+        "point": point,
+        "angle": tangent_angle,
+    })
+
+    negative_bends = [bend for bend in bends if bend["moving_side"] < 0]
+    positive_bends = [bend for bend in bends if bend["moving_side"] > 0]
+    if not negative_bends:
+        anchor_developed = 0.0
+    elif not positive_bends:
+        anchor_developed = length
+    else:
+        anchor_developed = (
+            negative_bends[-1]["zone_end"] + positive_bends[0]["zone_start"]
+        ) / 2
+
+    def point_on_straight(developed):
+        for segment in straight_segments:
+            if segment["start"] - 1e-9 <= developed <= segment["end"] + 1e-9:
+                distance = developed - segment["start"]
+                angle = segment["angle"]
+                return (
+                    segment["point"][0] + distance * math.cos(angle),
+                    segment["point"][1] + distance * math.sin(angle),
+                    angle,
+                )
+        raise GeometryError("bend_failed", "Не удалось сопоставить точку развёртки после изгиба.")
+
+    def point_on_path(developed, section):
+        if section["kind"] == "straight":
+            distance = developed - section["start"]
+            angle = section["angle"]
+            return (
+                section["point"][0] + distance * math.cos(angle),
+                section["point"][1] + distance * math.sin(angle),
+                angle,
+            )
+        fraction = ((developed - section["start"]) /
+                    (section["end"] - section["start"]))
+        partial_delta = section["delta"] * fraction
+        arc_point = advance(
+            section["point"], section["angle"], partial_delta, section["radius"])
+        return arc_point[0], arc_point[1], section["angle"] + partial_delta
+
+    def state_on_path(developed):
+        for section in path_sections:
+            if section["start"] - 1e-9 <= developed <= section["end"] + 1e-9:
+                return point_on_path(developed, section)
+        raise GeometryError(
+            "bend_failed", "Не удалось сопоставить границу выреза с bend-path.")
+
+    anchor_x, anchor_z, anchor_angle = point_on_straight(anchor_developed)
+    if abs(anchor_angle) > 1e-7:
+        raise GeometryError(
+            "bend_failed",
+            "Неподвижные участки последовательных изгибов конфликтуют.")
+    shift_x = -length / 2 + anchor_developed - anchor_x
+    shift_z = -anchor_z
+    try:
+        bend_line = Pos(shift_x, shift_z, 0) * Wire(edges)
+        raw = make_brake_formed(
+            thickness, station_width, bend_line, side=Side.RIGHT)
+        bent = Pos(0, -station_width / 2, thickness) * Rotation(90, 0, 0) * raw
+    except Exception as exc:  # noqa: BLE001
+        raise GeometryError(
+            "bend_failed",
+            "Не удалось построить точный изгиб. Измените угол, радиус или положение.",
+            detail=str(exc).split("\n")[0]) from exc
+
+    trim_size = 4 * max(length, station_width, thickness) + 100
+
+    def trim_to_developed_interval(feature_tool, developed_start, developed_end):
+        for boundary, keep_direction in (
+                (developed_start, 1), (developed_end, -1)):
+            path_x, path_z, path_angle = state_on_path(boundary)
+            tangent = (
+                keep_direction * math.cos(path_angle),
+                0,
+                keep_direction * math.sin(path_angle),
+            )
+            trim_origin = (
+                path_x + shift_x,
+                0,
+                thickness + path_z + shift_z,
+            )
+            trim_box = Plane(
+                origin=trim_origin,
+                x_dir=tangent,
+                z_dir=(0, 1, 0),
+            ).location * Box(
+                trim_size, trim_size, trim_size,
+                align=(Align.MIN, Align.CENTER, Align.CENTER),
+            )
+            feature_tool &= trim_box
+        return feature_tool
+
+    hole_diameter = params.get("hole_diameter", 0)
+    if hole_diameter > 0:
+        hole_radius = hole_diameter / 2
+        hole_offset = params["hole_offset"]
+        half_x = params["length"] / 2 - hole_offset
+        half_y = params["width"] / 2 - hole_offset
+        hole_centers = [
+            (-half_x, -half_y), (half_x, -half_y),
+            (-half_x, half_y), (half_x, half_y),
+        ]
+        for original_x, original_y in hole_centers:
+            original_length = original_x if bend_axis == "x" else original_y
+            developed_position = original_length + length / 2
+            for bend in bends:
+                if (developed_position + hole_radius >= bend["zone_start"] and
+                        developed_position - hole_radius <= bend["zone_end"]):
+                    raise GeometryError(
+                        "bend_failed",
+                        "Зона изгиба пересекает отверстие. Сместите линию изгиба или измените отверстия.")
+            canonical_width = original_y if bend_axis == "x" else -original_x
+            inner_x, inner_z, local_angle = point_on_straight(developed_position)
+            inner_x += shift_x
+            inner_z += shift_z
+            normal_x = math.sin(local_angle)
+            normal_z = -math.cos(local_angle)
+            hole_origin = (
+                inner_x + thickness / 2 * normal_x,
+                canonical_width,
+                thickness + inner_z + thickness / 2 * normal_z,
+            )
+            hole_normal = (normal_x, 0, normal_z)
+            hole_tool = Plane(origin=hole_origin, z_dir=hole_normal).location * Cylinder(
+                radius=hole_radius,
+                height=thickness + 2,
+                align=(Align.CENTER, Align.CENTER, Align.CENTER),
+            )
+            bent -= hole_tool
+
+    for operation in flat_features or []:
+        feature = _flat_sheet_feature_data(operation, bend_axis)
+        developed_position = feature["developed_center"] + length / 2
+        developed_extent = feature["developed_extent"]
+        crossing_bends = [bend for bend in bends
+                          if developed_position + developed_extent >= bend["zone_start"] and
+                          developed_position - developed_extent <= bend["zone_end"]]
+        if crossing_bends:
+            if feature["kind"] not in ("rectangle", "circle", "ring", "slot"):
+                raise GeometryError(
+                    "bend_failed",
+                    "Криволинейную bend-зону пока могут пересекать прямоугольный, "
+                    "круглый, кольцевой through-вырез или паз.")
+            if feature["kind"] in ("circle", "ring", "slot") and len(crossing_bends) > 1:
+                raise GeometryError(
+                    "bend_failed",
+                    "Круглый, кольцевой through-вырез или паз пока может пересекать только одну "
+                    "криволинейную bend-зону.")
+            developed_start = max(0.0, developed_position - developed_extent)
+            developed_end = min(length, developed_position + developed_extent)
+            profiled_result = None
+            try:
+                if feature["kind"] == "rectangle":
+                    raw_feature = make_brake_formed(
+                        thickness, feature["station_width"], bend_line,
+                        side=Side.RIGHT)
+                    feature_tools = [
+                        Pos(
+                            0,
+                            feature["canonical_width"] - feature["station_width"] / 2,
+                            thickness,
+                        )
+                        * Rotation(90, 0, 0)
+                        * raw_feature
+                    ]
+                else:
+                    sample_count = 64
+                    endpoint_width = 1e-3
+
+                    def sampled_profile(profile_start, profile_end, width_at,
+                                        exact_profile_area, profile_breaks=None):
+                        profile_breaks = profile_breaks or []
+                        stations = {
+                            profile_start, profile_end,
+                            *profile_breaks,
+                            *(section["start"] for section in path_sections
+                              if profile_start < section["start"] < profile_end),
+                            *(section["end"] for section in path_sections
+                              if profile_start < section["end"] < profile_end),
+                            *(profile_start +
+                              (profile_end - profile_start) * index / sample_count
+                              for index in range(sample_count + 1)),
+                        }
+                        ordered_stations = sorted({
+                            round(station, 12) for station in stations})
+                        full_widths = [
+                            max(endpoint_width, width_at(station))
+                            for station in ordered_stations
+                        ]
+                        sampled_area = sum(
+                            (full_widths[index] + full_widths[index + 1]) / 2
+                            * (ordered_stations[index + 1] - ordered_stations[index])
+                            for index in range(len(ordered_stations) - 1)
+                        )
+                        if sampled_area <= 1e-9:
+                            raise GeometryError(
+                                "bend_failed", "Площадь профильного выреза равна нулю.")
+                        return {
+                            "stations": ordered_stations,
+                            "widths": full_widths,
+                            "area_scale": exact_profile_area / sampled_area,
+                        }
+
+                    def circle_sample(radius):
+                        profile_start = max(0.0, developed_position - radius)
+                        profile_end = min(length, developed_position + radius)
+
+                        def circle_width(station):
+                            relative = (station - developed_position) / radius
+                            return 2 * radius * math.sqrt(
+                                max(0.0, 1 - relative**2))
+
+                        return sampled_profile(
+                            profile_start,
+                            profile_end,
+                            circle_width,
+                            math.pi * radius**2,
+                        )
+
+                    def loft_profile(sample, width_scale=1.0,
+                                     section_height=thickness + 2):
+                        section_wires = []
+                        for station, width in zip(
+                                sample["stations"], sample["widths"]):
+                            path_x, path_z, path_angle = state_on_path(station)
+                            outward = (-math.sin(path_angle), 0, math.cos(path_angle))
+                            section_center = (
+                                path_x + shift_x - thickness / 2 * outward[0],
+                                feature["canonical_width"],
+                                thickness + path_z + shift_z -
+                                thickness / 2 * outward[2],
+                            )
+                            section_plane = Plane(
+                                origin=section_center,
+                                x_dir=(0, 1, 0),
+                                z_dir=(math.cos(path_angle), 0, math.sin(path_angle)),
+                            )
+                            section_wires.append(
+                                section_plane.location
+                                * Rectangle(
+                                    width * sample["area_scale"] * width_scale,
+                                    section_height,
+                                ).wires()[0]
+                            )
+                        return Solid.make_loft(section_wires, ruled=True)
+
+                    if feature["kind"] == "circle":
+                        radius = feature["developed_extent"]
+                        exact_area = math.pi * radius**2
+                        outer_sample = circle_sample(radius)
+
+                        def profile_tool(width_scale):
+                            return loft_profile(outer_sample, width_scale)
+                    elif feature["kind"] == "ring":
+                        outer_radius = feature["developed_extent"]
+                        inner_radius = _positive_profile_value(
+                            feature["profile"], "inner_diameter",
+                            "Внутренний диаметр") / 2
+                        exact_area = math.pi * (outer_radius**2 - inner_radius**2)
+                        outer_sample = circle_sample(outer_radius)
+                        inner_sample = circle_sample(inner_radius)
+
+                        def profile_tool(width_scale):
+                            outer_tool = loft_profile(outer_sample, width_scale)
+                            inner_tool = loft_profile(
+                                inner_sample,
+                                width_scale,
+                                section_height=thickness + 2.04,
+                            )
+                            return outer_tool - inner_tool
+                    else:
+                        profile_breaks = []
+                        if bend_axis == "x":
+                            slot_length = 2 * feature["developed_extent"]
+                            slot_width = feature["station_width"]
+                            cap_radius = slot_width / 2
+                            straight_half = (slot_length - slot_width) / 2
+                            profile_breaks = [
+                                developed_position - straight_half,
+                                developed_position + straight_half,
+                            ]
+
+                            def profile_width(station):
+                                cap_offset = max(
+                                    0.0,
+                                    abs(station - developed_position) - straight_half,
+                                )
+                                return 2 * math.sqrt(
+                                    max(0.0, cap_radius**2 - cap_offset**2))
+                        else:
+                            slot_width = 2 * feature["developed_extent"]
+                            slot_length = feature["station_width"]
+                            cap_radius = slot_width / 2
+                            straight_length = slot_length - slot_width
+
+                            def profile_width(station):
+                                offset = station - developed_position
+                                return straight_length + 2 * math.sqrt(
+                                    max(0.0, cap_radius**2 - offset**2))
+                        exact_area = (
+                            (slot_length - slot_width) * slot_width
+                            + math.pi * (slot_width / 2)**2
+                        )
+                        slot_sample = sampled_profile(
+                            developed_start,
+                            developed_end,
+                            profile_width,
+                            exact_area,
+                            profile_breaks,
+                        )
+
+                        def profile_tool(width_scale):
+                            return loft_profile(slot_sample, width_scale)
+
+                    feature_tool = profile_tool(1.0)
+                    profiled_result = bent - feature_tool
+                    expected_removed_volume = exact_area * thickness
+                    removed_volume = bent.volume - profiled_result.volume
+                    if removed_volume <= 1e-6:
+                        raise GeometryError(
+                            "bend_failed",
+                            "Профильный вырез не пересекает согнутую пластину.")
+                    correction = expected_removed_volume / removed_volume
+                    if abs(correction - 1) > 1e-7:
+                        feature_tool = profile_tool(correction)
+                        profiled_result = bent - feature_tool
+
+                if feature["kind"] == "rectangle":
+                    feature_tools = [
+                        trim_to_developed_interval(
+                            feature_tool, developed_start, developed_end)
+                        for feature_tool in feature_tools
+                    ]
+            except GeometryError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise GeometryError(
+                    "bend_failed",
+                    "Не удалось перенести вырез через bend-зону.",
+                    detail=str(exc).split("\n")[0]) from exc
+            previous_volume = bent.volume
+            if profiled_result is not None:
+                bent = profiled_result
+            else:
+                for feature_tool in feature_tools:
+                    bent -= feature_tool
+            if previous_volume - bent.volume <= 1e-6:
+                raise GeometryError(
+                    "bend_failed",
+                    "Вырез не пересекает согнутую пластину.")
+            continue
+
+        inner_x, inner_z, local_angle = point_on_straight(developed_position)
+        inner_x += shift_x
+        inner_z += shift_z
+        inward_x = math.sin(local_angle)
+        inward_z = -math.cos(local_angle)
+        feature_origin = (
+            inner_x + thickness / 2 * inward_x,
+            feature["canonical_width"],
+            thickness + inner_z + thickness / 2 * inward_z,
+        )
+        tangent = (math.cos(local_angle), 0, math.sin(local_angle))
+        outward = (-math.sin(local_angle), 0, math.cos(local_angle))
+        profile_x = tangent if bend_axis == "x" else (0, -1, 0)
+        tool_depth = thickness + 2
+        centered_profile = Pos(0, 0, -tool_depth / 2) * _face_profile_prism(
+            feature["profile"], tool_depth)
+        feature_tool = Plane(
+            origin=feature_origin,
+            x_dir=profile_x,
+            z_dir=outward,
+        ).location * centered_profile
+        previous_volume = bent.volume
+        bent -= feature_tool
+        if previous_volume - bent.volume <= 1e-6:
+            raise GeometryError(
+                "bend_failed",
+                "Не удалось перенести пользовательский вырез на согнутую пластину.")
+
+    if bend_axis == "y":
+        bent = Rotation(0, 0, 90) * bent
+
+    initial = part_info["shape"]
+    volume_tolerance = max(1e-4, initial.volume * 1e-7)
+    if (not bent.is_valid or len(bent.solids()) != len(initial.solids()) or
+            abs(bent.volume - initial.volume) > volume_tolerance):
+        raise GeometryError(
+            "bend_failed",
+            "Изгиб создаёт самопересечение или меняет объём. Уменьшите угол или радиус.")
+    return bent
+
+
 def _rotate_about(shape, center, angle_deg):
     """Поворот вокруг оси Z через точку center."""
     from build123d import Pos, Rotation
@@ -340,7 +1215,7 @@ def apply_part_operations(parts, operations):
     "name": str}}. Возвращает изменённый словарь."""
     from build123d import Compound, Pos
     from build123d import Plane
-    for op in operations or []:
+    for operation_index, op in enumerate(operations or []):
         kind = op.get("op")
         pid = op.get("part_id")
         if kind == "boolean":
@@ -357,17 +1232,10 @@ def apply_part_operations(parts, operations):
                 raise GeometryError("bad_params", f"неизвестная булева операция: {bt}")
             if not op.get("keep_tool", False):
                 del parts[op["tool_id"]]
-        elif kind == "fillet":
-            r = float(op["radius"])
-            edge = match_edge(parts[pid]["shape"], op["edge_ref"])
-            try:
-                parts[pid]["shape"] = parts[pid]["shape"].fillet(radius=r, edge_list=[edge])
-            except Exception as e:  # noqa: BLE001
-                raise GeometryError(
-                    "fillet_failed",
-                    f"Радиус {r:g} мм слишком велик для выбранного ребра. "
-                    "Уменьшите радиус или выберите другое ребро.",
-                    detail=str(e).split("\n")[0]) from e
+        elif kind in ("fillet", "chamfer"):
+            if pid not in parts:
+                raise GeometryError("bad_params", "Деталь для обработки ребра не найдена.")
+            parts[pid]["shape"] = _apply_edge_feature(parts[pid]["shape"], op)
         elif kind == "transform":
             t = op.get("translate") or [0, 0, 0]
             parts[pid]["shape"] = Pos(*t) * parts[pid]["shape"]
@@ -412,6 +1280,48 @@ def apply_part_operations(parts, operations):
                 new_id = f"part-profile-{len(parts) + 1}"
                 parts[new_id] = {"shape": prism,
                                  "name": f"Профиль ({prof.get('kind')})"}
+        elif kind == "face_feature":
+            target_id = op.get("target_id")
+            if target_id not in parts:
+                raise GeometryError("bad_params", "Деталь для элемента на грани не найдена.")
+            parts[target_id]["shape"] = _apply_face_feature(parts[target_id]["shape"], op)
+        elif kind == "face_dome":
+            target_id = op.get("target_id")
+            if target_id not in parts:
+                raise GeometryError("bad_params", "Деталь для выпуклости или вмятины не найдена.")
+            parts[target_id]["shape"] = _apply_face_dome(parts[target_id]["shape"], op)
+        elif kind == "sheet_bend":
+            target_id = op.get("target_id")
+            if target_id not in parts:
+                raise GeometryError("bad_params", "Деталь для изгиба не найдена.")
+            prior_operations = (operations or [])[:operation_index]
+            seen_bend = False
+            flat_features = []
+            bend_operations = []
+            for previous in prior_operations:
+                previous_target = previous.get("target_id", previous.get("part_id"))
+                if previous_target != target_id:
+                    raise GeometryError(
+                        "bend_failed",
+                        "Перед изгибом допустимы только операции той же пластины.")
+                if previous.get("op") == "face_feature" and not seen_bend:
+                    _flat_sheet_feature_data(previous, op.get("bend_axis"))
+                    flat_features.append(previous)
+                elif previous.get("op") == "sheet_bend":
+                    seen_bend = True
+                    bend_operations.append(previous)
+                else:
+                    raise GeometryError(
+                        "bend_failed",
+                        "Перед изгибом допустимы сквозные вырезы, затем изгибы должны идти подряд.")
+            if any(previous.get("bend_axis") != op.get("bend_axis")
+                   for previous in bend_operations):
+                raise GeometryError(
+                    "bend_failed",
+                    "Последовательные изгибы должны быть параллельны и использовать одну ось.")
+            bend_operations.append(op)
+            parts[target_id]["shape"] = _apply_sheet_bends(
+                parts[target_id], bend_operations, flat_features)
         elif kind == "array_circular":
             from build123d import Compound
             n = int(op["count"])
@@ -475,7 +1385,12 @@ def handle_build_v3(params):
             raise GeometryError("unknown_template", f"Неизвестный шаблон: {template}")
         tp = merged_params(template, p.get("params"))
         shape, _ = TEMPLATES[template][0](tp)
-        parts[p["part_id"]] = {"shape": shape, "name": p.get("name", template)}
+        parts[p["part_id"]] = {
+            "shape": shape,
+            "name": p.get("name", template),
+            "template": template,
+            "params": tp,
+        }
     parts = apply_part_operations(parts, params.get("operations"))
     compound = Compound(children=[p["shape"] for p in parts.values()])
     extra = {"parts": [{"part_id": pid, "name": p["name"],

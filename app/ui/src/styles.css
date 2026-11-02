@@ -307,6 +307,16 @@ mark { background: var(--pill-warning-bg); color: var(--accent-ink); border-radi
 .push-pull-hint { margin-top: 6px !important; color: var(--muted); font-size: var(--fs-small); line-height: 1.35; }
 .push-pull-live { color: var(--accent-ink); font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
 .push-pull-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.face-feature-panel {
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+.face-feature-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.face-feature-heading > div { display: flex; flex-direction: column; gap: 2px; }
+.face-feature-heading span { color: var(--muted); font-size: var(--fs-small); }
+.face-feature-form { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.face-feature-depth { max-width: 180px; }
+.face-feature-preview { color: var(--accent-ink); font-size: var(--fs-small); line-height: 1.35; }
 
 .io-forms { display: flex; flex-direction: column; gap: 8px; }
 .io-row { display: flex; gap: 6px; }
@@ -481,6 +491,7 @@ mark { background: var(--pill-warning-bg); color: var(--accent-ink); border-radi
 /* ---------- M2: скругление ---------- */
 .tool-section { margin-bottom: var(--gap); display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .fillet-panel { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.edge-pick-hint { margin: 0; color: var(--muted); font-size: var(--fs-small); }
 .edge-list {
   list-style: none; margin: 0; padding: 0;
   max-height: 220px; overflow-y: auto;

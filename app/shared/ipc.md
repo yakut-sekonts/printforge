@@ -14,7 +14,7 @@
   "params": { "length": 80 },  // параметры первой детали (совместимость)
   "parts": [ {"part_id": "part-1", "name": "Пластина", "template": "plate_with_holes", "params": {…}} ],
   "expressions": { "length": "80" },
-  "operations": [ {"op": "fillet", "radius": 2, "edge_ref": {"solid_index":0,"kind":"LINE","length":30.0,"midpoint":[x,y,z]}} ],
+  "operations": [ {"op": "fillet", "radius": 2, "edge_ref": {"solid_index":0,"kind":"LINE","length":30.0,"midpoint":[x,y,z]}}, {"op":"chamfer","distance":1,"edge_ref":{…}} ],
   "stats": {
     "volume": 18898.4, "solid_count": 1, "face_count": 10,
     "bbox": [-40,-20,0, 40,20,6], "is_valid": true,
@@ -29,7 +29,7 @@
 }
 ```
 
-Коды ошибок: `bad_value`, `bad_params`, `no_model`, `fillet_failed`, `reselect_required` (нужен повторный выбор ребра), `bad_file`, `worker_terminated`, `geometry_error`.
+Коды ошибок: `bad_value`, `bad_params`, `no_model`, `fillet_failed`, `chamfer_failed`, `dome_failed`, `bend_failed`, `reselect_required` (нужен повторный выбор ребра или грани), `bad_file`, `worker_terminated`, `geometry_error`.
 
 ## Команды
 
@@ -39,6 +39,10 @@
 - `doc_boolean({boolean: "union"|"subtract"|"intersect", target_id, tool_id, keep_tool?})` → DocState. Инструмент поглощается операцией (если не keep_tool), но его определение остаётся в документе для повторного построения; живые тела — в `stats.parts`.
 - `doc_array({part_id, count, step: [x,y,z]})` / `doc_mirror({part_id, plane: "XY"|"XZ"|"YZ"})` / `doc_split({part_id, plane, offset})` / `doc_transform({part_id, translate: [x,y,z]})` → DocState. Ошибки (`split_failed` и др.) — откат транзакции с видимой ошибкой.
 - `doc_fillet({edge_ref, radius})` → DocState. Одна транзакция; при `fillet_failed` история откатывается, модель остаётся прежней.
+- `doc_chamfer({edge_ref, distance})` → DocState. Плоская фаска по выбранному ребру; одна транзакция и один Undo, при `chamfer_failed` модель не изменяется.
+- `doc_face_feature({target_id, mode: "add"|"cut", face_ref: {kind: "outer_planar", axis, side, anchor, selected_area}, profile, depth: number|"through"})` → DocState. Локальная бобышка либо blind/through вырез на выбранной внешней плоской грани; семантическая ссылка хранит сторону и локальную привязку, а не номер `FaceN`. Одна операция — один Undo.
+- `doc_face_dome({target_id, mode: "add"|"cut", face_ref, center: [u,v], diameter, height})` → DocState. Точный BRep-сферический сегмент: выпуклость (`add`) или вмятина (`cut`) на выбранной внешней плоской грани. Высота не больше половины диаметра; основание должно целиком лежать на материале. Одна операция — один Undo.
+- `doc_sheet_bend({target_id, face_ref, bend_axis: "x"|"y", position, angle, inside_radius, moving_side: -1|1, direction: -1|1})` → DocState. Точный sheet-metal изгиб пластины с сохранением толщины, развёрнутой длины, объёма и отверстий вне зоны изгиба. Текущий slice: одна пластина, верхняя грань, изгиб как первая операция; один Undo.
 - `doc_clear_error()` → DocState.
 - `doc_undo()` / `doc_redo()` / `doc_get_state()` / `doc_get_mesh()` → как в M1 (`doc_get_mesh` отдаёт positions/indices/face_ranges c `solid_index`).
 - `doc_save({path})` / `doc_open({path})` → DocState. Формат v2 (template+operations), читает и v1.
