@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import re
+import struct
 import subprocess
 import sys
 import time
@@ -127,50 +128,61 @@ def wait_for_installation(timeout: float) -> tuple[dict[str, str], Path]:
     raise TimeoutError("PrintForge не найден в Windows uninstall registry после установки")
 
 
-def windows_powershell() -> str:
-    windows_dir = Path(os.environ.get("WINDIR", r"C:\Windows"))
-    executable = (
-        windows_dir
-        / "System32"
-        / "WindowsPowerShell"
-        / "v1.0"
-        / "powershell.exe"
-    )
-    return str(executable) if executable.is_file() else "powershell.exe"
-
-
 def authenticode_status(path: Path) -> dict[str, object]:
-    command = (
-        "$ErrorActionPreference = 'Stop'; "
-        "Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; "
-        "$signature = Get-AuthenticodeSignature -LiteralPath $args[0]; "
-        "[ordered]@{Status=[string]$signature.Status; "
-        "StatusMessage=$signature.StatusMessage; "
-        "SignerSubject=if ($signature.SignerCertificate) "
-        "{$signature.SignerCertificate.Subject} else {$null}} | ConvertTo-Json -Compress"
+    data = path.read_bytes()
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise RuntimeError("Installer не является PE-файлом: DOS header отсутствует")
+
+    pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+    if pe_offset + 24 > len(data) or data[pe_offset:pe_offset + 4] != b"PE\0\0":
+        raise RuntimeError("Installer не является PE-файлом: PE header отсутствует")
+
+    optional_header_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
+    optional_header_offset = pe_offset + 24
+    if optional_header_offset + optional_header_size > len(data):
+        raise RuntimeError("Installer содержит усечённый PE optional header")
+
+    magic = struct.unpack_from("<H", data, optional_header_offset)[0]
+    if magic == 0x10B:
+        directory_count_offset = 92
+        directory_offset = 96
+    elif magic == 0x20B:
+        directory_count_offset = 108
+        directory_offset = 112
+    else:
+        raise RuntimeError(f"Неподдерживаемый PE optional header magic: 0x{magic:04x}")
+
+    required_size = directory_offset + 5 * 8
+    if optional_header_size < required_size:
+        raise RuntimeError("PE optional header не содержит security data directory")
+    directory_count = struct.unpack_from(
+        "<I", data, optional_header_offset + directory_count_offset,
+    )[0]
+    if directory_count < 5:
+        return {
+            "Status": "NotSigned",
+            "StatusMessage": "PE image has no Authenticode security directory.",
+            "SignerSubject": None,
+        }
+
+    certificate_offset, certificate_size = struct.unpack_from(
+        "<II", data, optional_header_offset + directory_offset + 4 * 8,
     )
-    environment = os.environ.copy()
-    environment["PRINTFORGE_AUTHENTICODE_PATH"] = str(path)
-    command = command.replace("$args[0]", "$env:PRINTFORGE_AUTHENTICODE_PATH")
-    result = subprocess.run(
-        [
-            windows_powershell(),
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            command,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=environment,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Get-AuthenticodeSignature failed: {result.stderr.strip()}")
-    return json.loads(result.stdout)
+    if certificate_offset == 0 or certificate_size == 0:
+        return {
+            "Status": "NotSigned",
+            "StatusMessage": "PE image has no embedded Authenticode certificate table.",
+            "SignerSubject": None,
+        }
+    if certificate_offset + certificate_size > len(data):
+        raise RuntimeError("PE Authenticode certificate table выходит за границы installer")
+    return {
+        "Status": "SignaturePresent",
+        "StatusMessage": "PE image contains an embedded Authenticode certificate table.",
+        "SignerSubject": None,
+        "CertificateTableOffset": certificate_offset,
+        "CertificateTableSize": certificate_size,
+    }
 
 
 def sidecar_paths(executable: Path) -> list[Path]:

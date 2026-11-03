@@ -1,7 +1,7 @@
 """Static release contract. Не заменяет native E2E и smoke артефакта."""
 import hashlib
 import json
-import subprocess
+import struct
 import sys
 from pathlib import Path
 
@@ -86,42 +86,31 @@ def test_windows_release_evidence_extracts_executable_paths():
     ) == Path("C:\\PrintForge\\printforge.exe")
 
 
-def test_windows_authenticode_uses_windows_powershell_and_environment(monkeypatch, tmp_path):
+def test_windows_authenticode_reads_pe_certificate_table(tmp_path):
     installer = tmp_path / "PrintForge_0.3.0_x64-setup.exe"
-    installer.write_bytes(b"installer")
-    captured = {}
+    pe = bytearray(520)
+    pe[:2] = b"MZ"
+    struct.pack_into("<I", pe, 0x3C, 0x80)
+    pe[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<H", pe, 0x80 + 20, 0xF0)
+    optional_header = 0x80 + 24
+    struct.pack_into("<H", pe, optional_header, 0x20B)
+    struct.pack_into("<I", pe, optional_header + 108, 16)
+    installer.write_bytes(pe)
 
-    def fake_run(command, **kwargs):
-        captured["command"] = command
-        captured["kwargs"] = kwargs
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=json.dumps({
-                "Status": "NotSigned",
-                "StatusMessage": "The file is not digitally signed.",
-                "SignerSubject": None,
-            }),
-            stderr="",
-        )
+    unsigned = run_windows_release_evidence.authenticode_status(installer)
+    assert unsigned["Status"] == "NotSigned"
 
-    monkeypatch.setattr(run_windows_release_evidence, "windows_powershell", lambda: "powershell.exe")
-    monkeypatch.setattr(run_windows_release_evidence.subprocess, "run", fake_run)
-
-    result = run_windows_release_evidence.authenticode_status(installer)
-
-    assert result["Status"] == "NotSigned"
-    assert captured["command"][:6] == [
-        "powershell.exe",
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-    ]
-    assert "$env:PRINTFORGE_AUTHENTICODE_PATH" in captured["command"][-1]
-    assert str(installer) not in captured["command"][-1]
-    assert captured["kwargs"]["env"]["PRINTFORGE_AUTHENTICODE_PATH"] == str(installer)
+    struct.pack_into("<II", pe, optional_header + 112 + 4 * 8, 512, 8)
+    installer.write_bytes(pe)
+    signed = run_windows_release_evidence.authenticode_status(installer)
+    assert signed == {
+        "Status": "SignaturePresent",
+        "StatusMessage": "PE image contains an embedded Authenticode certificate table.",
+        "SignerSubject": None,
+        "CertificateTableOffset": 512,
+        "CertificateTableSize": 8,
+    }
 
 
 def test_repository_license_is_apache_2_0():
