@@ -128,8 +128,8 @@ def _parse_number(text, default=None):
 
 def scripted_plan(text, doc):
     """Детерминированный планировщик для проверки конвейера.
-    Покрывает сценарии AC-10: шайба по размерам; изменение параметра;
-    неоднозначный запрос → уточнение/явное предположение."""
+    Покрывает сценарии AC-10: пластина и шайба по размерам; изменение
+    параметра; неоднозначный запрос → уточнение/явное предположение."""
     t = text.lower()
     plan = {
         "schema_version": 1,
@@ -155,6 +155,34 @@ def scripted_plan(text, doc):
         }]
         plan["summary"] = (f"Создать шайбу: наружный диаметр {od:g} мм, "
                            f"внутренний {id_:g} мм, высота {h:g} мм")
+        return plan
+    if "пластин" in t:
+        dimensions = [float(value.replace(",", ".")) for value in re.findall(
+            r"\d+(?:[.,]\d+)?", t)]
+        length = dimensions[0] if len(dimensions) > 0 else 80
+        width = dimensions[1] if len(dimensions) > 1 else 40
+        height_match = re.search(r"толщин\w*\s*(\d+(?:[.,]\d+)?)", t)
+        hole_match = re.search(r"отверсти\w*\s*(\d+(?:[.,]\d+)?)\s*мм", t)
+        height = (float(height_match.group(1).replace(",", "."))
+                  if height_match else (dimensions[2] if len(dimensions) > 2 else 6))
+        hole_diameter = (float(hole_match.group(1).replace(",", "."))
+                         if hole_match else 4)
+        plan["operations"] = [{
+            "command_id": "part.create.from_template",
+            "target_id": None,
+            "parameters": {
+                "template": "plate_with_holes",
+                "params": {
+                    "length": length,
+                    "width": width,
+                    "height": height,
+                    "hole_diameter": hole_diameter,
+                },
+            },
+        }]
+        plan["summary"] = (
+            f"Создать пластину {length:g} × {width:g} × {height:g} мм "
+            f"с отверстиями Ø{hole_diameter:g} мм")
         return plan
     m = re.search(r"длин\w*\s+(?:на|до|=)?\s*(\d+(?:[.,]\d+)?)", t)
     if m and doc.parts:
@@ -202,6 +230,8 @@ def http_chat(messages, want_json, json_schema=None):
     key = config["api_key"]
     model = config["model"]
     body = {"model": model, "messages": messages, "temperature": 0}
+    if config["provider"] == "ollama":
+        body["reasoning_effort"] = "none"
     if json_schema is not None and config["provider"] == "ollama":
         body["response_format"] = {
             "type": "json_schema",
@@ -288,8 +318,18 @@ def ai_chat(messages, want_json=False):
     return http_chat(messages, want_json)
 
 
-def ai_plan(text, doc, transaction_preview):
+def _raise_if_cancelled(is_cancelled):
+    if is_cancelled is not None and is_cancelled():
+        raise RuntimeError(json.dumps({
+            "code": "ai_cancelled",
+            "message": "AI-запрос отменён пользователем.",
+            "detail": "",
+        }, ensure_ascii=False))
+
+
+def ai_plan(text, doc, transaction_preview, is_cancelled=None):
     """Полный цикл AI-005: запрос → план → валидация → preview на копии."""
+    _raise_if_cancelled(is_cancelled)
     p = _PROVIDER_CONFIG["provider"]
     repair_count = 0
     if p == "disabled":
@@ -300,20 +340,13 @@ def ai_plan(text, doc, transaction_preview):
     if p == "scripted":
         plan = scripted_plan(text, doc)
     else:
-        summary = doc_summary(doc)
-        sys_prompt = (
-            "Ты планировщик CAD PrintForge. Отвечай ТОЛЬКО JSON по схеме: "
-            "{schema_version:1, document_id, base_revision, units:\"mm\", "
-            "assumptions:[], questions:[], operations:[{command_id, target_id, "
-            "parameters}], summary}. Разрешённые command_id: "
-            "part.create.from_template {template, params}, "
-            "parameter.set {name, value}, op.fillet {radius, edge_ref}. "
-            "Никакого кода, только данные.\nДокумент: " + summary)
-        schema = plan_json_schema(doc)
+        sys_prompt = system_prompt(doc)
+        schema = plan_json_schema(doc, text)
         raw = http_chat([
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": text}], want_json=True,
             json_schema=schema)
+        _raise_if_cancelled(is_cancelled)
         plan, validation_error = _parse_and_validate(raw, doc)
         if validation_error:
             # Ровно одна автоматическая попытка исправления JSON или схемы.
@@ -327,16 +360,20 @@ def ai_plan(text, doc, transaction_preview):
                     f"{validation_error['message']} Исправь, ответь только JSON.")},
                 ],
                 want_json=True, json_schema=schema)
+            _raise_if_cancelled(is_cancelled)
             plan, validation_error = _parse_and_validate(raw2, doc)
             if validation_error:
                 raise RuntimeError(json.dumps(validation_error, ensure_ascii=False))
     err = validate_plan(plan, doc)
     if err:
         raise RuntimeError(json.dumps(err, ensure_ascii=False))
+    _raise_if_cancelled(is_cancelled)
     digest = plan_hash(plan)
     action_id = str(uuid.uuid4())
-    preview = transaction_preview(
-        plan["operations"], plan["base_revision"], digest)
+    preview = None
+    if plan["operations"]:
+        preview = transaction_preview(
+            plan["operations"], plan["base_revision"], digest)
     return {
         "plan": plan,
         "preview": preview,
@@ -378,7 +415,208 @@ def doc_summary(doc):
                        "units": "mm", "parts": parts}, ensure_ascii=False)
 
 
-def plan_json_schema(doc):
+def system_prompt(doc):
+    if doc.parts:
+        existing = "; ".join(
+            f'{part["part_id"]} ({part["template"]}): '
+            + ", ".join(sorted(part.get("params", {})))
+            for part in doc.parts)
+        document_rule = (
+            "Документ уже содержит детали: " + existing + ". "
+            "Запросы «измени», «установи», «увеличь» и «сделай [существующую деталь] "
+            "размером ...» означают parameter.set. part.create.from_template допустим "
+            "только при явном запросе создать или добавить новую деталь. "
+        )
+    else:
+        document_rule = (
+            "Документ пуст: для явного запроса создать деталь используй "
+            "part.create.from_template. "
+        )
+    return (
+        "Ты планировщик CAD PrintForge. Отвечай ТОЛЬКО JSON по переданной схеме. "
+        "Используй только эти операции и точные идентификаторы:\n"
+        "1. part.create.from_template: target_id=null, parameters={template, params}. "
+        "Допустимые шаблоны и параметры: "
+        "washer {outer_diameter, inner_diameter, height}; "
+        "plate_with_holes {length, width, height, hole_diameter, hole_offset}; "
+        "bracket_l {a_length, a_width, a_thickness, b_height}; "
+        "case_with_lid {length, width, height, wall, bottom, gap, lid_thickness, "
+        "lip_height, lip_wall}. В params указывай только размеры, явно названные "
+        "пользователем; остальные поля не выдумывай — backend применит defaults.\n"
+        "2. parameter.set: target_id — существующий part_id, "
+        "parameters={name, value}; name обязан уже существовать в params этой детали. "
+        "Если пользователь меняет существующую деталь, используй parameter.set, "
+        "не создавай новую деталь.\n"
+        "3. op.fillet: target_id — существующий part_id, parameters={radius, edge_ref}; "
+        "edge_ref должен быть точным объектом из контекста. Если edge_ref в контексте нет, "
+        "задай вопрос и не создавай операцию.\n"
+        "Не выдумывай template, parameter name, part_id или edge_ref. "
+        "Если не хватает размера либо запрос неоднозначен (например, «побольше», "
+        "«покрепче», «добавь отверстие»), оставь operations пустым и заполни questions, "
+        "либо укажи явное измеримое предположение в assumptions. "
+        "Никогда не исполняй код, не читай файлы и не устанавливай расширения. "
+        "Все размеры только в мм. Никакого Markdown, только данные.\n"
+        + document_rule + "Документ: "
+        + doc_summary(doc)
+    )
+
+
+def _request_operation_scope(doc, text):
+    if text is None:
+        return None, False, False
+    normalized = text.lower().replace("ё", "е")
+    unsafe_or_invalid = (
+        re.search(r"(^|\D)-\s*\d", normalized)
+        or re.search(r"\bnan\b", normalized)
+        or any(marker in normalized for marker in (
+            "python", "/etc/", "прочитай файл", "открой файл",
+            "установи расширение", "запусти код")))
+    if unsafe_or_invalid:
+        return set(), False, True
+
+    template_markers = {
+        "washer": ("шайб", "втулк"),
+        "plate_with_holes": ("пластин",),
+        "bracket_l": ("кроншт",),
+        "case_with_lid": ("корпус", "крышк"),
+    }
+    requested_templates = {
+        template for template, markers in template_markers.items()
+        if any(marker in normalized for marker in markers)
+    }
+    scope = set()
+    explicit_create = not doc.parts or "созд" in normalized or "добавь деталь" in normalized
+    if explicit_create:
+        scope.update(("create", template) for template in requested_templates)
+
+    parameter_markers = {
+        "length": ("длин",),
+        "width": ("ширин",),
+        "height": ("толщин", "высот"),
+        "hole_diameter": ("диаметр отверст", "отверсти", "побольш"),
+        "hole_offset": ("смещен", "отступ"),
+        "outer_diameter": ("наружн",),
+        "inner_diameter": ("внутрен",),
+        "a_length": ("длин",),
+        "a_width": ("ширин",),
+        "a_thickness": ("толщин",),
+        "b_height": ("высот", "стойк"),
+        "wall": ("стенк",),
+        "bottom": ("дн",),
+        "gap": ("зазор",),
+        "lid_thickness": ("толщин крыш",),
+        "lip_height": ("высот бортик",),
+        "lip_wall": ("толщин бортик",),
+    }
+    for part in doc.parts:
+        for name in part.get("params", {}):
+            if any(marker in normalized for marker in parameter_markers.get(name, ())):
+                scope.add(("parameter", part["part_id"], name))
+        if "скруг" in normalized or "радиус" in normalized:
+            scope.add(("fillet", part["part_id"]))
+
+    requires_assumption = "побольш" in normalized and bool(scope)
+    requires_question = not scope
+    return scope, requires_assumption, requires_question
+
+
+def plan_json_schema(doc, text=None):
+    create_variants = {}
+    parameter_variants = {}
+    fillet_variants = {}
+    number = {"type": "number", "exclusiveMinimum": 0}
+    for template, parameter_names in TEMPLATE_PARAMS.items():
+        create_variants[template] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "command_id": {"const": "part.create.from_template"},
+                "target_id": {"type": "null"},
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "template": {"const": template},
+                        "params": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                name: number for name in parameter_names
+                            },
+                        },
+                    },
+                    "required": ["template", "params"],
+                },
+            },
+            "required": ["command_id", "target_id", "parameters"],
+        }
+    for part in doc.parts:
+        for name in sorted(part.get("params", {})):
+            parameter_variants[(part["part_id"], name)] = {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "command_id": {"const": "parameter.set"},
+                    "target_id": {"const": part["part_id"]},
+                    "parameters": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {"const": name},
+                            "value": number,
+                        },
+                        "required": ["name", "value"],
+                    },
+                },
+                "required": ["command_id", "target_id", "parameters"],
+            }
+        fillet_variants[part["part_id"]] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "command_id": {"const": "op.fillet"},
+                "target_id": {"const": part["part_id"]},
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "radius": number,
+                        "edge_ref": {"type": "object"},
+                    },
+                    "required": ["radius", "edge_ref"],
+                },
+            },
+            "required": ["command_id", "target_id", "parameters"],
+        }
+
+    scope, requires_assumption, requires_question = _request_operation_scope(doc, text)
+    if scope is None:
+        operation_variants = [
+            *create_variants.values(),
+            *parameter_variants.values(),
+            *fillet_variants.values(),
+        ]
+    else:
+        operation_variants = []
+        for item in sorted(scope):
+            if item[0] == "create" and item[1] in create_variants:
+                operation_variants.append(create_variants[item[1]])
+            elif item[0] == "parameter" and (item[1], item[2]) in parameter_variants:
+                operation_variants.append(parameter_variants[(item[1], item[2])])
+            elif item[0] == "fillet" and item[1] in fillet_variants:
+                operation_variants.append(fillet_variants[item[1]])
+
+    assumptions_schema = {"type": "array", "items": {"type": "string"}}
+    questions_schema = {"type": "array", "items": {"type": "string"}}
+    operations_schema = {"type": "array", "maxItems": MAX_PLAN_OPS}
+    if operation_variants:
+        operations_schema["items"] = {"oneOf": operation_variants}
+    else:
+        operations_schema["maxItems"] = 0
+    if requires_assumption:
+        assumptions_schema["minItems"] = 1
+    if requires_question:
+        questions_schema["minItems"] = 1
     return {
         "type": "object",
         "additionalProperties": False,
@@ -388,22 +626,9 @@ def plan_json_schema(doc):
             "document_instance_id": {"const": doc.document_instance_id},
             "base_revision": {"type": "integer", "const": doc.revision},
             "units": {"type": "string", "const": "mm"},
-            "assumptions": {"type": "array", "items": {"type": "string"}},
-            "questions": {"type": "array", "items": {"type": "string"}},
-            "operations": {
-                "type": "array",
-                "maxItems": MAX_PLAN_OPS,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "command_id": {"enum": sorted(ALLOWED_COMMANDS)},
-                        "target_id": {"type": ["string", "null"]},
-                        "parameters": {"type": "object"},
-                    },
-                    "required": ["command_id", "target_id", "parameters"],
-                },
-            },
+            "assumptions": assumptions_schema,
+            "questions": questions_schema,
+            "operations": operations_schema,
             "summary": {"type": "string"},
         },
         "required": ["schema_version", "document_id", "document_instance_id",
@@ -429,6 +654,15 @@ def plan_hash(plan):
 
 ALLOWED_COMMANDS = {"part.create.from_template", "parameter.set", "op.fillet"}
 TEMPLATES = {"plate_with_holes", "washer", "bracket_l", "case_with_lid"}
+TEMPLATE_PARAMS = {
+    "washer": ("outer_diameter", "inner_diameter", "height"),
+    "plate_with_holes": (
+        "length", "width", "height", "hole_diameter", "hole_offset"),
+    "bracket_l": ("a_length", "a_width", "a_thickness", "b_height"),
+    "case_with_lid": (
+        "length", "width", "height", "wall", "bottom", "gap",
+        "lid_thickness", "lip_height", "lip_wall"),
+}
 SIGNED_PARAMS = {"length", "width", "height", "hole_diameter", "hole_offset",
                  "outer_diameter", "inner_diameter", "a_length", "a_width",
                  "a_thickness", "b_height", "wall", "bottom", "gap",

@@ -34,6 +34,7 @@ def groups(run_dir):
                 "backend/test_ai_transport.py",
                 "backend/test_ai_integration.py",
                 "backend/test_live_eval_contract.py",
+                "backend/test_native_e2e_contract.py",
             ], run_dir / "pytest-ai.xml"),
             "junit": str(run_dir / "pytest-ai.xml"),
         }],
@@ -41,7 +42,9 @@ def groups(run_dir):
             "name": "cad-document-worker",
             "command": pytest_command([
                 "backend/test_worker.py",
+                "backend/test_worker_control.py",
                 "backend/test_templates.py",
+                "backend/test_extended_modeling.py",
                 "backend/test_document_integration.py",
             ], run_dir / "pytest-cad.xml"),
             "junit": str(run_dir / "pytest-cad.xml"),
@@ -52,6 +55,10 @@ def groups(run_dir):
                 "command": pytest_command(
                     ["backend/test_help_contract.py"], run_dir / "pytest-help.xml"),
                 "junit": str(run_dir / "pytest-help.xml"),
+            },
+            {
+                "name": "help-search-contract",
+                "command": ["npm", "run", "test:help", "--prefix", "app/ui"],
             },
             {"name": "help-integrity", "command": [PYTHON, "scripts/check_help.py"]},
         ],
@@ -73,7 +80,17 @@ def groups(run_dir):
             },
             {"name": "traceability-structure", "command": [PYTHON, "scripts/check_test_manifest.py"]},
         ],
-        "ui": [{"name": "ui-build", "command": ["npm", "run", "build", "--prefix", "app/ui"]}],
+        "perf": [{
+            "name": "perf-harness-contract",
+            "command": pytest_command(
+                ["backend/test_perf_contract.py"], run_dir / "pytest-perf.xml"),
+            "junit": str(run_dir / "pytest-perf.xml"),
+        }],
+        "ui": [
+            {"name": "geometry-control-contract", "command": ["npm", "run", "test:geometry", "--prefix", "app/ui"]},
+            {"name": "mesh-binary-contract", "command": ["npm", "run", "test:mesh", "--prefix", "app/ui"]},
+            {"name": "ui-build", "command": ["npm", "run", "build", "--prefix", "app/ui"]},
+        ],
         "rust": [{
             "name": "rust-tests",
             "command": ["cargo", "test", "--manifest-path", "app/src-tauri/Cargo.toml"],
@@ -106,9 +123,9 @@ def impact_groups(paths):
     for path in paths:
         if path.startswith(("scripts/ai_planner.py", "scripts/dev_shim.py", "backend/test_ai", "tests/live_eval/")):
             selected.add("ai")
-        if path.startswith(("backend/worker.py", "backend/test_worker.py", "backend/test_templates.py", "backend/test_document", "tests/fixtures/")):
+        if path.startswith(("backend/worker.py", "backend/test_worker.py", "backend/test_templates.py", "backend/test_extended_modeling.py", "backend/test_document", "tests/fixtures/")):
             selected.add("cad")
-        if path.startswith(("docs/help/", "app/shared/commands", "app/shared/lessons", "app/ui/public/help", "app/ui/public/lessons", "backend/test_help")):
+        if path.startswith(("docs/help/", "app/shared/commands", "app/shared/lessons", "app/ui/public/help", "app/ui/public/lessons", "app/ui/src/helpSearch", "app/ui/test/helpSearch", "backend/test_help")):
             selected.update({"help", "ui"})
         if path.startswith(("app/src-tauri/src/ai.rs",)):
             selected.update({"ai", "rust"})
@@ -118,12 +135,16 @@ def impact_groups(paths):
             selected.update({"ai", "ui"})
         elif path.startswith("app/ui/"):
             selected.add("ui")
-        if path.startswith(("app/src-tauri/tauri", ".github/workflows/release", "scripts/build_sidecar", "scripts/check_release_version", "backend/test_release", "LICENSE")):
+        if path.startswith(("app/src-tauri/tauri", ".github/workflows/release", "scripts/build_sidecar", "scripts/check_release_version", "scripts/run_windows_release_evidence", "backend/test_release", "LICENSE")):
             selected.add("release")
         if path.startswith(("app/src-tauri/", "app/src-tauri/Cargo")):
             selected.add("rust")
         if path.startswith(("docs/testing/", "tests/test_catalog", "scripts/check_test_manifest", "scripts/build_test_manifest", "backend/test_traceability", "REQUIREMENTS.md")):
             selected.add("traceability")
+        if path.startswith(("scripts/run_perf_smoke", "scripts/run_ui_perf", "scripts/run_native_perf", "scripts/run_windows_release_evidence", "backend/test_perf_contract")):
+            selected.add("perf")
+        if path.startswith(("scripts/run_native_ai_cancel_e2e", "backend/test_native_e2e_contract")):
+            selected.update({"ai", "ui", "rust"})
         if path.startswith(("pytest.ini", "scripts/run_test_stage.py", ".github/workflows/ci.yml", "backend/requirements.txt")):
             selected.update({"ai", "cad", "help", "release", "traceability"})
     return sorted(selected) if selected else ["python-full", "ui", "rust"]
@@ -195,9 +216,9 @@ def declared_gates():
         },
         {
             "name": "m4-extended-modeling",
-            "status": "planned",
+            "status": "partial",
             "required_from": "M4",
-            "reason": "EXT-001…EXT-012 запланированы и не входят в текущий release gate M3.",
+            "reason": "Все EXT-001…EXT-012 имеют automated evidence как partial; открытые clauses перечислены в TEST_GAPS.md.",
         },
     ]
 
@@ -206,7 +227,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--scope",
-        choices=["full", "pr", "nightly", "changed", "ai", "cad", "help", "release", "traceability", "ui", "rust"],
+        choices=["full", "pr", "nightly", "changed", "ai", "cad", "help", "release", "traceability", "perf", "ui", "rust"],
         default="changed",
     )
     parser.add_argument("--paths", nargs="*")
@@ -223,6 +244,7 @@ def main():
     if args.scope in {"full", "pr", "nightly"}:
         selected = ["python-full", "ui", "rust"]
         extra_commands = [
+            {"name": "help-search-contract", "command": ["npm", "run", "test:help", "--prefix", "app/ui"]},
             {"name": "help-integrity", "command": [PYTHON, "scripts/check_help.py"]},
             {"name": "traceability-structure", "command": [PYTHON, "scripts/check_test_manifest.py"]},
             {"name": "release-version", "command": [PYTHON, "scripts/check_release_version.py"]},

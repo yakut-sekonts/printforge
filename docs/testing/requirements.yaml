@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "current_stage": "M3",
+  "current_stage": "M4",
   "source": {
     "product_requirements": "REQUIREMENTS.md",
     "autotest_requirements": "PrintForge_Codex_Autotest_Requirements.md v1.0",
@@ -319,9 +319,13 @@
         "T-AI-12",
         "T-AI-13",
         "T-AI-14",
-        "T-AI-16"
+        "T-AI-16",
+        "T-AI-21",
+        "T-AI-22",
+        "T-AI-28-HARNESS"
       ],
       "levels": [
+        "contract",
         "integration-real-kernel"
       ],
       "implementation_status": "partial",
@@ -338,10 +342,15 @@
       "test_ids": [
         "T-AI-04",
         "T-AI-05",
-        "T-AI-06"
+        "T-AI-06",
+        "T-AI-22",
+        "T-AI-25",
+        "T-AI-28-HARNESS"
       ],
       "levels": [
+        "contract",
         "contract-loopback-http",
+        "integration-real-kernel",
         "unit-contract"
       ],
       "implementation_status": "partial",
@@ -1218,10 +1227,13 @@
       "severity": "B",
       "test_ids": [
         "T-TECH-03",
+        "T-TECH-04",
         "T-AI-17",
-        "T-AI-24"
+        "T-AI-24",
+        "T-AI-28-HARNESS"
       ],
       "levels": [
+        "contract",
         "integration-real-kernel",
         "integration-real-process"
       ],
@@ -1237,10 +1249,12 @@
       "required_from": "M0",
       "severity": "B",
       "test_ids": [
+        "T-TECH-05",
         "T-BUILD-01",
         "T-BUILD-02"
       ],
       "levels": [
+        "contract",
         "release-contract"
       ],
       "implementation_status": "partial",
@@ -1449,156 +1463,207 @@
       "requirement_id": "EXT-001",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-01"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "Real-kernel regions, line/arc/circle contours, holes, invalid contours, single transaction, Undo and save/reopen are covered. The interactive arbitrary Sketcher UI and preview/cancel flow are not implemented yet."
       ]
     },
     {
       "requirement_id": "EXT-002",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-02"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "A deterministic numerical solver covers coincident/horizontal/vertical/parallel/perpendicular/tangent/equal/dimension/fix fixtures, residuals, rank/DOF, conflict versus compatible redundancy, drag stability, preview without commit and document persistence. Direct canvas editing of arbitrary sketch elements remains open."
       ]
     },
     {
       "requirement_id": "EXT-003",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-03",
+        "T-EXT-04"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "Real-kernel revolve, circular sweep and ruled loft match independent volume oracles. The UI currently exposes controlled presets; curved sweep orientation, self-intersection rejection and arbitrary multi-section editing remain open."
       ]
     },
     {
       "requirement_id": "EXT-004",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-05"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "Cylindrical shell, signed rectangular draft and triangular rib presets have real-kernel analytical oracles, invalid-input checks and document transaction evidence. Generic face shelling, draft on selected faces and ribs from arbitrary sketches remain open."
       ]
     },
     {
       "requirement_id": "EXT-005",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-06",
+        "T-EXT-07"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "Embedded SVG/DXF extrusion validates physical units, holes and unsafe content; fixed-version Cyrillic text creates exportable add/cut BRep geometry without silent font fallback. Broader entity/transform fixtures, arbitrary placement on existing faces and native file-dialog E2E remain open."
       ]
     },
     {
       "requirement_id": "EXT-006",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-08"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "Versioned explicit fixtures for an M5 nut pocket, 608 bearing pocket and M3 heat insert have analytical real-kernel oracles and distinct radial/diametral/one-sided clearance semantics. External dimensional sources, dependent edits on existing bodies and physical print validation remain open."
       ]
     },
     {
       "requirement_id": "EXT-007",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-09"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "A versioned metric-60-v1 single-start external/internal pair uses real helical BRep geometry, supports right/left hand, checks assembly clearance and persists as one document transaction. Multi-start profiles, standards catalog and physical fastener print validation remain open."
       ]
     },
     {
       "requirement_id": "EXT-008",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-10"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "Existing arbitrary plane split preserves volume; a rectangular fixture adds two pins and clearanced sockets, verifies assembly non-intersection and stores reversible print placement. Connectors on arbitrary selected parts, snap locks and thin-wall warning UI remain open."
       ]
     },
     {
       "requirement_id": "EXT-009",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-11"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "A single transaction creates 2-10 geometrically distinct coupons with BRep value labels and an explicit sample-to-clearance mapping; the chosen profile name is stored only in that operation. Printer/material profile management and physical print measurements remain open."
       ]
     },
     {
       "requirement_id": "EXT-010",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-12",
+        "T-EXT-13"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "Persistent embedded mesh history covers transforms, a specific supported hole repair with before/after diagnostics and counterexample, topology-aware decimation range, components, Euler number, bbox/volume and explicitly sampled shape error. General self-intersection detection/repair and arbitrary manual vertex editing remain open."
       ]
     },
     {
       "requirement_id": "EXT-011",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-14"
+      ],
+      "levels": [
+        "integration-real-kernel"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "An experimental embedded image-to-heightmap mesh workflow enforces limits, provides preview and explicit hash-bound Apply, stores model/seed/settings, scale/units, supports cancel, Undo, reopen and mesh export, and labels quality as non-engineering. External generative providers and perceptual 3D similarity evaluation remain open."
       ]
     },
     {
       "requirement_id": "EXT-012",
       "required_from": "M4",
       "severity": "R",
-      "test_ids": [],
-      "levels": [],
-      "implementation_status": "planned",
+      "test_ids": [
+        "T-EXT-15"
+      ],
+      "levels": [
+        "contract"
+      ],
+      "implementation_status": "partial",
       "last_run_status": "not_run",
       "evidence": [],
       "uncovered_clauses": [
-        "M4 scope: функция и её доказательства ещё не реализованы."
+        "Every shipped M4 command is linked to offline help, operation-only projects embed vector and mesh/image sources, dedicated advanced/constraint/mesh/image lessons are shipped, and future format versions fail with an explicit update message. Native walkthrough evidence and examples for every remaining partial clause remain open."
       ]
     }
   ]

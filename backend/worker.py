@@ -284,6 +284,457 @@ def mesh_resource(part, name, tol=0.1):
             "face_ranges": face_ranges}
 
 
+MAX_EMBEDDED_MESH_BYTES = 25 * 1024 * 1024
+MAX_EMBEDDED_IMAGE_BYTES = 8 * 1024 * 1024
+IMAGE_RELIEF_MODEL = "heightmap-luminance-v1"
+
+
+def _trimesh_resource(mesh, name):
+    import numpy as np
+    positions = np.asarray(mesh.vertices, dtype="float32")
+    indices = np.asarray(mesh.faces, dtype="uint32")
+    blob = struct.pack("<II", len(positions), len(indices))
+    blob += positions.tobytes() + indices.tobytes()
+    path = _session_dir / f"{name}.bin"
+    path.write_bytes(blob)
+    return {
+        "path": str(path), "bytes": len(blob),
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "vertex_count": int(len(positions)),
+        "triangle_count": int(len(indices)),
+        "face_ranges": [],
+    }
+
+
+def _mesh_diagnostics(mesh):
+    import numpy as np
+    _, counts = np.unique(mesh.edges_sorted, axis=0, return_counts=True)
+    boundary_edges = int((counts == 1).sum())
+    non_manifold_edges = int((counts > 2).sum())
+    degenerate = int((mesh.area_faces <= 1e-12).sum())
+    return {
+        "watertight": bool(mesh.is_watertight),
+        "winding_consistent": bool(mesh.is_winding_consistent),
+        "boundary_edges": boundary_edges,
+        "non_manifold_edges": non_manifold_edges,
+        "degenerate_triangles": degenerate,
+        "components": int(mesh.body_count),
+        "euler_number": int(mesh.euler_number),
+        "self_intersection": "unknown",
+        "self_intersection_detail": (
+            "Универсальная проверка самопересечений не заявлена; repair не выдаёт ложный pass."
+        ),
+    }
+
+
+def _load_embedded_mesh(operation):
+    import base64
+    import binascii
+    from io import BytesIO
+    import numpy as np
+    import trimesh
+
+    mesh_format = str(operation.get("format", "stl")).lower()
+    if mesh_format not in {"stl", "obj", "ply"}:
+        raise GeometryError("bad_params", f"Mesh workflow не поддерживает формат {mesh_format}.")
+    encoded = operation.get("source_base64")
+    if not isinstance(encoded, str) or not encoded:
+        raise GeometryError("bad_params", "Mesh source отсутствует в проекте.")
+    try:
+        source = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise GeometryError("bad_params", "Embedded mesh source повреждён.") from exc
+    if len(source) > MAX_EMBEDDED_MESH_BYTES:
+        raise GeometryError("mesh_too_large", "Mesh source превышает лимит 25 MiB.")
+    try:
+        loaded = trimesh.load(BytesIO(source), file_type=mesh_format, force="mesh", process=False)
+    except Exception as exc:  # noqa: BLE001
+        raise GeometryError("mesh_read_failed", f"Не удалось прочитать {mesh_format.upper()} mesh.") from exc
+    if isinstance(loaded, trimesh.Scene):
+        geometries = [geometry for geometry in loaded.geometry.values() if len(geometry.faces)]
+        if not geometries:
+            raise GeometryError("mesh_empty", "Mesh source не содержит треугольников.")
+        mesh = trimesh.util.concatenate(geometries)
+    else:
+        mesh = loaded
+    if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+        raise GeometryError("mesh_empty", "Mesh source не содержит треугольников.")
+    scale = float(operation.get("unit_scale", 1.0))
+    if not math.isfinite(scale) or scale <= 0:
+        raise GeometryError("bad_params", "Масштаб mesh должен быть положительным числом.")
+    mesh = mesh.copy()
+    mesh.vertices = np.asarray(mesh.vertices, dtype=float) * scale
+    # STL repeats vertices per triangle; merge only identical positions so
+    # topology diagnostics describe the source surface rather than file layout.
+    mesh.merge_vertices()
+    mesh.remove_unreferenced_vertices()
+    if not np.isfinite(mesh.vertices).all():
+        raise GeometryError("mesh_invalid", "Mesh содержит бесконечные или NaN-координаты.")
+    return mesh, {
+        "source_format": mesh_format,
+        "source_bytes": len(source),
+        "source_sha256": hashlib.sha256(source).hexdigest(),
+        "unit_scale": scale,
+    }
+
+
+def _image_relief_mesh(operation):
+    import base64
+    import binascii
+    from io import BytesIO
+    import numpy as np
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    import trimesh
+
+    if operation.get("model") != IMAGE_RELIEF_MODEL:
+        raise GeometryError("bad_params", f"Поддерживается только model={IMAGE_RELIEF_MODEL}.")
+    encoded = operation.get("source_base64")
+    if not isinstance(encoded, str) or not encoded:
+        raise GeometryError("bad_params", "Изображение отсутствует в проекте.")
+    try:
+        source = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise GeometryError("bad_params", "Embedded image source повреждён.") from exc
+    if len(source) > MAX_EMBEDDED_IMAGE_BYTES:
+        raise GeometryError("image_too_large", "Изображение превышает лимит 8 MiB.")
+    try:
+        with Image.open(BytesIO(source)) as opened:
+            if opened.format not in {"PNG", "JPEG", "WEBP"}:
+                raise GeometryError("bad_params", "Поддерживаются PNG, JPEG и WebP.")
+            if opened.width * opened.height > 16_000_000:
+                raise GeometryError("image_too_large", "Изображение превышает лимит 16 мегапикселей.")
+            image = ImageOps.exif_transpose(opened).convert("L")
+    except (UnidentifiedImageError, OSError) as exc:
+        raise GeometryError("image_read_failed", "Не удалось декодировать изображение.") from exc
+
+    width_mm = float(operation.get("width_mm", 50))
+    relief_height = float(operation.get("relief_height", 3))
+    base_thickness = float(operation.get("base_thickness", 1.5))
+    samples = int(operation.get("samples", 96))
+    seed = int(operation.get("seed", 0))
+    noise_strength = float(operation.get("noise_strength", 0.015))
+    invert = bool(operation.get("invert", False))
+    if not all(math.isfinite(value) and value > 0
+               for value in [width_mm, relief_height, base_thickness]):
+        raise GeometryError("bad_params", "Размер, рельеф и основание должны быть положительными.")
+    if not 8 <= samples <= 192:
+        raise GeometryError("bad_params", "Samples должен быть в диапазоне 8…192.")
+    if not 0 <= noise_strength <= 0.2:
+        raise GeometryError("bad_params", "Noise strength должен быть в диапазоне 0…0.2.")
+    aspect = image.height / image.width
+    columns = samples
+    rows = max(8, min(192, int(round(samples * aspect))))
+    height_mm = width_mm * image.height / image.width
+    resized = image.resize((columns, rows), Image.Resampling.LANCZOS)
+    luminance = np.asarray(resized, dtype=float) / 255.0
+    if invert:
+        luminance = 1.0 - luminance
+    rng = np.random.default_rng(seed)
+    noise = rng.uniform(-noise_strength, noise_strength, size=luminance.shape)
+    normalized = np.clip(luminance + noise, 0.0, 1.0)
+    top_z = base_thickness + normalized * relief_height
+
+    x_values = np.linspace(0.0, width_mm, columns)
+    y_values = np.linspace(0.0, height_mm, rows)
+    xx, yy = np.meshgrid(x_values, y_values)
+    top = np.column_stack([xx.ravel(), yy.ravel(), top_z.ravel()])
+    bottom = np.column_stack([xx.ravel(), yy.ravel(), np.zeros(rows * columns)])
+    vertices = np.vstack([top, bottom])
+    offset = rows * columns
+    faces = []
+    for row in range(rows - 1):
+        for column in range(columns - 1):
+            a = row * columns + column
+            b, c, d = a + 1, a + columns + 1, a + columns
+            faces.extend([[a, b, c], [a, c, d]])
+            faces.extend([[offset + a, offset + c, offset + b],
+                          [offset + a, offset + d, offset + c]])
+    boundary = (
+        list(range(columns)) +
+        [row * columns + columns - 1 for row in range(1, rows)] +
+        list(range((rows - 1) * columns + columns - 2, (rows - 1) * columns - 1, -1)) +
+        [row * columns for row in range(rows - 2, 0, -1)]
+    )
+    for index, current in enumerate(boundary):
+        following = boundary[(index + 1) % len(boundary)]
+        faces.extend([[current, offset + current, offset + following],
+                      [current, offset + following, following]])
+    mesh = trimesh.Trimesh(vertices, np.asarray(faces, dtype=np.int64), process=False)
+    mesh.merge_vertices()
+    trimesh.repair.fix_normals(mesh, multibody=True)
+    if not mesh.is_watertight or not mesh.is_winding_consistent:
+        raise GeometryError("image_mesh_failed", "Не удалось построить замкнутый decorative mesh.")
+    correlation = float(np.corrcoef(luminance.ravel(), normalized.ravel())[0, 1])
+    metadata = {
+        "source_format": str(operation.get("format", "image")),
+        "source_bytes": len(source),
+        "source_sha256": hashlib.sha256(source).hexdigest(),
+        "model": IMAGE_RELIEF_MODEL,
+        "seed": seed,
+        "settings": {
+            "width_mm": width_mm,
+            "height_mm": height_mm,
+            "relief_height": relief_height,
+            "base_thickness": base_thickness,
+            "samples": samples,
+            "grid": [columns, rows],
+            "noise_strength": noise_strength,
+            "invert": invert,
+            "units": "mm",
+        },
+        "quality": {
+            "metric": "luminance_height_correlation",
+            "value": correlation,
+            "engineering_accuracy": False,
+            "pixel_exactness_required": False,
+        },
+    }
+    return mesh, metadata
+
+
+def _cluster_mesh(mesh, cells_per_axis):
+    import numpy as np
+    import trimesh
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    bounds_min, bounds_max = vertices.min(axis=0), vertices.max(axis=0)
+    extents = np.maximum(bounds_max - bounds_min, 1e-12)
+    keys = np.floor((vertices - bounds_min) / extents * cells_per_axis).astype(np.int64)
+    keys = np.minimum(keys, cells_per_axis - 1)
+    _, inverse = np.unique(keys, axis=0, return_inverse=True)
+    counts = np.bincount(inverse)
+    clustered = np.column_stack([
+        np.bincount(inverse, weights=vertices[:, axis]) / counts for axis in range(3)
+    ])
+    remapped = inverse[faces]
+    distinct = ((remapped[:, 0] != remapped[:, 1]) &
+                (remapped[:, 1] != remapped[:, 2]) &
+                (remapped[:, 0] != remapped[:, 2]))
+    remapped = remapped[distinct]
+    if len(remapped) == 0:
+        raise GeometryError("decimation_failed", "Decimation уничтожила все треугольники.")
+    sorted_faces = np.sort(remapped, axis=1)
+    _, unique_indices = np.unique(sorted_faces, axis=0, return_index=True)
+    remapped = remapped[np.sort(unique_indices)]
+    clustered_min, clustered_max = clustered.min(axis=0), clustered.max(axis=0)
+    clustered_extent = clustered_max - clustered_min
+    if np.any(clustered_extent <= 1e-12):
+        raise GeometryError("decimation_failed", "Decimation выродила размер mesh.")
+    clustered = ((clustered - clustered_min) / clustered_extent) * extents + bounds_min
+    candidate = trimesh.Trimesh(clustered, remapped, process=False)
+    candidate.remove_unreferenced_vertices()
+    return candidate
+
+
+def _sampled_vertex_error(source, candidate, sample_limit=2000):
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    def sample(vertices):
+        if len(vertices) <= sample_limit:
+            return np.asarray(vertices)
+        indices = np.linspace(0, len(vertices) - 1, sample_limit, dtype=int)
+        return np.asarray(vertices)[indices]
+
+    source_vertices = sample(source.vertices)
+    candidate_vertices = sample(candidate.vertices)
+    forward = cKDTree(np.asarray(source.vertices)).query(candidate_vertices, k=1)[0]
+    backward = cKDTree(np.asarray(candidate.vertices)).query(source_vertices, k=1)[0]
+    distances = np.concatenate([forward, backward])
+    return {
+        "kind": "sampled_vertex_nearest_neighbor",
+        "samples": int(len(distances)),
+        "max": float(distances.max(initial=0)),
+        "mean": float(distances.mean()) if len(distances) else 0.0,
+        "global_hausdorff_guarantee": False,
+    }
+
+
+def _decimate_mesh(mesh, operation):
+    target_ratio = float(operation.get("target_ratio", 0.5))
+    minimum_ratio = float(operation.get("minimum_ratio", max(0.02, target_ratio - 0.08)))
+    maximum_ratio = float(operation.get("maximum_ratio", min(0.98, target_ratio + 0.08)))
+    volume_tolerance = float(operation.get("volume_tolerance", 0.05))
+    if not 0 < minimum_ratio <= target_ratio <= maximum_ratio < 1:
+        raise GeometryError("bad_params", "Decimation ratios должны удовлетворять 0 < min ≤ target ≤ max < 1.")
+    if not 0 <= volume_tolerance <= 0.5:
+        raise GeometryError("bad_params", "Volume tolerance должна быть в диапазоне 0…0.5.")
+    source_triangles = len(mesh.faces)
+    if source_triangles < 20:
+        raise GeometryError("decimation_failed", "Для decimation требуется не менее 20 треугольников.")
+    source_diagnostics = _mesh_diagnostics(mesh)
+    source_volume = abs(float(mesh.volume)) if mesh.is_watertight else None
+    candidates = []
+    for cells in range(4, 129):
+        candidate = _cluster_mesh(mesh, cells)
+        ratio = len(candidate.faces) / source_triangles
+        if ratio < minimum_ratio * 0.75 or ratio > maximum_ratio * 1.25:
+            continue
+        diagnostics = _mesh_diagnostics(candidate)
+        if diagnostics["components"] != source_diagnostics["components"]:
+            continue
+        if diagnostics["euler_number"] != source_diagnostics["euler_number"]:
+            continue
+        if source_diagnostics["watertight"] and not diagnostics["watertight"]:
+            continue
+        volume_error = None
+        if source_volume and source_volume > 1e-12:
+            volume_error = abs(abs(float(candidate.volume)) - source_volume) / source_volume
+            if volume_error > volume_tolerance:
+                continue
+        candidates.append((abs(ratio - target_ratio), candidate, ratio, diagnostics, volume_error, cells))
+    in_range = [candidate for candidate in candidates if minimum_ratio <= candidate[2] <= maximum_ratio]
+    if not in_range:
+        raise GeometryError(
+            "decimation_failed",
+            "Не удалось уменьшить mesh в заявленный диапазон без изменения компонент или топологии.")
+    _, result, ratio, diagnostics, volume_error, cells = min(in_range, key=lambda item: item[0])
+    return result, {
+        "algorithm": "topology_checked_vertex_clustering-v1",
+        "source_triangles": source_triangles,
+        "result_triangles": int(len(result.faces)),
+        "target_ratio": target_ratio,
+        "accepted_ratio_range": [minimum_ratio, maximum_ratio],
+        "actual_ratio": ratio,
+        "cells_per_axis": cells,
+        "volume_relative_error": volume_error,
+        "topology_preserved": True,
+        "components": diagnostics["components"],
+        "euler_number": diagnostics["euler_number"],
+        "shape_error": _sampled_vertex_error(mesh, result),
+    }
+
+
+def _build_mesh_workflow(params):
+    operations = params.get("operations") or []
+    if params.get("parts"):
+        raise GeometryError("mesh_mode_mixed", "Mesh workflow нельзя смешивать с параметрическими BRep-деталями.")
+    if not operations or operations[0].get("op") not in {"mesh_source", "image_relief_source"}:
+        raise GeometryError("mesh_source_missing", "Mesh workflow должен начинаться с embedded source.")
+    source_kind = operations[0].get("op")
+    if source_kind == "mesh_source":
+        mesh, source_metadata = _load_embedded_mesh(operations[0])
+    else:
+        mesh, source_metadata = _image_relief_mesh(operations[0])
+    history = [{"op": source_kind, **source_metadata,
+                "diagnostics": _mesh_diagnostics(mesh)}]
+    for operation in operations[1:]:
+        kind = operation.get("op")
+        if kind == "mesh_transform":
+            import numpy as np
+            import trimesh
+            translate = operation.get("translate") or [0, 0, 0]
+            rotate = operation.get("rotate_deg") or [0, 0, 0]
+            scale = operation.get("scale", 1.0)
+            if len(translate) != 3 or len(rotate) != 3:
+                raise GeometryError("bad_params", "Mesh transform требует translate/rotate_deg XYZ.")
+            scale_values = ([float(scale)] * 3 if isinstance(scale, (int, float))
+                            else [float(value) for value in scale])
+            if len(scale_values) != 3 or any(not math.isfinite(value) or value <= 0 for value in scale_values):
+                raise GeometryError("bad_params", "Mesh scale должен содержать положительные значения.")
+            matrix = trimesh.transformations.euler_matrix(
+                *[math.radians(float(value)) for value in rotate], axes="sxyz")
+            matrix[:3, :3] = matrix[:3, :3] @ np.diag(scale_values)
+            matrix[:3, 3] = [float(value) for value in translate]
+            mesh.apply_transform(matrix)
+            history.append({"op": kind, "translate": translate, "rotate_deg": rotate,
+                            "scale": scale_values})
+        elif kind == "mesh_repair":
+            import trimesh
+            action = operation.get("action", "fill_holes")
+            if action != "fill_holes":
+                raise GeometryError("bad_params", f"Неподдерживаемый mesh repair: {action}.")
+            before = _mesh_diagnostics(mesh)
+            repaired = mesh.copy()
+            filled = bool(trimesh.repair.fill_holes(repaired))
+            trimesh.repair.fix_normals(repaired, multibody=True)
+            repaired.remove_unreferenced_vertices()
+            after = _mesh_diagnostics(repaired)
+            if not filled or after["boundary_edges"] >= before["boundary_edges"]:
+                raise GeometryError("mesh_repair_no_change", "Не найден поддерживаемый треугольный/четырёхугольный дефект для закрытия.")
+            mesh = repaired
+            history.append({"op": kind, "action": action, "before": before, "after": after})
+        elif kind == "mesh_decimate":
+            mesh, decimation = _decimate_mesh(mesh, operation)
+            history.append({"op": kind, **decimation})
+        else:
+            raise GeometryError("unknown_mesh_op", f"Неизвестная mesh operation: {kind}.")
+    diagnostics = _mesh_diagnostics(mesh)
+    bounds = mesh.bounds
+    stats = {
+        "volume": float(abs(mesh.volume)) if mesh.is_watertight else None,
+        "solid_count": diagnostics["components"],
+        "face_count": int(len(mesh.faces)),
+        "bbox": [float(value) for value in [*bounds[0], *bounds[1]]],
+        "bbox_mesh": [float(value) for value in mesh.bounding_box.extents],
+        "is_valid": bool(mesh.is_watertight and mesh.is_winding_consistent),
+        "triangle_count": int(len(mesh.faces)),
+        "mesh_mode": True,
+        "mesh_diagnostics": diagnostics,
+        "mesh_history": history,
+        "parts": [{
+            "part_id": "mesh-1",
+            "name": "Декоративный mesh" if source_kind == "image_relief_source" else "Mesh",
+            "volume": (
+                float(abs(mesh.volume)) if mesh.is_watertight else None),
+            "solid_count": diagnostics["components"],
+            "metadata": {"mode": "mesh", "source_sha256": source_metadata["source_sha256"]},
+        }],
+    }
+    return mesh, stats
+
+
+def _is_mesh_workflow(params):
+    operations = params.get("operations") or []
+    return bool(operations and operations[0].get("op") in {
+        "mesh_source", "image_relief_source"})
+
+
+def _export_trimesh_3mf(mesh, path):
+    import xml.etree.ElementTree as element_tree
+    import zipfile
+
+    namespace = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+    element_tree.register_namespace("", namespace)
+    model = element_tree.Element(f"{{{namespace}}}model", {
+        "unit": "millimeter", "xml:lang": "en-US",
+    })
+    resources = element_tree.SubElement(model, f"{{{namespace}}}resources")
+    object_node = element_tree.SubElement(resources, f"{{{namespace}}}object", {
+        "id": "1", "type": "model", "name": "PrintForge mesh",
+    })
+    mesh_node = element_tree.SubElement(object_node, f"{{{namespace}}}mesh")
+    vertices_node = element_tree.SubElement(mesh_node, f"{{{namespace}}}vertices")
+    for vertex in mesh.vertices:
+        element_tree.SubElement(vertices_node, f"{{{namespace}}}vertex", {
+            "x": format(float(vertex[0]), ".9g"),
+            "y": format(float(vertex[1]), ".9g"),
+            "z": format(float(vertex[2]), ".9g"),
+        })
+    triangles_node = element_tree.SubElement(mesh_node, f"{{{namespace}}}triangles")
+    for triangle in mesh.faces:
+        element_tree.SubElement(triangles_node, f"{{{namespace}}}triangle", {
+            "v1": str(int(triangle[0])), "v2": str(int(triangle[1])),
+            "v3": str(int(triangle[2])),
+        })
+    build = element_tree.SubElement(model, f"{{{namespace}}}build")
+    element_tree.SubElement(build, f"{{{namespace}}}item", {"objectid": "1"})
+    model_bytes = element_tree.tostring(model, encoding="utf-8", xml_declaration=True)
+    content_types = b'''<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/3D/3dmodel.model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+</Types>'''
+    relationships = b'''<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>'''
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", relationships)
+        archive.writestr("3D/3dmodel.model", model_bytes)
+
+
 def stats_of(part, extra=None, with_edges=True):
     bb = part.bounding_box()
     st = {
@@ -386,17 +837,19 @@ def _face_profile_prism(profile, depth):
             radius=inner / 2, height=depth + 0.02, align=alignment)
         return outer_shape - inner_shape
     if kind == "slot":
+        from build123d import Rotation
         width = _positive_profile_value(profile, "width", "Ширина паза")
         length = _positive_profile_value(profile, "length", "Длина паза")
         if length <= width:
             raise GeometryError("bad_params", "Длина паза должна быть больше его ширины.")
         straight = length - width
         radius = width / 2
-        return (
+        slot = (
             Box(straight, width, depth, align=alignment)
             + Pos(-straight / 2, 0, 0) * Cylinder(radius=radius, height=depth, align=alignment)
             + Pos(straight / 2, 0, 0) * Cylinder(radius=radius, height=depth, align=alignment)
         )
+        return Rotation(0, 0, 90) * slot if profile.get("_quarter_turn") else slot
     raise GeometryError("bad_params", f"Неизвестный профиль: {kind}")
 
 
@@ -629,8 +1082,12 @@ def _flat_sheet_feature_data(operation, bend_axis):
         length = _positive_profile_value(profile, "length", "Длина паза")
         if length <= width:
             raise GeometryError("bad_params", "Длина паза должна быть больше его ширины.")
-        half_x = length / 2
-        half_y = width / 2
+        if profile.get("_quarter_turn"):
+            half_x = width / 2
+            half_y = length / 2
+        else:
+            half_x = length / 2
+            half_y = width / 2
     else:
         raise GeometryError(
             "bend_failed", "Профиль выреза не поддерживается переносом через изгиб.")
@@ -644,6 +1101,10 @@ def _flat_sheet_feature_data(operation, bend_axis):
         "developed_extent": half_x if bend_axis == "x" else half_y,
         "station_width": 2 * (half_y if bend_axis == "x" else half_x),
         "canonical_width": center_y if bend_axis == "x" else -center_x,
+        "slot_long_along_developed": (
+            kind == "slot" and
+            ((bend_axis == "x") != bool(profile.get("_quarter_turn")))
+        ),
     }
 
 
@@ -1082,7 +1543,7 @@ def _apply_sheet_bends(part_info, operations, flat_features=None):
                             return outer_tool - inner_tool
                     else:
                         profile_breaks = []
-                        if bend_axis == "x":
+                        if feature["slot_long_along_developed"]:
                             slot_length = 2 * feature["developed_extent"]
                             slot_width = feature["station_width"]
                             cap_radius = slot_width / 2
@@ -1203,11 +1664,1401 @@ def _apply_sheet_bends(part_info, operations, flat_features=None):
     return bent
 
 
+def _apply_perpendicular_flange_bend(
+        part_info, base_operation, flange_operation, flat_features=None):
+    from build123d import Align, Box, Plane
+
+    params = part_info["params"]
+    thickness = params["height"]
+    base_axis = base_operation.get("bend_axis")
+    flange_axis = flange_operation.get("bend_axis")
+    if base_axis not in ("x", "y") or flange_axis not in ("x", "y"):
+        raise GeometryError("bad_params", "Ось изгиба должна быть X или Y.")
+    if flange_axis == base_axis:
+        raise GeometryError(
+            "bend_failed",
+            "Изгиб выбранного фланца должен быть перпендикулярен базовой линии изгиба.")
+
+    try:
+        base_angle = float(base_operation["angle"])
+        base_radius = float(base_operation["inside_radius"])
+        base_position = float(base_operation.get("position", 0))
+        base_moving_side = int(base_operation.get("moving_side", 1))
+        base_direction = int(base_operation.get("direction", 1))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", "Параметры базового изгиба повреждены.") from exc
+    if abs(base_angle - 90) > 1e-7:
+        raise GeometryError(
+            "bend_failed",
+            "Перпендикулярный изгиб пока доступен только на фланце базового изгиба 90°.")
+    if base_moving_side not in (-1, 1) or base_direction not in (-1, 1):
+        raise GeometryError("bad_params", "Направление базового изгиба повреждено.")
+
+    face_ref = flange_operation.get("face_ref") or {}
+    if (face_ref.get("kind") != "outer_planar" or
+            face_ref.get("axis") != base_axis or
+            int(face_ref.get("side", 0)) != base_moving_side):
+        raise GeometryError(
+            "reselect_required",
+            "Выберите внешнюю плоскую грань фланца базового изгиба.")
+
+    developed_length = params["length"] if base_axis == "x" else params["width"]
+    flange_width = params["width"] if base_axis == "x" else params["length"]
+    base_delta = base_direction * math.radians(base_angle)
+    bend_allowance = (base_radius + thickness / 2) * abs(base_delta)
+    developed_center = base_position + developed_length / 2
+    zone_start = developed_center - bend_allowance / 2
+    zone_end = developed_center + bend_allowance / 2
+    path_radius = base_radius if base_direction > 0 else base_radius + thickness
+
+    def advance(point, tangent_angle, delta, radius):
+        absolute_delta = abs(delta)
+        local_x = radius * math.sin(absolute_delta)
+        local_z = math.copysign(radius * (1 - math.cos(absolute_delta)), delta)
+        cosine = math.cos(tangent_angle)
+        sine = math.sin(tangent_angle)
+        return (
+            point[0] + local_x * cosine - local_z * sine,
+            point[1] + local_x * sine + local_z * cosine,
+        )
+
+    initial_angle = -base_delta if base_moving_side < 0 else 0.0
+    line_start = (0.0, 0.0)
+    line_end = (
+        zone_start * math.cos(initial_angle),
+        zone_start * math.sin(initial_angle),
+    )
+    arc_end = advance(line_end, initial_angle, base_delta, path_radius)
+    final_angle = initial_angle + base_delta
+    final_point = (
+        arc_end[0] + (developed_length - zone_end) * math.cos(final_angle),
+        arc_end[1] + (developed_length - zone_end) * math.sin(final_angle),
+    )
+    if base_moving_side < 0:
+        anchor_developed = developed_length
+        anchor_point = final_point
+        root_point = line_end
+        root_tangent_2d = (-math.cos(initial_angle), -math.sin(initial_angle))
+        flange_depth = zone_start
+    else:
+        anchor_developed = 0.0
+        anchor_point = line_start
+        root_point = arc_end
+        root_tangent_2d = (math.cos(final_angle), math.sin(final_angle))
+        flange_depth = developed_length - zone_end
+    if flange_depth <= 0.1:
+        raise GeometryError("bend_failed", "Фланец слишком короткий для второго изгиба.")
+
+    shift_x = -developed_length / 2 + anchor_developed - anchor_point[0]
+    shift_z = -anchor_point[1]
+    root_cross = root_point[0] + shift_x
+    root_z = thickness + root_point[1] + shift_z
+    if base_axis == "x":
+        root = (root_cross, 0.0, root_z)
+        tangent = (root_tangent_2d[0], 0.0, root_tangent_2d[1])
+        selected_normal = (float(base_moving_side), 0.0, 0.0)
+        perpendicular_axis = (0.0, 1.0, 0.0)
+    else:
+        root = (0.0, root_cross, root_z)
+        tangent = (0.0, root_tangent_2d[0], root_tangent_2d[1])
+        selected_normal = (0.0, float(base_moving_side), 0.0)
+        perpendicular_axis = (1.0, 0.0, 0.0)
+    thickness_axis = tuple(base_direction * value for value in selected_normal)
+    local_x_axis = (
+        tangent[1] * thickness_axis[2] - tangent[2] * thickness_axis[1],
+        tangent[2] * thickness_axis[0] - tangent[0] * thickness_axis[2],
+        tangent[0] * thickness_axis[1] - tangent[1] * thickness_axis[0],
+    )
+    local_axis_sign = round(sum(
+        local_x_axis[index] * perpendicular_axis[index] for index in range(3)))
+    if local_axis_sign not in (-1, 1):
+        raise GeometryError("bend_failed", "Не удалось определить локальные оси фланца.")
+
+    target_boundary = (zone_start if base_moving_side < 0 else zone_end) - developed_length / 2
+    flange_features = []
+    for operation in flat_features or []:
+        feature = _flat_sheet_feature_data(operation, base_axis)
+        feature_min = feature["developed_center"] - feature["developed_extent"]
+        feature_max = feature["developed_center"] + feature["developed_extent"]
+        if base_moving_side < 0:
+            on_target_flange = feature_max < target_boundary - 1e-7
+            touches_target_flange = feature_min < target_boundary + 1e-7
+        else:
+            on_target_flange = feature_min > target_boundary + 1e-7
+            touches_target_flange = feature_max > target_boundary - 1e-7
+        if on_target_flange:
+            flange_features.append(feature)
+        elif touches_target_flange:
+            raise GeometryError(
+                "bend_failed",
+                "Пользовательский вырез должен целиком лежать на прямом участке выбранного фланца.")
+
+    overlap = 1e-4
+    synthetic_depth = flange_depth + overlap
+    synthetic_params = {
+        "length": flange_width,
+        "width": synthetic_depth,
+        "height": thickness,
+        "hole_diameter": 0,
+        "hole_offset": 0,
+    }
+    synthetic_shape, _ = build_plate(synthetic_params)
+    try:
+        flange_position = local_axis_sign * float(flange_operation.get("position", 0))
+        flange_moving_side = local_axis_sign * int(flange_operation.get("moving_side", 1))
+        flange_direction = base_direction * int(flange_operation.get("direction", 1))
+    except (TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", "Параметры изгиба фланца повреждены.") from exc
+    synthetic_operation = {
+        **flange_operation,
+        "face_ref": {
+            "kind": "outer_planar",
+            "axis": "z",
+            "side": 1,
+            "anchor": [0, 0],
+            "selected_area": flange_width * synthetic_depth,
+        },
+        "bend_axis": "x",
+        "position": flange_position,
+        "moving_side": flange_moving_side,
+        "direction": flange_direction,
+    }
+
+    synthetic_features = []
+    synthetic_face_ref = {
+        "kind": "outer_planar", "axis": "z", "side": 1,
+        "anchor": [0, 0], "selected_area": flange_width * synthetic_depth,
+    }
+
+    def append_synthetic_feature(profile, center):
+        synthetic_features.append({
+            "op": "face_feature",
+            "mode": "cut",
+            "face_ref": synthetic_face_ref,
+            "profile": {**profile, "center": center},
+            "depth": "through",
+        })
+
+    hole_diameter = params.get("hole_diameter", 0)
+    if hole_diameter > 0:
+        hole_offset = params["hole_offset"]
+        original_x = params["length"] / 2 - hole_offset
+        original_y = params["width"] / 2 - hole_offset
+        for center_x, center_y in (
+                (-original_x, -original_y), (original_x, -original_y),
+                (-original_x, original_y), (original_x, original_y)):
+            base_coordinate = center_x if base_axis == "x" else center_y
+            base_developed = base_coordinate + developed_length / 2
+            on_target_flange = (
+                base_developed < zone_start if base_moving_side < 0
+                else base_developed > zone_end
+            )
+            if not on_target_flange:
+                continue
+            perpendicular_coordinate = center_y if base_axis == "x" else center_x
+            depth_from_root = (
+                zone_start - base_developed if base_moving_side < 0
+                else base_developed - zone_end
+            )
+            append_synthetic_feature(
+                {"kind": "circle", "diameter": hole_diameter},
+                [
+                    local_axis_sign * perpendicular_coordinate,
+                    depth_from_root - flange_depth / 2 + overlap / 2,
+                ],
+            )
+
+    for feature in flange_features:
+        base_developed = feature["developed_center"] + developed_length / 2
+        perpendicular_coordinate = (
+            feature["center_y"] if base_axis == "x" else feature["center_x"])
+        depth_from_root = (
+            zone_start - base_developed if base_moving_side < 0
+            else base_developed - zone_end
+        )
+        center = [
+            local_axis_sign * perpendicular_coordinate,
+            depth_from_root - flange_depth / 2 + overlap / 2,
+        ]
+        profile = dict(feature["profile"])
+        if feature["kind"] == "rectangle" and base_axis == "x":
+            profile["width"], profile["height"] = (
+                profile["height"], profile["width"])
+        if feature["kind"] == "slot" and base_axis == "x":
+            profile["_quarter_turn"] = True
+        append_synthetic_feature(profile, center)
+
+    for feature in synthetic_features:
+        synthetic_shape = _apply_face_feature(synthetic_shape, feature)
+    synthetic_info = {
+        "template": "plate_with_holes",
+        "params": synthetic_params,
+        "shape": synthetic_shape,
+    }
+
+    base_bent = _apply_sheet_bends(part_info, [base_operation], flat_features)
+    synthetic_bent = _apply_sheet_bends(
+        synthetic_info, [synthetic_operation], synthetic_features)
+    plane_origin = tuple(
+        root[index] + (flange_depth - overlap) / 2 * tangent[index]
+        for index in range(3)
+    )
+    transformed_flange = Plane(
+        origin=plane_origin,
+        x_dir=local_x_axis,
+        z_dir=thickness_axis,
+    ).location * synthetic_bent
+
+    cut_origin = tuple(
+        root[index] + flange_depth / 2 * tangent[index] +
+        thickness / 2 * thickness_axis[index]
+        for index in range(3)
+    )
+    cut_tool = Plane(
+        origin=cut_origin,
+        x_dir=local_x_axis,
+        z_dir=thickness_axis,
+    ).location * Box(
+        flange_width + 2, flange_depth, thickness + 2,
+        align=(Align.CENTER, Align.CENTER, Align.CENTER),
+    )
+    result = (base_bent - cut_tool) + transformed_flange
+    initial = part_info["shape"]
+    volume_tolerance = max(1e-3, initial.volume * 2e-6)
+    if (not result.is_valid or len(result.solids()) != len(initial.solids()) or
+            abs(result.volume - initial.volume) > volume_tolerance):
+        raise GeometryError(
+            "bend_failed",
+            "Изгиб фланца создаёт самопересечение или меняет объём. "
+            "Сместите линию или уменьшите угол и радиус.",
+            detail=(f"valid={result.is_valid}; solids={len(result.solids())}; "
+                    f"volume={result.volume:.6f}; expected={initial.volume:.6f}"))
+    return result
+
+
 def _rotate_about(shape, center, angle_deg):
     """Поворот вокруг оси Z через точку center."""
     from build123d import Pos, Rotation
     cx, cy, cz = center
     return Pos(cx, cy, cz) * Rotation(0, 0, angle_deg) * Pos(-cx, -cy, -cz) * shape
+
+
+def _finite_point(value, label):
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise GeometryError("bad_params", f"{label} должна содержать две координаты.")
+    try:
+        point = (float(value[0]), float(value[1]))
+    except (TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", f"{label} должна содержать числа.") from exc
+    if not all(math.isfinite(component) for component in point):
+        raise GeometryError("bad_params", f"{label} должна содержать конечные числа.")
+    return point
+
+
+def _sketch_plane(plane_name, origin=(0, 0, 0)):
+    from build123d import Plane
+    planes = {
+        "XY": ((1, 0, 0), (0, 0, 1)),
+        "XZ": ((1, 0, 0), (0, -1, 0)),
+        "YZ": ((0, 1, 0), (1, 0, 0)),
+    }
+    directions = planes.get(plane_name)
+    if directions is None:
+        raise GeometryError("bad_params", f"Неизвестная плоскость эскиза: {plane_name}")
+    return Plane(origin=origin, x_dir=directions[0], z_dir=directions[1])
+
+
+def _solve_constrained_sketch(sketch, drag=None, tolerance=1e-7):
+    """Solve a small 2D geometric constraint system without fixing free DOF."""
+    import numpy as np
+
+    entities = sketch.get("entities") or []
+    constraints = sketch.get("constraints") or []
+    if not entities:
+        raise GeometryError("bad_params", "Эскиз не содержит геометрических элементов.")
+    entity_by_id = {}
+    spans = {}
+    values = []
+    for entity in entities:
+        entity_id = entity.get("id")
+        kind = entity.get("type")
+        if not entity_id or entity_id in entity_by_id:
+            raise GeometryError("bad_params", "Каждый элемент эскиза должен иметь уникальный id.")
+        start = len(values)
+        if kind == "line":
+            points = [entity.get("start"), entity.get("end")]
+            if any(not isinstance(point, list) or len(point) != 2 for point in points):
+                raise GeometryError("bad_params", f"Линия {entity_id} должна иметь start/end [x, y].")
+            values.extend(float(value) for point_value in points for value in point_value)
+        elif kind == "circle":
+            center = entity.get("center")
+            radius = entity.get("radius")
+            if not isinstance(center, list) or len(center) != 2 or radius is None:
+                raise GeometryError("bad_params", f"Окружность {entity_id} должна иметь center и radius.")
+            values.extend([float(center[0]), float(center[1]), float(radius)])
+        else:
+            raise GeometryError("bad_params", f"Неподдерживаемый элемент эскиза: {kind}.")
+        spans[entity_id] = (start, len(values), kind)
+        entity_by_id[entity_id] = entity
+
+    initial = np.asarray(values, dtype=float)
+    if not np.isfinite(initial).all():
+        raise GeometryError("bad_params", "Координаты эскиза должны быть конечными числами.")
+
+    def point(vector, reference):
+        if not isinstance(reference, list) or len(reference) != 2:
+            raise GeometryError("bad_params", "Ссылка на точку должна иметь вид [entity_id, point].")
+        entity_id, point_name = reference
+        if entity_id not in spans:
+            raise GeometryError("bad_params", f"Элемент эскиза не найден: {entity_id}.")
+        start, _, kind = spans[entity_id]
+        offsets = {"start": 0, "end": 2} if kind == "line" else {"center": 0}
+        if point_name not in offsets:
+            raise GeometryError("bad_params", f"У элемента {entity_id} нет точки {point_name}.")
+        offset = start + offsets[point_name]
+        return vector[offset:offset + 2]
+
+    def line(vector, entity_id):
+        if entity_id not in spans or spans[entity_id][2] != "line":
+            raise GeometryError("bad_params", f"Линия эскиза не найдена: {entity_id}.")
+        start = spans[entity_id][0]
+        p0, p1 = vector[start:start + 2], vector[start + 2:start + 4]
+        delta = p1 - p0
+        length = float(np.linalg.norm(delta))
+        if length <= 1e-12:
+            raise GeometryError("sketch_degenerate", f"Линия {entity_id} имеет нулевую длину.")
+        return p0, p1, delta, length
+
+    def circle(vector, entity_id):
+        if entity_id not in spans or spans[entity_id][2] != "circle":
+            raise GeometryError("bad_params", f"Окружность эскиза не найдена: {entity_id}.")
+        start = spans[entity_id][0]
+        radius = float(vector[start + 2])
+        if radius <= 1e-12:
+            raise GeometryError("sketch_degenerate", f"Окружность {entity_id} имеет нулевой радиус.")
+        return vector[start:start + 2], radius
+
+    def constraint_residuals(vector):
+        residuals = []
+        for constraint in constraints:
+            kind = constraint.get("type")
+            if kind == "coincident":
+                residuals.extend(point(vector, constraint.get("a")) - point(vector, constraint.get("b")))
+            elif kind == "horizontal":
+                p0, p1, _, _ = line(vector, constraint.get("entity"))
+                residuals.append(p1[1] - p0[1])
+            elif kind == "vertical":
+                p0, p1, _, _ = line(vector, constraint.get("entity"))
+                residuals.append(p1[0] - p0[0])
+            elif kind in {"parallel", "perpendicular"}:
+                _, _, first, first_length = line(vector, constraint.get("a"))
+                _, _, second, second_length = line(vector, constraint.get("b"))
+                if kind == "parallel":
+                    residuals.append((first[0] * second[1] - first[1] * second[0]) /
+                                     (first_length * second_length))
+                else:
+                    residuals.append(float(np.dot(first, second)) / (first_length * second_length))
+            elif kind == "tangent":
+                p0, _, delta, length = line(vector, constraint.get("line"))
+                center, radius = circle(vector, constraint.get("circle"))
+                signed_distance = (delta[0] * (center[1] - p0[1]) -
+                                   delta[1] * (center[0] - p0[0])) / length
+                residuals.append(signed_distance - float(constraint.get("side", 1)) * radius)
+            elif kind == "equal":
+                first_id, second_id = constraint.get("a"), constraint.get("b")
+                first_kind = spans.get(first_id, (None, None, None))[2]
+                second_kind = spans.get(second_id, (None, None, None))[2]
+                if first_kind == second_kind == "line":
+                    residuals.append(line(vector, first_id)[3] - line(vector, second_id)[3])
+                elif first_kind == second_kind == "circle":
+                    residuals.append(circle(vector, first_id)[1] - circle(vector, second_id)[1])
+                else:
+                    raise GeometryError("bad_params", "Equal поддерживает две линии или две окружности.")
+            elif kind == "dimension":
+                dimension_kind = constraint.get("kind", "distance")
+                target = float(constraint.get("value"))
+                if dimension_kind in {"length", "radius"}:
+                    entity_id = constraint.get("entity")
+                    actual = (line(vector, entity_id)[3] if dimension_kind == "length"
+                              else circle(vector, entity_id)[1])
+                else:
+                    first = point(vector, constraint.get("a"))
+                    second = point(vector, constraint.get("b"))
+                    delta = second - first
+                    if dimension_kind == "distance":
+                        actual = float(np.linalg.norm(delta))
+                    elif dimension_kind == "distance_x":
+                        actual = float(delta[0])
+                    elif dimension_kind == "distance_y":
+                        actual = float(delta[1])
+                    else:
+                        raise GeometryError("bad_params", f"Неизвестный тип размера: {dimension_kind}.")
+                residuals.append(actual - target)
+            elif kind == "fix":
+                if constraint.get("point") is not None:
+                    actual = point(vector, constraint.get("point"))
+                    target = np.asarray(constraint.get("value", actual), dtype=float)
+                    if target.shape != (2,):
+                        raise GeometryError("bad_params", "Fix point требует value [x, y].")
+                    residuals.extend(actual - target)
+                else:
+                    entity_id = constraint.get("entity")
+                    if entity_id not in spans:
+                        raise GeometryError("bad_params", f"Элемент эскиза не найден: {entity_id}.")
+                    start, end, _ = spans[entity_id]
+                    target = np.asarray(constraint.get("value", initial[start:end]), dtype=float)
+                    if target.shape != (end - start,):
+                        raise GeometryError("bad_params", f"Fix {entity_id} имеет неверное число координат.")
+                    residuals.extend(vector[start:end] - target)
+            else:
+                raise GeometryError("bad_params", f"Неизвестное ограничение: {kind}.")
+        if drag:
+            actual = point(vector, drag.get("point"))
+            target = np.asarray(drag.get("value"), dtype=float)
+            if target.shape != (2,):
+                raise GeometryError("bad_params", "Drag требует value [x, y].")
+            residuals.extend(actual - target)
+        return np.asarray(residuals, dtype=float)
+
+    def jacobian(vector, residual):
+        matrix = np.empty((len(residual), len(vector)), dtype=float)
+        for column in range(len(vector)):
+            step = 1e-6 * max(1.0, abs(float(vector[column])))
+            shifted = vector.copy()
+            shifted[column] += step
+            matrix[:, column] = (constraint_residuals(shifted) - residual) / step
+        return matrix
+
+    if not constraints and not drag:
+        solved = initial.copy()
+        residual = np.empty(0)
+        matrix = np.empty((0, len(initial)))
+    else:
+        solved = initial.copy()
+        damping = 1e-8
+        for _ in range(80):
+            residual = constraint_residuals(solved)
+            matrix = jacobian(solved, residual)
+            if residual.size == 0 or float(np.max(np.abs(residual))) <= tolerance:
+                break
+            normal = matrix.T @ matrix + damping * np.eye(len(solved))
+            delta = np.linalg.solve(normal, -(matrix.T @ residual))
+            candidate = solved + delta
+            candidate_residual = constraint_residuals(candidate)
+            if np.linalg.norm(candidate_residual) < np.linalg.norm(residual):
+                solved = candidate
+                damping = max(damping / 4, 1e-12)
+            else:
+                damping = min(damping * 10, 1e8)
+        residual = constraint_residuals(solved)
+        matrix = jacobian(solved, residual)
+
+    max_residual = float(np.max(np.abs(residual))) if residual.size else 0.0
+    rank = int(np.linalg.matrix_rank(matrix, tol=1e-7)) if matrix.size else 0
+    degrees_of_freedom = max(0, len(solved) - rank)
+    if max_residual > tolerance * 10:
+        raise GeometryError(
+            "constraint_conflict",
+            f"Ограничения противоречат друг другу; максимальная невязка {max_residual:.6g}.",
+            detail={"max_residual": max_residual, "degrees_of_freedom": degrees_of_freedom})
+
+    solved_entities = []
+    for entity in entities:
+        start, _, kind = spans[entity["id"]]
+        if kind == "line":
+            solved_entities.append({**entity,
+                                    "start": solved[start:start + 2].tolist(),
+                                    "end": solved[start + 2:start + 4].tolist()})
+        else:
+            solved_entities.append({**entity,
+                                    "center": solved[start:start + 2].tolist(),
+                                    "radius": float(solved[start + 2])})
+    redundant = max(0, len(residual) - rank)
+    return {
+        "status": "fully_constrained" if degrees_of_freedom == 0 else "under_constrained",
+        "degrees_of_freedom": degrees_of_freedom,
+        "constraint_rank": rank,
+        "residual_count": int(len(residual)),
+        "redundant_constraints": redundant,
+        "max_residual": max_residual,
+        "entities": solved_entities,
+    }
+
+
+def _solved_sketch_profile(sketch, solution):
+    entity_by_id = {entity["id"]: entity for entity in solution["entities"]}
+    regions = sketch.get("regions") or []
+    if not regions:
+        line_ids = [entity["id"] for entity in solution["entities"] if entity["type"] == "line"]
+        circle_ids = [entity["id"] for entity in solution["entities"] if entity["type"] == "circle"]
+        if line_ids:
+            regions = [{"outer": line_ids, "holes": []}]
+        elif len(circle_ids) == 1:
+            circle_entity = entity_by_id[circle_ids[0]]
+            return {"regions": [{"outer": {"kind": "circle", "center": circle_entity["center"],
+                                              "radius": circle_entity["radius"]}, "holes": []}]}
+        else:
+            raise GeometryError("bad_params", "Для нескольких контуров задайте sketch.regions.")
+
+    def contour(entity_ids):
+        if isinstance(entity_ids, str):
+            entity = entity_by_id.get(entity_ids)
+            if not entity or entity["type"] != "circle":
+                raise GeometryError("bad_params", f"Контур не найден: {entity_ids}.")
+            return {"kind": "circle", "center": entity["center"], "radius": entity["radius"]}
+        segments = []
+        for entity_id in entity_ids:
+            entity = entity_by_id.get(entity_id)
+            if not entity or entity["type"] != "line":
+                raise GeometryError("bad_params", f"Линия контура не найдена: {entity_id}.")
+            segments.append({"type": "line", "start": entity["start"], "end": entity["end"]})
+        return {"kind": "segments", "segments": segments}
+
+    return {"regions": [{
+        "outer": contour(region.get("outer")),
+        "holes": [contour(hole) for hole in region.get("holes") or []],
+    } for region in regions]}
+
+
+def _sketch_point(point, plane_name, offset=0):
+    u, v = _finite_point(point, "Точка эскиза")
+    if plane_name == "XY":
+        return (u, v, offset)
+    if plane_name == "XZ":
+        return (u, offset, v)
+    if plane_name == "YZ":
+        return (offset, u, v)
+    raise GeometryError("bad_params", f"Неизвестная плоскость эскиза: {plane_name}")
+
+
+def _points_close(left, right, tolerance=1e-6):
+    return math.dist(left, right) <= tolerance
+
+
+def _sketch_wire(contour, plane_name="XY", offset=0):
+    from build123d import Edge, Wire
+    kind = contour.get("kind")
+    if kind == "polygon":
+        points = contour.get("points") or []
+        if len(points) < 3:
+            raise GeometryError("sketch_open", "Замкнутый контур должен содержать минимум три точки.")
+        world_points = [_sketch_point(point, plane_name, offset) for point in points]
+        if len(world_points) > 3 and _points_close(world_points[0], world_points[-1]):
+            world_points.pop()
+        if len(world_points) < 3:
+            raise GeometryError("sketch_degenerate", "Контур вырожден и не образует область.")
+        wire = Wire.make_polygon(world_points, close=True)
+    elif kind == "circle":
+        center = _finite_point(contour.get("center") or [0, 0], "Центр окружности")
+        radius = _positive_profile_value(contour, "radius", "Радиус окружности")
+        plane = _sketch_plane(plane_name, _sketch_point(center, plane_name, offset))
+        wire = Wire.make_circle(radius, plane)
+    elif kind == "segments":
+        segments = contour.get("segments") or []
+        if not segments:
+            raise GeometryError("sketch_open", "Контур не содержит линий или дуг.")
+        edges = []
+        first_start = None
+        previous_end = None
+        for index, segment in enumerate(segments):
+            start = _sketch_point(segment.get("start"), plane_name, offset)
+            end = _sketch_point(segment.get("end"), plane_name, offset)
+            if previous_end is not None and not _points_close(previous_end, start):
+                raise GeometryError(
+                    "sketch_open",
+                    f"Сегменты {index} и {index + 1} не соединены. Совместите их конечные точки.")
+            segment_kind = segment.get("type", "line")
+            if segment_kind == "line":
+                if _points_close(start, end):
+                    raise GeometryError("sketch_degenerate", "Линия эскиза имеет нулевую длину.")
+                edge = Edge.make_line(start, end)
+            elif segment_kind == "arc":
+                middle = _sketch_point(segment.get("mid"), plane_name, offset)
+                try:
+                    edge = Edge.make_three_point_arc(start, middle, end)
+                except Exception as exc:
+                    raise GeometryError(
+                        "sketch_degenerate", "Три точки дуги не должны лежать на одной прямой.") from exc
+            else:
+                raise GeometryError("bad_params", f"Неизвестный сегмент эскиза: {segment_kind}")
+            edges.append(edge)
+            first_start = first_start or start
+            previous_end = end
+        if not _points_close(previous_end, first_start):
+            raise GeometryError("sketch_open", "Последняя точка контура не соединена с первой.")
+        wire = Wire(edges, sequenced=True)
+    else:
+        raise GeometryError("bad_params", f"Неизвестный тип контура: {kind}")
+    if not wire.is_closed:
+        raise GeometryError("sketch_open", "Контур эскиза не замкнут.")
+    return wire
+
+
+def _sketch_faces(profile, plane_name="XY", offset=0):
+    from build123d import Face
+    regions = profile.get("regions") or []
+    if not regions:
+        raise GeometryError("bad_params", "Эскиз должен содержать хотя бы одну замкнутую область.")
+    if len(regions) > 20:
+        raise GeometryError("bad_params", "Эскиз поддерживает не более 20 отдельных областей.")
+    faces = []
+    for region in regions:
+        outer = _sketch_wire(region.get("outer") or {}, plane_name, offset)
+        holes = [
+            _sketch_wire(contour, plane_name, offset)
+            for contour in (region.get("holes") or [])
+        ]
+        try:
+            face = Face(outer, holes)
+        except Exception as exc:
+            raise GeometryError(
+                "sketch_invalid", "Контуры не образуют корректную область эскиза.") from exc
+        if not face.is_valid or face.area <= 1e-8:
+            raise GeometryError(
+                "sketch_invalid",
+                "Эскиз самопересекается, вырожден или содержит некорректное отверстие.")
+        faces.append(face)
+    return faces
+
+
+def _validated_generated_shape(shape, operation_name):
+    if shape is None or not shape.is_valid or not shape.solids() or shape.volume <= 1e-8:
+        raise GeometryError(
+            "extended_operation_failed",
+            f"Операция «{operation_name}» не создала корректное объёмное тело.")
+    return shape
+
+
+def _generated_part(parts, operation, shape, default_id, default_name, metadata=None):
+    from build123d import Compound
+    result_id = operation.get("result_id") or default_id
+    if result_id in parts:
+        raise GeometryError("bad_params", f"Идентификатор результата уже существует: {result_id}")
+    solids = shape.solids()
+    stored_shape = shape if len(solids) == 1 else Compound(children=solids)
+    parts[result_id] = {
+        "shape": stored_shape,
+        "name": operation.get("name") or default_name,
+        "template": "generated",
+        "params": {},
+    }
+    if metadata:
+        parts[result_id]["metadata"] = metadata
+
+
+def _apply_sketch_extrude(parts, operation, operation_index):
+    from build123d import Compound, extrude
+    depth = _positive_profile_value(operation, "depth", "Глубина выдавливания")
+    plane_name = operation.get("plane", "XY")
+    faces = _sketch_faces(operation.get("profile") or {}, plane_name)
+    solids = [extrude(face, amount=depth) for face in faces]
+    shape = solids[0] if len(solids) == 1 else Compound(children=solids)
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Выдавливание эскиза"),
+        f"part-sketch-{operation_index + 1}", "Эскиз",
+    )
+
+
+def _apply_constrained_sketch_extrude(parts, operation, operation_index):
+    from build123d import Compound, extrude
+    depth = _positive_profile_value(operation, "depth", "Глубина выдавливания")
+    solution = _solve_constrained_sketch(
+        operation.get("sketch") or {}, operation.get("drag"))
+    profile = _solved_sketch_profile(operation.get("sketch") or {}, solution)
+    faces = _sketch_faces(profile, operation.get("plane", "XY"))
+    solids = [extrude(face, amount=depth) for face in faces]
+    shape = solids[0] if len(solids) == 1 else Compound(children=solids)
+    metadata = {
+        "solver_status": solution["status"],
+        "degrees_of_freedom": solution["degrees_of_freedom"],
+        "constraint_rank": solution["constraint_rank"],
+        "redundant_constraints": solution["redundant_constraints"],
+        "max_residual": solution["max_residual"],
+        "solved_entities": solution["entities"],
+    }
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Ограниченный эскиз"),
+        f"part-constrained-sketch-{operation_index + 1}",
+        "Ограниченный эскиз", metadata,
+    )
+
+
+def _apply_revolve(parts, operation, operation_index):
+    from build123d import Axis, Compound, revolve
+    angle = _positive_profile_value(operation, "angle", "Угол вращения")
+    if angle > 360:
+        raise GeometryError("bad_params", "Угол вращения не должен превышать 360°.")
+    axis = operation.get("axis") or {}
+    point = axis.get("point") or [0, 0, 0]
+    direction = axis.get("direction") or [0, 0, 1]
+    if len(point) != 3 or len(direction) != 3:
+        raise GeometryError("bad_params", "Ось вращения должна содержать точку и направление XYZ.")
+    try:
+        values = [float(value) for value in [*point, *direction]]
+    except (TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", "Ось вращения должна содержать числа.") from exc
+    if not all(math.isfinite(value) for value in values) or math.dist((0, 0, 0), values[3:]) <= 1e-9:
+        raise GeometryError("bad_params", "Направление оси вращения не должно быть нулевым.")
+    faces = _sketch_faces(
+        operation.get("profile") or {}, operation.get("plane", "XZ"))
+    try:
+        solids = [
+            revolve(face, axis=Axis(values[:3], values[3:]), revolution_arc=angle)
+            for face in faces
+        ]
+    except Exception as exc:
+        raise GeometryError(
+            "revolve_failed",
+            "Профиль пересекает ось или создаёт самопересечение. Измените профиль или ось.") from exc
+    shape = solids[0] if len(solids) == 1 else Compound(children=solids)
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Вращение"),
+        f"part-revolve-{operation_index + 1}", "Тело вращения",
+    )
+
+
+def _path_wire(path):
+    from build123d import Wire
+    points = path.get("points") or []
+    if len(points) < 2:
+        raise GeometryError("bad_params", "Траектория должна содержать минимум две точки XYZ.")
+    try:
+        world_points = [tuple(float(value) for value in point) for point in points]
+    except (TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", "Координаты траектории должны быть числами.") from exc
+    if any(len(point) != 3 or not all(math.isfinite(value) for value in point)
+           for point in world_points):
+        raise GeometryError("bad_params", "Каждая точка траектории должна содержать три конечных числа.")
+    if any(_points_close(world_points[index - 1], world_points[index])
+           for index in range(1, len(world_points))):
+        raise GeometryError("bad_params", "Соседние точки траектории не должны совпадать.")
+    return Wire.make_polygon(world_points, close=False), world_points
+
+
+def _apply_sweep(parts, operation, operation_index):
+    from build123d import Face, Plane, Wire, sweep
+    path, points = _path_wire(operation.get("path") or {})
+    section = operation.get("section") or {}
+    if section.get("kind") != "circle":
+        raise GeometryError("bad_params", "Первый slice sweep поддерживает круглое сечение.")
+    radius = _positive_profile_value(section, "radius", "Радиус sweep-сечения")
+    tangent = tuple(points[1][index] - points[0][index] for index in range(3))
+    section_plane = Plane(origin=points[0], z_dir=tangent)
+    section_face = Face(Wire.make_circle(radius, section_plane))
+    try:
+        shape = sweep(section_face, path, is_frenet=bool(operation.get("frenet", False)))
+    except Exception as exc:
+        raise GeometryError(
+            "sweep_failed",
+            "Sweep создаёт самопересечение или некорректную ориентацию сечения.") from exc
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Sweep"),
+        f"part-sweep-{operation_index + 1}", "Sweep",
+    )
+
+
+def _apply_loft(parts, operation, operation_index):
+    from build123d import loft
+    sections = operation.get("sections") or []
+    if len(sections) < 2:
+        raise GeometryError("bad_params", "Loft требует минимум два сечения.")
+    faces = []
+    for section in sections:
+        offset = float(section.get("offset", 0))
+        if not math.isfinite(offset):
+            raise GeometryError("bad_params", "Смещение loft-сечения должно быть конечным числом.")
+        section_faces = _sketch_faces(
+            section.get("profile") or {}, section.get("plane", "XY"), offset)
+        if len(section_faces) != 1:
+            raise GeometryError("bad_params", "Каждое loft-сечение должно содержать одну область.")
+        faces.append(section_faces[0])
+    try:
+        shape = loft(faces, ruled=bool(operation.get("ruled", True)))
+    except Exception as exc:
+        raise GeometryError(
+            "loft_failed", "Loft не построен. Проверьте порядок и совместимость сечений.") from exc
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Loft"),
+        f"part-loft-{operation_index + 1}", "Loft",
+    )
+
+
+def _apply_shell(parts, operation, operation_index):
+    from build123d import Cylinder, Pos
+    outer_radius = _positive_profile_value(operation, "outer_radius", "Наружный радиус")
+    height = _positive_profile_value(operation, "height", "Высота оболочки")
+    wall = _positive_profile_value(operation, "wall", "Толщина стенки")
+    bottom = _positive_profile_value(operation, "bottom", "Толщина дна")
+    if wall >= outer_radius:
+        raise GeometryError("bad_params", "Толщина стенки должна быть меньше наружного радиуса.")
+    if bottom >= height:
+        raise GeometryError("bad_params", "Толщина дна должна быть меньше высоты оболочки.")
+    shape = Pos(0, 0, height / 2) * Cylinder(outer_radius, height)
+    cavity_height = height - bottom
+    cavity = Pos(0, 0, bottom + cavity_height / 2) * Cylinder(
+        outer_radius - wall, cavity_height)
+    shape -= cavity
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Оболочка"),
+        f"part-shell-{operation_index + 1}", "Оболочка",
+    )
+
+
+def _apply_draft_prism(parts, operation, operation_index):
+    from build123d import Face, Wire, loft
+    width = _positive_profile_value(operation, "width", "Ширина основания")
+    depth = _positive_profile_value(operation, "depth", "Глубина основания")
+    height = _positive_profile_value(operation, "height", "Высота тела")
+    try:
+        angle = float(operation.get("angle", 0))
+    except (TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", "Угол уклона должен быть числом.") from exc
+    if not math.isfinite(angle) or abs(angle) >= 89:
+        raise GeometryError("bad_params", "Модуль угла уклона должен быть меньше 89°.")
+    inset = height * math.tan(math.radians(angle))
+    top_width = width - 2 * inset
+    top_depth = depth - 2 * inset
+    if min(top_width, top_depth) <= 1e-6:
+        raise GeometryError(
+            "bad_params", "Уклон сводит верхнее сечение в ноль. Уменьшите угол или высоту.")
+
+    def rectangle_face(face_width, face_depth, z):
+        return Face(Wire.make_polygon([
+            (-face_width / 2, -face_depth / 2, z),
+            (face_width / 2, -face_depth / 2, z),
+            (face_width / 2, face_depth / 2, z),
+            (-face_width / 2, face_depth / 2, z),
+        ], close=True))
+
+    shape = loft([
+        rectangle_face(width, depth, 0),
+        rectangle_face(top_width, top_depth, height),
+    ], ruled=True)
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Тело с уклоном"),
+        f"part-draft-{operation_index + 1}", "Тело с уклоном",
+    )
+
+
+def _apply_rib(parts, operation, operation_index):
+    from build123d import Box, Face, Pos, Wire, extrude
+    base_length = _positive_profile_value(operation, "base_length", "Длина основания")
+    base_width = _positive_profile_value(operation, "base_width", "Ширина основания")
+    base_thickness = _positive_profile_value(operation, "base_thickness", "Толщина основания")
+    rib_length = _positive_profile_value(operation, "rib_length", "Длина ребра")
+    rib_height = _positive_profile_value(operation, "rib_height", "Высота ребра")
+    rib_width = _positive_profile_value(operation, "rib_width", "Толщина ребра")
+    overlap = _positive_profile_value(operation, "overlap", "Заглубление ребра")
+    if rib_length > base_length / 2 or rib_width > base_width:
+        raise GeometryError("bad_params", "Ребро выходит за границы основания.")
+    if overlap >= base_thickness:
+        raise GeometryError("bad_params", "Заглубление ребра должно быть меньше толщины основания.")
+    base = Pos(0, 0, base_thickness / 2) * Box(base_length, base_width, base_thickness)
+    rib_face = Face(Wire.make_polygon([
+        (0, -rib_width / 2, base_thickness - overlap),
+        (rib_length, -rib_width / 2, base_thickness - overlap),
+        (0, -rib_width / 2, base_thickness + rib_height),
+    ], close=True))
+    rib = extrude(rib_face, amount=rib_width, dir=(0, 1, 0))
+    shape = base + rib
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Ребро жёсткости"),
+        f"part-rib-{operation_index + 1}", "Ребро жёсткости",
+    )
+
+
+FIT_FIXTURES = {
+    "nut_m5": {
+        "version": "1", "kind": "hex", "nominal_size": 8.0, "depth": 4.0,
+        "label": "Гайка M5, карман 8 × 4 мм",
+    },
+    "bearing_608": {
+        "version": "1", "kind": "circle", "nominal_size": 22.0, "depth": 7.0,
+        "label": "Подшипник 608, карман Ø22 × 7 мм",
+    },
+    "heat_insert_m3": {
+        "version": "1", "kind": "stepped", "nominal_size": 4.6,
+        "pilot_size": 4.0, "depth": 5.0,
+        "label": "Термовставка M3, Ø4.6 × 5 мм, пилот Ø4 мм",
+    },
+}
+
+VECTOR_SOURCE_LIMIT = 1_000_000
+DXF_UNIT_TO_MM = {
+    1: 25.4, 2: 304.8, 4: 1.0, 5: 10.0, 6: 1000.0,
+    7: 1_000_000.0, 8: 0.0000254, 9: 0.0254, 10: 914.4,
+    11: 1e-7, 12: 1e-6, 13: 0.001, 14: 100.0,
+}
+TEXT_FONT_VERSION = "JetBrains Mono 2.211"
+TEXT_FONT_SHA256 = "48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda"
+THREAD_PROFILE_VERSION = "metric-60-v1"
+
+
+def _source_text(operation):
+    source = operation.get("source_text")
+    if not isinstance(source, str) or not source.strip():
+        raise GeometryError("bad_params", "Векторный источник пуст.")
+    if len(source.encode("utf-8")) > VECTOR_SOURCE_LIMIT:
+        raise GeometryError("bad_params", "Векторный источник превышает лимит 1 МБ.")
+    return source
+
+
+def _validate_svg(source):
+    from xml.etree import ElementTree
+    lowered = source.lower()
+    if "<!doctype" in lowered or "<!entity" in lowered or "url(" in lowered or "@import" in lowered:
+        raise GeometryError("vector_unsafe", "SVG содержит запрещённую внешнюю или entity-ссылку.")
+    try:
+        root = ElementTree.fromstring(source)
+    except ElementTree.ParseError as exc:
+        raise GeometryError("vector_invalid", "SVG не является корректным XML.") from exc
+    forbidden = {"script", "image", "foreignobject"}
+    for element in root.iter():
+        tag = element.tag.rsplit("}", 1)[-1].lower()
+        if tag in forbidden:
+            raise GeometryError("vector_unsafe", f"SVG-элемент {tag} не поддерживается.")
+        for name, value in element.attrib.items():
+            local_name = name.rsplit("}", 1)[-1].lower()
+            if local_name == "href" and value and not value.startswith("#"):
+                raise GeometryError("vector_unsafe", "SVG не должен загружать внешние ресурсы.")
+
+
+def _vector_faces(shapes):
+    from build123d import Face, Wire
+    faces = [shape for shape in shapes if isinstance(shape, Face)]
+    wires = [shape for shape in shapes if isinstance(shape, Wire)]
+    if len(faces) + len(wires) != len(shapes):
+        raise GeometryError("vector_unsupported", "Источник содержит неподдерживаемую векторную сущность.")
+    if any(not wire.is_closed for wire in wires):
+        raise GeometryError("vector_open", "Векторный контур не замкнут.")
+    if wires:
+        candidates = [{"wire": wire, "face": Face(wire), "parent": None} for wire in wires]
+        candidates.sort(key=lambda item: item["face"].area, reverse=True)
+        for index, item in enumerate(candidates):
+            point = item["wire"].center()
+            parents = [
+                (parent_index, parent)
+                for parent_index, parent in enumerate(candidates[:index])
+                if parent["face"].is_inside(point)
+            ]
+            if parents:
+                item["parent"] = min(parents, key=lambda entry: entry[1]["face"].area)[0]
+
+        def depth(index):
+            value = 0
+            parent = candidates[index]["parent"]
+            while parent is not None:
+                value += 1
+                parent = candidates[parent]["parent"]
+            return value
+
+        for index, item in enumerate(candidates):
+            if depth(index) % 2:
+                continue
+            holes = [
+                child["wire"] for child_index, child in enumerate(candidates)
+                if child["parent"] == index and depth(child_index) % 2 == 1
+            ]
+            faces.append(Face(item["wire"], holes))
+    if not faces or any(not face.is_valid or face.area <= 1e-8 for face in faces):
+        raise GeometryError("vector_invalid", "Векторные контуры не образуют корректную область.")
+    return faces
+
+
+def _apply_vector_extrude(parts, operation, operation_index):
+    from io import StringIO
+    from build123d import Compound, import_dxf, import_svg, extrude
+    source = _source_text(operation)
+    vector_format = str(operation.get("format", "")).lower()
+    if vector_format == "svg":
+        _validate_svg(source)
+        try:
+            shapes = list(import_svg(StringIO(source), flip_y=False))
+        except Exception as exc:
+            raise GeometryError("vector_invalid", "SVG не удалось преобразовать в контуры.") from exc
+    elif vector_format == "dxf":
+        import ezdxf
+        try:
+            document = ezdxf.read(StringIO(source))
+        except Exception as exc:
+            raise GeometryError("vector_invalid", "DXF не удалось прочитать.") from exc
+        allowed_entities = {"LWPOLYLINE", "POLYLINE", "LINE", "ARC", "CIRCLE", "ELLIPSE", "SPLINE"}
+        unsupported = sorted({entity.dxftype() for entity in document.modelspace()} - allowed_entities)
+        if unsupported:
+            raise GeometryError(
+                "vector_unsupported", f"DXF содержит неподдерживаемые сущности: {', '.join(unsupported)}")
+        unit_code = int(document.header.get("$INSUNITS", 0))
+        if unit_code == 0:
+            try:
+                unit_scale = float(operation["unit_scale"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise GeometryError(
+                    "vector_units_required", "DXF без единиц требует явный масштаб в миллиметрах.") from exc
+        else:
+            unit_scale = DXF_UNIT_TO_MM.get(unit_code)
+            if unit_scale is None:
+                raise GeometryError("vector_units_required", f"Единицы DXF с кодом {unit_code} не поддерживаются.")
+        try:
+            shapes = [shape.scale(unit_scale) for shape in import_dxf(StringIO(source))]
+        except Exception as exc:
+            raise GeometryError("vector_invalid", "DXF не удалось преобразовать в контуры.") from exc
+    else:
+        raise GeometryError("bad_params", "Векторный формат должен быть svg или dxf.")
+    height = _positive_profile_value(operation, "height", "Высота векторного выдавливания")
+    faces = _vector_faces(shapes)
+    solids = [extrude(face, amount=height) for face in faces]
+    shape = solids[0] if len(solids) == 1 else Compound(children=solids)
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Векторное выдавливание"),
+        f"part-vector-{operation_index + 1}", "Векторное тело",
+        {"format": vector_format, "embedded_source": True},
+    )
+
+
+def _text_font_path():
+    bundled = Path(getattr(sys, "_MEIPASS", "")) / "assets" / "jetbrainsmono.ttf"
+    development = (
+        Path(__file__).resolve().parent.parent / "design-sources" / "impeccable" /
+        "ui" / "component-review" / "fonts" / "jetbrainsmono.ttf")
+    path = bundled if bundled.is_file() else development
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != TEXT_FONT_SHA256:
+        raise GeometryError("font_missing", "Фиксированный шрифт JetBrains Mono 2.211 отсутствует или изменён.")
+    return path
+
+
+def _apply_text_relief(parts, operation, operation_index):
+    from build123d import Box, Pos, Text, extrude
+    text = operation.get("text")
+    if not isinstance(text, str) or not text or len(text) > 80 or "\n" in text:
+        raise GeometryError("bad_params", "Текст должен содержать от 1 до 80 символов в одной строке.")
+    font_size = _positive_profile_value(operation, "font_size", "Размер текста")
+    relief_height = _positive_profile_value(operation, "relief_height", "Высота рельефа")
+    body_length = _positive_profile_value(operation, "body_length", "Длина основания")
+    body_width = _positive_profile_value(operation, "body_width", "Ширина основания")
+    body_height = _positive_profile_value(operation, "body_height", "Толщина основания")
+    mode = operation.get("mode", "add")
+    if mode not in {"add", "cut"}:
+        raise GeometryError("bad_params", "Режим текста должен быть add или cut.")
+    if mode == "cut" and relief_height >= body_height:
+        raise GeometryError("bad_params", "Глубина гравировки должна оставлять дно основания.")
+    try:
+        sketch = Text(text, font_size, font_path=_text_font_path()).fix()
+    except Exception as exc:
+        raise GeometryError("font_glyph_missing", "Шрифт не содержит один из символов текста.") from exc
+    text_box = sketch.bounding_box().size
+    if text_box.X >= body_length or text_box.Y >= body_width:
+        raise GeometryError("bad_params", "Текст не помещается на основании.")
+    base = Pos(0, 0, body_height / 2) * Box(body_length, body_width, body_height)
+    tool_z = body_height if mode == "add" else body_height - relief_height
+    tool = extrude(Pos(0, 0, tool_z) * sketch, amount=relief_height)
+    shape = base + tool if mode == "add" else base - tool
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Текстовый рельеф"),
+        f"part-text-{operation_index + 1}", "Текстовый рельеф",
+        {
+            "font": TEXT_FONT_VERSION, "font_sha256": TEXT_FONT_SHA256,
+            "text": text, "mode": mode,
+        },
+    )
+
+
+def _threaded_external_shape(major_diameter, pitch, length, left_hand=False):
+    from build123d import Cylinder, Face, Helix, Pos, Wire, sweep
+    depth = 0.61343 * pitch
+    core_radius = major_diameter / 2 - depth
+    if core_radius <= 0:
+        raise GeometryError("bad_params", "Диаметр слишком мал для заданного шага резьбы.")
+    path_radius = (core_radius + major_diameter / 2) / 2
+    half_width = depth * math.tan(math.radians(30))
+    overlap = min(0.03, depth * 0.05)
+    profile = Face(Wire.make_polygon([
+        (core_radius - overlap, 0, -half_width),
+        (major_diameter / 2, 0, 0),
+        (core_radius - overlap, 0, half_width),
+    ], close=True))
+    helix = Helix(
+        pitch=pitch, height=length, radius=path_radius, lefthand=left_hand)
+    tooth = sweep(profile, helix, is_frenet=True)
+    envelope = Pos(0, 0, length / 2) * Cylinder(major_diameter / 2, length)
+    core = Pos(0, 0, length / 2) * Cylinder(core_radius, length)
+    return _validated_generated_shape(core + (tooth & envelope), "Винтовая резьба"), core_radius
+
+
+def _apply_thread_pair(parts, operation, operation_index):
+    from build123d import Face, Pos, Wire, extrude
+    major_diameter = _positive_profile_value(operation, "major_diameter", "Наружный диаметр")
+    pitch = _positive_profile_value(operation, "pitch", "Шаг резьбы")
+    length = _positive_profile_value(operation, "length", "Длина резьбы")
+    nut_height = _positive_profile_value(operation, "nut_height", "Высота гайки")
+    nut_across_flats = _positive_profile_value(
+        operation, "nut_across_flats", "Размер гайки под ключ")
+    clearance = _positive_profile_value(operation, "clearance", "Диаметральный зазор")
+    if str(operation.get("profile_version", THREAD_PROFILE_VERSION)) != THREAD_PROFILE_VERSION:
+        raise GeometryError("bad_params", "Поддерживается только профиль metric-60-v1.")
+    hand = operation.get("hand", "right")
+    if hand not in {"right", "left"}:
+        raise GeometryError("bad_params", "Направление резьбы должно быть right или left.")
+    if int(operation.get("starts", 1)) != 1:
+        raise GeometryError("bad_params", "Текущий thread-pair поддерживает однозаходную резьбу.")
+    if length < pitch or nut_height >= length:
+        raise GeometryError("bad_params", "Длина резьбы должна быть не меньше шага и больше высоты гайки.")
+    if nut_across_flats <= major_diameter + clearance:
+        raise GeometryError("bad_params", "Гайка не оставляет стенку вокруг резьбы.")
+
+    bolt, core_radius = _threaded_external_shape(
+        major_diameter, pitch, length, hand == "left")
+    assembly_z = (length - nut_height) / 2
+    nut_radius = nut_across_flats / math.sqrt(3)
+    nut_points = [
+        (nut_radius * math.cos(math.radians(30 + 60 * index)),
+         nut_radius * math.sin(math.radians(30 + 60 * index)), assembly_z)
+        for index in range(6)
+    ]
+    nut_blank = extrude(Face(Wire.make_polygon(nut_points, close=True)), amount=nut_height)
+    cutter_length = nut_height + 2 * pitch
+    cutter, _ = _threaded_external_shape(
+        major_diameter + clearance, pitch, cutter_length, hand == "left")
+    nut = nut_blank - (Pos(0, 0, assembly_z - pitch) * cutter)
+    _validated_generated_shape(nut, "Внутренняя резьба")
+    intersection_volume = (bolt & nut).volume
+    if intersection_volume > 1e-6:
+        raise GeometryError(
+            "thread_clearance_failed",
+            "Резьбовая пара пересекается. Увеличьте зазор или измените размеры.",
+            detail=f"intersection_volume={intersection_volume:.9f}")
+    base_id = operation.get("result_id") or f"thread-{operation_index + 1}"
+    bolt_id, nut_id = f"{base_id}-bolt", f"{base_id}-nut"
+    if bolt_id in parts or nut_id in parts:
+        raise GeometryError("bad_params", f"Идентификатор результата уже существует: {base_id}")
+    common = {
+        "profile_version": THREAD_PROFILE_VERSION,
+        "major_diameter": major_diameter,
+        "pitch": pitch,
+        "lead": pitch,
+        "starts": 1,
+        "hand": hand,
+        "clearance": clearance,
+        "working_length": length,
+        "assembly_intersection_volume": intersection_volume,
+    }
+    parts[bolt_id] = {
+        "shape": bolt, "name": "Резьбовой стержень", "template": "generated", "params": {},
+        "metadata": {**common, "role": "external", "core_radius": core_radius},
+    }
+    parts[nut_id] = {
+        "shape": nut, "name": "Резьбовая гайка", "template": "generated", "params": {},
+        "metadata": {**common, "role": "internal", "nut_height": nut_height},
+    }
+
+
+def _apply_clearance_calibration(parts, operation, operation_index):
+    from build123d import Box, Cylinder, Pos, Text, extrude
+    values = operation.get("values") or []
+    if not isinstance(values, list) or not 2 <= len(values) <= 10:
+        raise GeometryError("bad_params", "Калибровка требует от 2 до 10 значений зазора.")
+    try:
+        clearances = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", "Значения зазора должны быть числами.") from exc
+    if (any(not math.isfinite(value) or value < 0 for value in clearances) or
+            len(set(clearances)) != len(clearances)):
+        raise GeometryError("bad_params", "Зазоры должны быть конечными, неотрицательными и уникальными.")
+    nominal_diameter = _positive_profile_value(
+        operation, "nominal_diameter", "Номинальный диаметр")
+    coupon_length = _positive_profile_value(operation, "coupon_length", "Длина образца")
+    coupon_width = _positive_profile_value(operation, "coupon_width", "Ширина образца")
+    thickness = _positive_profile_value(operation, "thickness", "Толщина образца")
+    spacing = _positive_profile_value(operation, "spacing", "Шаг размещения")
+    font_size = _positive_profile_value(operation, "font_size", "Размер метки")
+    label_height = _positive_profile_value(operation, "label_height", "Высота метки")
+    if spacing < coupon_length:
+        raise GeometryError("bad_params", "Шаг размещения должен быть не меньше длины образца.")
+    if nominal_diameter + max(clearances) >= min(coupon_length, coupon_width):
+        raise GeometryError("bad_params", "Максимальное отверстие не оставляет стенку образца.")
+    font_path = _text_font_path()
+    base_id = operation.get("result_id") or f"calibration-{operation_index + 1}"
+    for index, clearance in enumerate(clearances):
+        part_id = f"{base_id}-{index + 1}"
+        if part_id in parts:
+            raise GeometryError("bad_params", f"Идентификатор результата уже существует: {part_id}")
+        center_x = index * spacing
+        base = Pos(center_x, 0, thickness / 2) * Box(
+            coupon_length, coupon_width, thickness)
+        effective_diameter = nominal_diameter + clearance
+        hole = Pos(center_x, coupon_width / 5, thickness / 2) * Cylinder(
+            effective_diameter / 2, thickness * 2)
+        label = f"{clearance:.2f}"
+        label_sketch = Text(label, font_size, font_path=font_path).fix()
+        label_box = label_sketch.bounding_box().size
+        if label_box.X >= coupon_length or label_box.Y >= coupon_width / 2:
+            raise GeometryError("bad_params", "Метка зазора не помещается на образце.")
+        label_tool = extrude(
+            Pos(center_x, -coupon_width / 4, thickness) * label_sketch,
+            amount=label_height)
+        shape = _validated_generated_shape((base - hole) + label_tool, "Калибровочный образец")
+        parts[part_id] = {
+            "shape": shape,
+            "name": f"Зазор {label} мм",
+            "template": "generated",
+            "params": {},
+            "metadata": {
+                "calibration_profile": operation.get("profile_name") or "Без профиля",
+                "sample_index": index,
+                "label": label,
+                "clearance": clearance,
+                "clearance_mode": "diametral",
+                "nominal_diameter": nominal_diameter,
+                "effective_diameter": effective_diameter,
+                "font": TEXT_FONT_VERSION,
+            },
+        }
+
+
+def _apply_split_connector_pair(parts, operation, operation_index):
+    from build123d import Box, Cylinder, Pos, Rotation
+    length = _positive_profile_value(operation, "length", "Длина исходной детали")
+    width = _positive_profile_value(operation, "width", "Ширина исходной детали")
+    height = _positive_profile_value(operation, "height", "Высота исходной детали")
+    pin_radius = _positive_profile_value(operation, "pin_radius", "Радиус штифта")
+    pin_length = _positive_profile_value(operation, "pin_length", "Длина штифта")
+    radial_clearance = _positive_profile_value(
+        operation, "radial_clearance", "Радиальный зазор")
+    print_separation = _positive_profile_value(
+        operation, "print_separation", "Зазор печатного размещения")
+    overlap = min(0.2, pin_length * 0.1)
+    hole_extra = min(0.5, pin_length * 0.2)
+    if pin_length + hole_extra >= length / 2:
+        raise GeometryError("bad_params", "Штифт и отверстие не помещаются в половине детали.")
+    if pin_radius + radial_clearance >= min(width / 4, height / 2):
+        raise GeometryError("bad_params", "Соединитель не оставляет достаточную стенку.")
+
+    left = Pos(-length / 4, 0, height / 2) * Box(length / 2, width, height)
+    right = Pos(length / 4, 0, height / 2) * Box(length / 2, width, height)
+    connector_centers = []
+    for center_y in (-width / 4, width / 4):
+        pin = (
+            Pos((pin_length - overlap) / 2, center_y, height / 2)
+            * Rotation(0, 90, 0)
+            * Cylinder(pin_radius, pin_length + overlap)
+        )
+        hole_length = pin_length + hole_extra
+        hole = (
+            Pos(hole_length / 2, center_y, height / 2)
+            * Rotation(0, 90, 0)
+            * Cylinder(pin_radius + radial_clearance, hole_length)
+        )
+        left += pin
+        right -= hole
+        connector_centers.append([0, center_y, height / 2])
+    left = _validated_generated_shape(left, "Половина со штифтами")
+    right = _validated_generated_shape(right, "Половина с ответными отверстиями")
+    assembly_intersection = (left & right).volume
+    if assembly_intersection > 1e-6:
+        raise GeometryError(
+            "connector_intersection",
+            "Штифты пересекаются с ответной частью. Увеличьте зазор.",
+            detail=f"intersection_volume={assembly_intersection:.9f}")
+    placement_y = width + print_separation
+    placed_right = Pos(0, placement_y, 0) * right
+    base_id = operation.get("result_id") or f"connector-{operation_index + 1}"
+    left_id, right_id = f"{base_id}-pins", f"{base_id}-sockets"
+    if left_id in parts or right_id in parts:
+        raise GeometryError("bad_params", f"Идентификатор результата уже существует: {base_id}")
+    common = {
+        "source_bbox": [length, width, height],
+        "source_volume": length * width * height,
+        "split_axis": "x",
+        "connector_centers": connector_centers,
+        "pin_radius": pin_radius,
+        "pin_length": pin_length,
+        "radial_clearance": radial_clearance,
+        "assembly_intersection_volume": assembly_intersection,
+    }
+    parts[left_id] = {
+        "shape": left, "name": "Часть со штифтами", "template": "generated", "params": {},
+        "metadata": {**common, "role": "pins", "print_translation": [0, 0, 0]},
+    }
+    parts[right_id] = {
+        "shape": placed_right, "name": "Часть с отверстиями", "template": "generated", "params": {},
+        "metadata": {
+            **common, "role": "sockets", "print_translation": [0, placement_y, 0],
+            "assembly_translation": [0, -placement_y, 0],
+        },
+    }
+
+
+def _apply_fit_pocket(parts, operation, operation_index):
+    from build123d import Box, Cylinder, Face, Pos, Wire, extrude
+    fixture_id = operation.get("fixture_id")
+    fixture = FIT_FIXTURES.get(fixture_id)
+    if fixture is None:
+        raise GeometryError("bad_params", f"Неизвестная размерная fixture посадки: {fixture_id}")
+    requested_version = str(operation.get("fixture_version", fixture["version"]))
+    if requested_version != fixture["version"]:
+        raise GeometryError(
+            "bad_params",
+            f"Fixture {fixture_id} версии {requested_version} не поддерживается; доступна {fixture['version']}.")
+    body_length = _positive_profile_value(operation, "body_length", "Длина корпуса")
+    body_width = _positive_profile_value(operation, "body_width", "Ширина корпуса")
+    body_height = _positive_profile_value(operation, "body_height", "Высота корпуса")
+    try:
+        clearance = float(operation.get("clearance", 0))
+    except (TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", "Зазор посадки должен быть числом.") from exc
+    if not math.isfinite(clearance) or clearance < 0:
+        raise GeometryError("bad_params", "Зазор посадки должен быть конечным и неотрицательным.")
+    clearance_mode = operation.get("clearance_mode", "diametral")
+    if clearance_mode == "radial":
+        size_delta, center_x = 2 * clearance, 0.0
+    elif clearance_mode == "diametral":
+        size_delta, center_x = clearance, 0.0
+    elif clearance_mode == "one_sided":
+        size_delta, center_x = clearance, clearance / 2
+    else:
+        raise GeometryError("bad_params", f"Неизвестный смысл зазора: {clearance_mode}")
+    effective_size = fixture["nominal_size"] + size_delta
+    depth = float(operation.get("pocket_depth", fixture["depth"]))
+    if not math.isfinite(depth) or depth <= 0 or depth >= body_height:
+        raise GeometryError("bad_params", "Глубина посадки должна оставлять дно корпуса.")
+    if effective_size >= min(body_length, body_width):
+        raise GeometryError("bad_params", "Посадка не оставляет стенку корпуса.")
+
+    body = Pos(0, 0, body_height / 2) * Box(body_length, body_width, body_height)
+    cutter_origin_z = body_height - depth
+    kind = fixture["kind"]
+    if kind == "circle":
+        cutter = Pos(center_x, 0, cutter_origin_z + depth / 2) * Cylinder(
+            effective_size / 2, depth)
+    elif kind == "hex":
+        radius = effective_size / math.sqrt(3)
+        points = [
+            (center_x + radius * math.cos(math.radians(30 + 60 * index)),
+             radius * math.sin(math.radians(30 + 60 * index)), cutter_origin_z)
+            for index in range(6)
+        ]
+        cutter = extrude(Face(Wire.make_polygon(points, close=True)), amount=depth)
+    else:
+        insert = Pos(center_x, 0, cutter_origin_z + depth / 2) * Cylinder(
+            effective_size / 2, depth)
+        pilot_size = fixture["pilot_size"] + size_delta
+        pilot_height = body_height - depth
+        pilot = Pos(center_x, 0, pilot_height / 2) * Cylinder(pilot_size / 2, pilot_height)
+        cutter = insert + pilot
+    shape = body - cutter
+    metadata = {
+        "fixture_id": fixture_id,
+        "fixture_version": fixture["version"],
+        "fixture_label": fixture["label"],
+        "clearance": clearance,
+        "clearance_mode": clearance_mode,
+        "effective_size": effective_size,
+        "pocket_center_x": center_x,
+        "pocket_depth": depth,
+    }
+    _generated_part(
+        parts, operation, _validated_generated_shape(shape, "Посадка"),
+        f"part-fit-{operation_index + 1}", "Посадка", metadata,
+    )
 
 
 def apply_part_operations(parts, operations):
@@ -1218,7 +3069,35 @@ def apply_part_operations(parts, operations):
     for operation_index, op in enumerate(operations or []):
         kind = op.get("op")
         pid = op.get("part_id")
-        if kind == "boolean":
+        if kind == "sketch_extrude":
+            _apply_sketch_extrude(parts, op, operation_index)
+        elif kind == "constrained_sketch_extrude":
+            _apply_constrained_sketch_extrude(parts, op, operation_index)
+        elif kind == "revolve":
+            _apply_revolve(parts, op, operation_index)
+        elif kind == "sweep":
+            _apply_sweep(parts, op, operation_index)
+        elif kind == "loft":
+            _apply_loft(parts, op, operation_index)
+        elif kind == "shell":
+            _apply_shell(parts, op, operation_index)
+        elif kind == "draft_prism":
+            _apply_draft_prism(parts, op, operation_index)
+        elif kind == "rib":
+            _apply_rib(parts, op, operation_index)
+        elif kind == "fit_pocket":
+            _apply_fit_pocket(parts, op, operation_index)
+        elif kind == "vector_extrude":
+            _apply_vector_extrude(parts, op, operation_index)
+        elif kind == "text_relief":
+            _apply_text_relief(parts, op, operation_index)
+        elif kind == "thread_pair":
+            _apply_thread_pair(parts, op, operation_index)
+        elif kind == "clearance_calibration":
+            _apply_clearance_calibration(parts, op, operation_index)
+        elif kind == "split_connector_pair":
+            _apply_split_connector_pair(parts, op, operation_index)
+        elif kind == "boolean":
             target = parts[op["target_id"]]["shape"]
             tool = parts[op["tool_id"]]["shape"]
             bt = op.get("boolean", "union")
@@ -1314,14 +3193,24 @@ def apply_part_operations(parts, operations):
                     raise GeometryError(
                         "bend_failed",
                         "Перед изгибом допустимы сквозные вырезы, затем изгибы должны идти подряд.")
-            if any(previous.get("bend_axis") != op.get("bend_axis")
-                   for previous in bend_operations):
-                raise GeometryError(
-                    "bend_failed",
-                    "Последовательные изгибы должны быть параллельны и использовать одну ось.")
-            bend_operations.append(op)
-            parts[target_id]["shape"] = _apply_sheet_bends(
-                parts[target_id], bend_operations, flat_features)
+            perpendicular = [previous for previous in bend_operations
+                             if previous.get("bend_axis") != op.get("bend_axis")]
+            if perpendicular:
+                face_ref = op.get("face_ref") or {}
+                if face_ref.get("axis") == "z":
+                    raise GeometryError(
+                        "bend_failed",
+                        "Последовательные изгибы должны быть параллельны и использовать одну ось.")
+                if len(bend_operations) != 1:
+                    raise GeometryError(
+                        "bend_failed",
+                        "Перпендикулярный изгиб фланца должен следовать сразу после одного базового изгиба.")
+                parts[target_id]["shape"] = _apply_perpendicular_flange_bend(
+                    parts[target_id], bend_operations[0], op, flat_features)
+            else:
+                bend_operations.append(op)
+                parts[target_id]["shape"] = _apply_sheet_bends(
+                    parts[target_id], bend_operations, flat_features)
         elif kind == "array_circular":
             from build123d import Compound
             n = int(op["count"])
@@ -1393,10 +3282,12 @@ def handle_build_v3(params):
         }
     parts = apply_part_operations(parts, params.get("operations"))
     compound = Compound(children=[p["shape"] for p in parts.values()])
-    extra = {"parts": [{"part_id": pid, "name": p["name"],
-                        "volume": p["shape"].volume,
-                        "solid_count": len(p["shape"].solids())}
-                       for pid, p in parts.items()]}
+    extra = {"parts": [{
+        "part_id": pid, "name": p["name"],
+        "volume": p["shape"].volume,
+        "solid_count": len(p["shape"].solids()),
+        **({"metadata": p["metadata"]} if p.get("metadata") else {}),
+    } for pid, p in parts.items()]}
     # дополнительные данные шаблона (case_volume и т.п.) для одиночной детали
     if len(params.get("parts") or []) == 1:
         p0 = params["parts"][0]
@@ -1410,12 +3301,15 @@ def handle_build_v3(params):
 # ---------- методы ----------
 
 def build_any(params):
-    if params.get("parts"):
+    if "parts" in params:
         return handle_build_v3(params)
     return build_document(params)
 
 
 def handle_build(params):
+    if _is_mesh_workflow(params):
+        mesh, stats = _build_mesh_workflow(params)
+        return {"stats": stats, "mesh": _trimesh_resource(mesh, "model")}
     part, extra = build_any(params)
     if "parts" not in extra:
         # одиночный шаблон: синтезируем запись живого тела для списка деталей
@@ -1428,11 +3322,39 @@ def handle_build(params):
             "mesh": mesh_resource(part, "model")}
 
 
+def handle_solve_sketch(params):
+    return _solve_constrained_sketch(
+        params.get("sketch") or {}, params.get("drag"),
+        float(params.get("tolerance", 1e-7)))
+
+
+def handle_image_relief_preview(params):
+    operation = {**params, "op": "image_relief_source"}
+    return handle_build({"parts": [], "operations": [operation]})
+
+
 def handle_export(params):
     fmt = params.get("format", "stl")
     path = params.get("path")
     if not path:
         raise GeometryError("bad_params", "не указан путь экспорта")
+    if _is_mesh_workflow(params):
+        if fmt == "step":
+            raise GeometryError(
+                "mesh_step_unsupported",
+                "Mesh нельзя экспортировать как точное параметрическое STEP-тело. Используйте STL или 3MF.")
+        if fmt not in {"stl", "3mf"}:
+            raise GeometryError("bad_params", f"Неизвестный mesh-формат экспорта: {fmt}")
+        mesh, stats = _build_mesh_workflow(params)
+        try:
+            if fmt == "3mf":
+                _export_trimesh_3mf(mesh, path)
+            else:
+                mesh.export(path, file_type=fmt)
+        except Exception as exc:  # noqa: BLE001
+            raise GeometryError("mesh_export_failed", f"Не удалось экспортировать mesh в {fmt.upper()}.") from exc
+        return {"path": path, "bytes": Path(path).stat().st_size,
+                "format": fmt, "stats": stats}
     part, extra = build_any(params)
     if fmt == "stl":
         from build123d import export_stl
@@ -1493,6 +3415,20 @@ def handle_import(params):
 
 def handle_print_check(params):
     """PRINT-001/002: отдельный результат каждой проверки."""
+    if _is_mesh_workflow(params):
+        mesh, _ = _build_mesh_workflow(params)
+        diagnostics = _mesh_diagnostics(mesh)
+        return {"checks": [
+            {"id": "mesh_watertight", "title": "Замкнутая mesh-оболочка",
+             "status": "pass" if diagnostics["watertight"] else "fail"},
+            {"id": "mesh_winding", "title": "Согласованная ориентация",
+             "status": "pass" if diagnostics["winding_consistent"] else "fail"},
+            {"id": "mesh_boundary", "title": "Открытые края",
+             "status": "pass" if diagnostics["boundary_edges"] == 0 else "fail",
+             "detail": f"{diagnostics['boundary_edges']} рёбер"},
+            {"id": "mesh_self_intersection", "title": "Самопересечения",
+             "status": "unknown", "detail": diagnostics["self_intersection_detail"]},
+        ]}
     part, _ = build_any(params)
     checks = []
     bb = part.bounding_box()
@@ -1599,6 +3535,8 @@ HANDLERS = {
     "build_plate": lambda p: handle_build({"template": "plate_with_holes",
                                            "params": p}),
     "build": handle_build,
+    "solve_sketch": handle_solve_sketch,
+    "image_relief_preview": handle_image_relief_preview,
     "export": handle_export,
     "export_stl": lambda p: handle_export({**p, "format": "stl",
                                            "template": "plate_with_holes",

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import shutil
 import subprocess
@@ -60,6 +61,8 @@ def main() -> None:
             "lib3mf",
             "--collect-all",
             "trimesh",
+            "--add-data",
+            f"{ROOT / 'design-sources' / 'impeccable' / 'ui' / 'component-review' / 'fonts' / 'jetbrainsmono.ttf'}{os.pathsep}assets",
             "--distpath",
             str(dist_dir),
             "--workpath",

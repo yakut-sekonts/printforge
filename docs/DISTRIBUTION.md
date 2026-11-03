@@ -42,7 +42,8 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.config/printforge/updater.key
 3. Проверить согласованность: `python3 scripts/check_release_version.py`.
 4. Создать и отправить тег той же версии, например `v0.1.0`.
 5. Workflow `.github/workflows/release.yml` соберёт три native installers, updater artifacts, signatures и `latest.json` в draft GitHub Release.
-6. Проверить assets и опубликовать draft. Только опубликованный release становится доступен установленным приложениям.
+6. Windows job установит собранный NSIS в silent mode, проверит установленный binary/sidecar и прогонит native startup/FPS/RSS gates. JSON и логи сохраняются в workflow artifact `windows-release-evidence-*`.
+7. Проверить assets, Windows evidence и опубликовать draft. Только опубликованный release становится доступен установленным приложениям.
 
 Ручной `workflow_dispatch` также создаёт draft для версии из Tauri config.
 
@@ -60,12 +61,13 @@ Endpoint обновлений фиксирован: `https://github.com/yakut-se
 
 ## Локальная проверка release artifact
 
-Обычная локальная сборка не требует updater private key и создаёт `.app`:
+Обычная локальная сборка не требует updater private key, создаёт ad-hoc signed `.app` и должна проходить `codesign --verify --deep --strict`:
 
 ```bash
 backend/.venv/bin/python scripts/build_sidecar.py --target aarch64-apple-darwin
 cd app
 npm run build:desktop
+codesign --verify --deep --strict src-tauri/target/release/bundle/macos/PrintForge.app
 ```
 
 Release-сборка с updater signature:
@@ -76,3 +78,11 @@ export APPLE_SIGNING_IDENTITY="-"
 cd app
 npm run tauri build -- --bundles app,dmg --config src-tauri/tauri.release.conf.json
 ```
+
+Windows release evidence запускается только на Windows x64 после сборки NSIS:
+
+```powershell
+python scripts/run_windows_release_evidence.py
+```
+
+Runner устанавливает NSIS для текущего пользователя, находит `printforge.exe` через uninstall registry, проверяет наличие geometry sidecar, запускает `scripts/run_native_perf.py` для установленного приложения и затем удаляет тестовую установку. Отсутствие Authenticode является ожидаемой частью open-source release profile, но SHA-256 installer и установленного binary фиксируются в отчёте.

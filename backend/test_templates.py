@@ -640,6 +640,193 @@ def test_parallel_sheet_bend_cascade_supports_four_lines(worker):
     assert "четырёх" in too_many["error"]["message"].lower()
 
 
+@pytest.mark.parametrize(("base_axis", "base_side", "base_direction"), [
+    ("x", 1, 1),
+    ("x", -1, -1),
+    ("y", 1, -1),
+    ("y", -1, 1),
+])
+def test_perpendicular_flange_bend_preserves_body_and_stock_holes(
+        worker, base_axis, base_side, base_direction):
+    parts = [{"part_id": "a", "template": "plate_with_holes", "params": {}}]
+    base = {
+        "op": "sheet_bend",
+        "target_id": "a",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200 - 4 * math.pi * 2**2},
+        "bend_axis": base_axis,
+        "position": 0,
+        "angle": 90,
+        "inside_radius": 3,
+        "moving_side": base_side,
+        "direction": base_direction,
+    }
+    flange_axis = "y" if base_axis == "x" else "x"
+    flange = {
+        **base,
+        "face_ref": {"kind": "outer_planar", "axis": base_axis, "side": base_side,
+                     "anchor": [0, 0], "selected_area": 1000},
+        "bend_axis": flange_axis,
+        "position": 0,
+        "inside_radius": 2,
+        "moving_side": 1,
+        "direction": 1,
+    }
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [base, flange],
+    })
+    assert response["ok"], response.get("error")
+    stats = response["result"]["stats"]
+    base_volume = 80 * 40 * 6 - 4 * math.pi * 2**2 * 6
+    assert stats["volume"] == pytest.approx(base_volume, abs=3e-2)
+    assert stats["solid_count"] == 1
+    assert stats["is_valid"] is True
+    assert stats["bbox"][5] - stats["bbox"][2] > 20
+
+
+@pytest.mark.parametrize(("base_axis", "base_side", "feature_center"), [
+    ("x", -1, [-24, 0]),
+    ("y", 1, [0, 12]),
+])
+@pytest.mark.parametrize(("profile", "cut_area", "solid_count"), [
+    ({"kind": "rectangle", "width": 8, "height": 6}, 48, 1),
+    ({"kind": "circle", "diameter": 8}, math.pi * 4**2, 1),
+    ({"kind": "ring", "outer_diameter": 10, "inner_diameter": 6},
+     math.pi * (5**2 - 3**2), 2),
+    ({"kind": "slot", "width": 4, "length": 12},
+     (12 - 4) * 4 + math.pi * 2**2, 1),
+])
+def test_perpendicular_flange_bend_preserves_supported_flat_cut_profiles(
+        worker, base_axis, base_side, feature_center, profile, cut_area,
+        solid_count):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    cut = {
+        "op": "face_feature",
+        "target_id": "a",
+        "mode": "cut",
+        "depth": "through",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200},
+        "profile": {**profile, "center": feature_center},
+    }
+    base = {
+        "op": "sheet_bend",
+        "target_id": "a",
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                     "anchor": [0, 0], "selected_area": 3200 - cut_area},
+        "bend_axis": base_axis,
+        "position": 0,
+        "angle": 90,
+        "inside_radius": 3,
+        "moving_side": base_side,
+        "direction": 1,
+    }
+    flange = {
+        **base,
+        "face_ref": {"kind": "outer_planar", "axis": base_axis,
+                     "side": base_side, "anchor": [0, 0],
+                     "selected_area": 1000},
+        "bend_axis": "y" if base_axis == "x" else "x",
+        "angle": 70,
+        "inside_radius": 2,
+        "moving_side": 1,
+    }
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [cut, base, flange],
+    })
+    assert response["ok"], response.get("error")
+    stats = response["result"]["stats"]
+    assert stats["volume"] == pytest.approx(80 * 40 * 6 - cut_area * 6, abs=5e-2)
+    assert stats["solid_count"] == solid_count
+    assert stats["is_valid"] is True
+
+
+def test_perpendicular_flange_bend_rejects_cut_crossing_base_bend_root(worker):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    common = {
+        "op": "sheet_bend",
+        "target_id": "a",
+        "position": 0,
+        "angle": 90,
+        "inside_radius": 3,
+        "moving_side": 1,
+        "direction": 1,
+    }
+    response = worker.call("build", {
+        "parts": parts,
+        "operations": [
+            {
+                "op": "face_feature",
+                "target_id": "a",
+                "mode": "cut",
+                "depth": "through",
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                             "anchor": [0, 0], "selected_area": 3200},
+                "profile": {"kind": "circle", "diameter": 8,
+                            "center": [6, 0]},
+            },
+            {
+                **common,
+                "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1},
+                "bend_axis": "x",
+            },
+            {
+                **common,
+                "face_ref": {"kind": "outer_planar", "axis": "x", "side": 1},
+                "bend_axis": "y",
+            },
+        ],
+    })
+    assert response["ok"] is False
+    assert response["error"]["code"] == "bend_failed"
+    assert "целиком" in response["error"]["message"].lower()
+
+
+def test_perpendicular_flange_bend_requires_selected_matching_flange(worker):
+    parts = [{"part_id": "a", "template": "plate_with_holes",
+              "params": {"hole_diameter": 0}}]
+    common = {
+        "op": "sheet_bend",
+        "target_id": "a",
+        "position": 0,
+        "angle": 90,
+        "inside_radius": 3,
+        "moving_side": 1,
+        "direction": 1,
+    }
+    base = {
+        **common,
+        "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1},
+        "bend_axis": "x",
+    }
+    wrong_face = worker.call("build", {
+        "parts": parts,
+        "operations": [base, {
+            **common,
+            "face_ref": {"kind": "outer_planar", "axis": "x", "side": -1},
+            "bend_axis": "y",
+        }],
+    })
+    assert wrong_face["ok"] is False
+    assert wrong_face["error"]["code"] == "reselect_required"
+
+    non_right_angle = worker.call("build", {
+        "parts": parts,
+        "operations": [{**base, "angle": 60}, {
+            **common,
+            "face_ref": {"kind": "outer_planar", "axis": "x", "side": 1},
+            "bend_axis": "y",
+        }],
+    })
+    assert non_right_angle["ok"] is False
+    assert non_right_angle["error"]["code"] == "bend_failed"
+    assert "90" in non_right_angle["error"]["message"]
+
+
 def test_sheet_bend_preserves_flat_through_cuts(worker):
     parts = [{"part_id": "a", "template": "plate_with_holes",
               "params": {"hole_diameter": 0}}]

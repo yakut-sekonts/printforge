@@ -4,8 +4,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
+use tokio::sync::watch;
 
 pub const MAX_PLAN_OPS: usize = 20;
 const AI_SETTINGS_FILE: &str = "ai-settings.json";
@@ -34,9 +36,51 @@ impl Default for AiSettings {
 }
 
 static AI_SETTINGS: OnceLock<RwLock<AiSettings>> = OnceLock::new();
+static AI_TASKS: OnceLock<Mutex<HashMap<String, watch::Sender<bool>>>> = OnceLock::new();
 
 fn settings_lock() -> &'static RwLock<AiSettings> {
     AI_SETTINGS.get_or_init(|| RwLock::new(settings_from_environment().unwrap_or_default()))
+}
+
+fn tasks_lock() -> &'static Mutex<HashMap<String, watch::Sender<bool>>> {
+    AI_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn register_task(task_id: &str) -> Result<watch::Receiver<bool>, String> {
+    if task_id.is_empty()
+        || task_id.len() > 128
+        || !task_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':'))
+    {
+        return Err("Некорректный task_id AI-задачи.".into());
+    }
+    let (sender, receiver) = watch::channel(false);
+    let mut tasks = tasks_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if tasks.contains_key(task_id) {
+        return Err("AI-задача с таким task_id уже выполняется.".into());
+    }
+    tasks.insert(task_id.to_string(), sender);
+    Ok(receiver)
+}
+
+pub fn cancel_task(task_id: &str) -> bool {
+    let tasks = tasks_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(sender) = tasks.get(task_id) else {
+        return false;
+    };
+    sender.send(true).is_ok()
+}
+
+pub fn finish_task(task_id: &str) {
+    tasks_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(task_id);
 }
 
 fn current_settings() -> AiSettings {
@@ -577,17 +621,16 @@ fn extract_json(raw: &str) -> Result<Value, String> {
     serde_json::from_str(&s[start..=end]).map_err(|e| format!("невалидный JSON: {e}"))
 }
 
-async fn http_chat_request(
+fn chat_request_body(
+    settings: &AiSettings,
     messages: Value,
     want_json: bool,
     json_schema: Option<Value>,
-) -> Result<String, String> {
-    let settings = current_settings();
-    if !matches!(settings.provider.as_str(), "ollama" | "openai") {
-        return Err("Для сетевого запроса не настроен AI-провайдер.".into());
-    }
-    let key = api_key(&settings)?;
+) -> Value {
     let mut body = json!({"model": settings.model, "messages": messages, "temperature": 0});
+    if settings.provider == "ollama" {
+        body["reasoning_effort"] = json!("none");
+    }
     if let Some(schema) = json_schema.filter(|_| settings.provider == "ollama") {
         body["response_format"] = json!({
             "type": "json_schema",
@@ -600,6 +643,20 @@ async fn http_chat_request(
     } else if want_json {
         body["response_format"] = json!({"type": "json_object"});
     }
+    body
+}
+
+async fn http_chat_request(
+    messages: Value,
+    want_json: bool,
+    json_schema: Option<Value>,
+) -> Result<String, String> {
+    let settings = current_settings();
+    if !matches!(settings.provider.as_str(), "ollama" | "openai") {
+        return Err("Для сетевого запроса не настроен AI-провайдер.".into());
+    }
+    let key = api_key(&settings)?;
+    let body = chat_request_body(&settings, messages, want_json, json_schema);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(AI_TIMEOUT_SECS))
         .build()
@@ -699,17 +756,302 @@ pub fn system_prompt(
     revision: u64,
     parts: &[Value],
 ) -> String {
+    let document_rule = if parts.is_empty() {
+        "Документ пуст: для явного запроса создать деталь используй part.create.from_template. "
+            .to_string()
+    } else {
+        let existing = parts
+            .iter()
+            .map(|part| {
+                let part_id = part.get("part_id").and_then(Value::as_str).unwrap_or("");
+                let template = part.get("template").and_then(Value::as_str).unwrap_or("");
+                let mut parameters: Vec<&str> = part
+                    .get("params")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                parameters.sort_unstable();
+                format!("{part_id} ({template}): {}", parameters.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "Документ уже содержит детали: {existing}. Запросы «измени», «установи», \
+             «увеличь» и «сделай [существующую деталь] размером ...» означают \
+             parameter.set. part.create.from_template допустим только при явном запросе \
+             создать или добавить новую деталь. "
+        )
+    };
     format!(
-        "Ты планировщик CAD PrintForge. Отвечай ТОЛЬКО JSON по схеме: \
-         {{schema_version:1, document_id, document_instance_id, base_revision, units:\"mm\", \
-         assumptions:[], questions:[], operations:[{{command_id, target_id, parameters}}], summary}}. \
-         Разрешённые command_id: part.create.from_template {{template, params}}, \
-         parameter.set {{name, value}}, op.fillet {{radius, edge_ref}}. \
-         Никакого кода, только данные.\nДокумент: {}",
+        "Ты планировщик CAD PrintForge. Отвечай ТОЛЬКО JSON по переданной схеме. \
+         Используй только эти операции и точные идентификаторы:\n\
+         1. part.create.from_template: target_id=null, parameters={{template, params}}. \
+         Допустимые шаблоны и параметры: \
+         washer {{outer_diameter, inner_diameter, height}}; \
+         plate_with_holes {{length, width, height, hole_diameter, hole_offset}}; \
+         bracket_l {{a_length, a_width, a_thickness, b_height}}; \
+         case_with_lid {{length, width, height, wall, bottom, gap, lid_thickness, lip_height, lip_wall}}. \
+         В params указывай только размеры, явно названные пользователем; остальные поля \
+         не выдумывай — backend применит defaults.\n\
+         2. parameter.set: target_id — существующий part_id, parameters={{name, value}}; \
+         name обязан уже существовать в params этой детали. Если пользователь меняет \
+         существующую деталь, используй parameter.set, не создавай новую деталь.\n\
+         3. op.fillet: target_id — существующий part_id, parameters={{radius, edge_ref}}; \
+         edge_ref должен быть точным объектом из контекста. Если edge_ref в контексте нет, \
+         задай вопрос и не создавай операцию.\n\
+         Не выдумывай template, parameter name, part_id или edge_ref. Если не хватает \
+         размера либо запрос неоднозначен (например, «побольше», «покрепче», \
+         «добавь отверстие»), оставь operations пустым и заполни questions, либо укажи \
+         явное измеримое предположение в assumptions. Никогда не исполняй код, не читай \
+         файлы и не устанавливай расширения. Все размеры только в мм. Никакого Markdown, \
+         только данные.\n{}Документ: {}",
+        document_rule,
         doc_summary(doc_id, document_instance_id, revision, parts))
 }
 
-fn plan_json_schema(doc_id: u64, document_instance_id: u64, revision: u64) -> Value {
+fn create_operation_schema(template: &str, parameter_names: &[&str]) -> Value {
+    let properties = parameter_names
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_string(),
+                json!({"type": "number", "exclusiveMinimum": 0}),
+            )
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "command_id": {"const": "part.create.from_template"},
+            "target_id": {"type": "null"},
+            "parameters": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "template": {"const": template},
+                    "params": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": properties,
+                    },
+                },
+                "required": ["template", "params"],
+            },
+        },
+        "required": ["command_id", "target_id", "parameters"],
+    })
+}
+
+fn parameter_markers(name: &str) -> &'static [&'static str] {
+    match name {
+        "length" | "a_length" => &["длин"],
+        "width" | "a_width" => &["ширин"],
+        "height" => &["толщин", "высот"],
+        "hole_diameter" => &["диаметр отверст", "отверсти", "побольш"],
+        "hole_offset" => &["смещен", "отступ"],
+        "outer_diameter" => &["наружн"],
+        "inner_diameter" => &["внутрен"],
+        "a_thickness" => &["толщин"],
+        "b_height" => &["высот", "стойк"],
+        "wall" => &["стенк"],
+        "bottom" => &["дн"],
+        "gap" => &["зазор"],
+        "lid_thickness" => &["толщин крыш"],
+        "lip_height" => &["высот бортик"],
+        "lip_wall" => &["толщин бортик"],
+        _ => &[],
+    }
+}
+
+fn request_operation_scope(
+    parts: &[Value],
+    text: Option<&str>,
+) -> (Option<HashSet<String>>, bool, bool) {
+    let Some(text) = text else {
+        return (None, false, false);
+    };
+    let normalized = text.to_lowercase().replace('ё', "е");
+    let has_negative_number = normalized
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0] == b'-' && pair[1].is_ascii_digit());
+    let has_nan = normalized
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|token| token == "nan");
+    let unsafe_or_invalid = has_negative_number
+        || has_nan
+        || [
+            "python",
+            "/etc/",
+            "прочитай файл",
+            "открой файл",
+            "установи расширение",
+            "запусти код",
+        ]
+        .iter()
+        .any(|marker| normalized.contains(marker));
+    if unsafe_or_invalid {
+        return (Some(HashSet::new()), false, true);
+    }
+
+    let mut requested_templates = Vec::new();
+    for (template, markers) in [
+        ("washer", &["шайб", "втулк"][..]),
+        ("plate_with_holes", &["пластин"][..]),
+        ("bracket_l", &["кроншт"][..]),
+        ("case_with_lid", &["корпус", "крышк"][..]),
+    ] {
+        if markers.iter().any(|marker| normalized.contains(marker)) {
+            requested_templates.push(template);
+        }
+    }
+
+    let mut scope = HashSet::new();
+    let explicit_create = parts.is_empty()
+        || normalized.contains("созд")
+        || normalized.contains("добавь деталь");
+    if explicit_create {
+        for template in requested_templates {
+            scope.insert(format!("create:{template}"));
+        }
+    }
+    for part in parts {
+        let Some(part_id) = part.get("part_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(parameters) = part.get("params").and_then(Value::as_object) {
+            for name in parameters.keys() {
+                if parameter_markers(name)
+                    .iter()
+                    .any(|marker| normalized.contains(marker))
+                {
+                    scope.insert(format!("parameter:{part_id}:{name}"));
+                }
+            }
+        }
+        if normalized.contains("скруг") || normalized.contains("радиус") {
+            scope.insert(format!("fillet:{part_id}"));
+        }
+    }
+    let requires_assumption = normalized.contains("побольш") && !scope.is_empty();
+    let requires_question = scope.is_empty();
+    (Some(scope), requires_assumption, requires_question)
+}
+
+fn plan_json_schema(
+    doc_id: u64,
+    document_instance_id: u64,
+    revision: u64,
+    parts: &[Value],
+    text: Option<&str>,
+) -> Value {
+    let mut available_variants = BTreeMap::new();
+    available_variants.insert(
+        "create:washer".to_string(),
+        create_operation_schema("washer", &["outer_diameter", "inner_diameter", "height"]),
+    );
+    available_variants.insert(
+        "create:plate_with_holes".to_string(),
+        create_operation_schema(
+            "plate_with_holes",
+            &["length", "width", "height", "hole_diameter", "hole_offset"],
+        ),
+    );
+    available_variants.insert(
+        "create:bracket_l".to_string(),
+        create_operation_schema(
+            "bracket_l",
+            &["a_length", "a_width", "a_thickness", "b_height"],
+        ),
+    );
+    available_variants.insert(
+        "create:case_with_lid".to_string(),
+        create_operation_schema(
+            "case_with_lid",
+            &[
+                "length", "width", "height", "wall", "bottom", "gap",
+                "lid_thickness", "lip_height", "lip_wall",
+            ],
+        ),
+    );
+    for part in parts {
+        let Some(part_id) = part.get("part_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(parameters) = part.get("params").and_then(Value::as_object) {
+            let mut parameter_names: Vec<&String> = parameters.keys().collect();
+            parameter_names.sort_unstable();
+            for name in parameter_names {
+                available_variants.insert(format!("parameter:{part_id}:{name}"), json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "command_id": {"const": "parameter.set"},
+                        "target_id": {"const": part_id},
+                        "parameters": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "name": {"const": name},
+                                "value": {"type": "number", "exclusiveMinimum": 0},
+                            },
+                            "required": ["name", "value"],
+                        },
+                    },
+                    "required": ["command_id", "target_id", "parameters"],
+                }));
+            }
+        }
+        available_variants.insert(format!("fillet:{part_id}"), json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "command_id": {"const": "op.fillet"},
+                "target_id": {"const": part_id},
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "radius": {"type": "number", "exclusiveMinimum": 0},
+                        "edge_ref": {"type": "object"},
+                    },
+                    "required": ["radius", "edge_ref"],
+                },
+            },
+            "required": ["command_id", "target_id", "parameters"],
+        }));
+    }
+    let (scope, requires_assumption, requires_question) =
+        request_operation_scope(parts, text);
+    let operation_variants: Vec<Value> = match scope {
+        None => available_variants.into_values().collect(),
+        Some(scope) => available_variants
+            .into_iter()
+            .filter_map(|(key, value)| scope.contains(&key).then_some(value))
+            .collect(),
+    };
+    let assumptions_schema = if requires_assumption {
+        json!({"type": "array", "minItems": 1, "items": {"type": "string"}})
+    } else {
+        json!({"type": "array", "items": {"type": "string"}})
+    };
+    let questions_schema = if requires_question {
+        json!({"type": "array", "minItems": 1, "items": {"type": "string"}})
+    } else {
+        json!({"type": "array", "items": {"type": "string"}})
+    };
+    let operations_schema = if operation_variants.is_empty() {
+        json!({"type": "array", "maxItems": 0})
+    } else {
+        json!({
+            "type": "array",
+            "maxItems": MAX_PLAN_OPS,
+            "items": {"oneOf": operation_variants},
+        })
+    };
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -719,22 +1061,9 @@ fn plan_json_schema(doc_id: u64, document_instance_id: u64, revision: u64) -> Va
             "document_instance_id": {"type": "integer", "const": document_instance_id},
             "base_revision": {"type": "integer", "const": revision},
             "units": {"type": "string", "const": "mm"},
-            "assumptions": {"type": "array", "items": {"type": "string"}},
-            "questions": {"type": "array", "items": {"type": "string"}},
-            "operations": {
-                "type": "array",
-                "maxItems": MAX_PLAN_OPS,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "command_id": {"enum": ALLOWED_COMMANDS},
-                        "target_id": {"type": ["string", "null"]},
-                        "parameters": {"type": "object"},
-                    },
-                    "required": ["command_id", "target_id", "parameters"],
-                },
-            },
+            "assumptions": assumptions_schema,
+            "questions": questions_schema,
+            "operations": operations_schema,
             "summary": {"type": "string"},
         },
         "required": [
@@ -758,7 +1087,13 @@ pub async fn llm_plan(
         {"role": "system", "content": sys},
         {"role": "user", "content": text},
     ]);
-    let schema = plan_json_schema(doc_id, document_instance_id, revision);
+    let schema = plan_json_schema(
+        doc_id,
+        document_instance_id,
+        revision,
+        parts,
+        Some(text),
+    );
     let raw = http_chat_request(messages, true, Some(schema.clone())).await?;
     let first = extract_json(&raw);
     let validation_error = first.as_ref().ok().and_then(|plan| {
@@ -870,5 +1205,143 @@ mod tests {
         })];
         assert_ne!(plan_hash(7, 11, 3, &first), plan_hash(7, 11, 3, &second));
         assert_ne!(plan_hash(7, 11, 3, &first), plan_hash(7, 12, 3, &first));
+    }
+
+    #[test]
+    fn ollama_disables_reasoning_without_changing_openai_requests() {
+        let messages = json!([{"role": "user", "content": "test"}]);
+        let schema = json!({"type": "object"});
+        let ollama = AiSettings {
+            provider: "ollama".into(),
+            base_url: OLLAMA_DEFAULT_BASE.into(),
+            model: "qwen3:4b".into(),
+            api_key_stored: false,
+        };
+        let ollama_body = chat_request_body(
+            &ollama,
+            messages.clone(),
+            true,
+            Some(schema.clone()),
+        );
+        assert_eq!(ollama_body["reasoning_effort"], json!("none"));
+        assert_eq!(
+            ollama_body.pointer("/response_format/json_schema/schema"),
+            Some(&schema),
+        );
+
+        let openai = AiSettings {
+            provider: "openai".into(),
+            base_url: "http://127.0.0.1:3001/v1".into(),
+            model: "test-model".into(),
+            api_key_stored: false,
+        };
+        let openai_body = chat_request_body(&openai, messages, true, None);
+        assert!(openai_body.get("reasoning_effort").is_none());
+        assert_eq!(openai_body["response_format"], json!({"type": "json_object"}));
+    }
+
+    #[test]
+    fn system_prompt_exposes_exact_semantic_contract() {
+        let prompt = system_prompt(
+            7,
+            11,
+            3,
+            &[json!({
+                "part_id": "part-1",
+                "template": "plate_with_holes",
+                "params": {"length": 80, "width": 40},
+            })],
+        );
+        assert!(prompt.contains("washer {outer_diameter, inner_diameter, height}"));
+        assert!(prompt.contains(
+            "plate_with_holes {length, width, height, hole_diameter, hole_offset}"
+        ));
+        assert!(prompt.contains("используй parameter.set, не создавай новую деталь"));
+        assert!(prompt.contains("Не выдумывай template, parameter name, part_id или edge_ref"));
+        assert!(prompt.contains("backend применит defaults"));
+        assert!(prompt.contains("\"document_instance_id\":11"));
+    }
+
+    #[test]
+    fn plan_schema_binds_templates_and_existing_parameters() {
+        let schema = plan_json_schema(
+            7,
+            11,
+            3,
+            &[json!({
+                "part_id": "part-1",
+                "template": "plate_with_holes",
+                "params": {"length": 80, "width": 40},
+            })],
+            None,
+        );
+        let variants = schema
+            .pointer("/properties/operations/items/oneOf")
+            .and_then(Value::as_array)
+            .expect("operation variants");
+        assert!(variants.iter().any(|variant| {
+            variant.pointer("/properties/parameters/properties/template/const")
+                == Some(&json!("washer"))
+                && variant.pointer(
+                    "/properties/parameters/properties/params/additionalProperties",
+                ) == Some(&json!(false))
+        }));
+        assert!(variants.iter().any(|variant| {
+            variant.pointer("/properties/command_id/const") == Some(&json!("parameter.set"))
+                && variant.pointer("/properties/target_id/const") == Some(&json!("part-1"))
+                && variant.pointer("/properties/parameters/properties/name/const")
+                    == Some(&json!("length"))
+        }));
+
+        let parts = [json!({
+            "part_id": "part-1",
+            "template": "plate_with_holes",
+            "params": {"length": 80, "width": 40},
+        })];
+        let edit = plan_json_schema(
+            7,
+            11,
+            3,
+            &parts,
+            Some("Измени длину детали на 100 мм"),
+        );
+        let edit_variants = edit
+            .pointer("/properties/operations/items/oneOf")
+            .and_then(Value::as_array)
+            .expect("edit operation variants");
+        assert_eq!(edit_variants.len(), 1);
+        assert_eq!(
+            edit_variants[0].pointer("/properties/parameters/properties/name/const"),
+            Some(&json!("length")),
+        );
+
+        let clarification = plan_json_schema(
+            7,
+            11,
+            3,
+            &[],
+            Some("Сделай деталь покрепче"),
+        );
+        assert_eq!(
+            clarification.pointer("/properties/operations/maxItems"),
+            Some(&json!(0)),
+        );
+        assert_eq!(
+            clarification.pointer("/properties/questions/minItems"),
+            Some(&json!(1)),
+        );
+    }
+
+    #[test]
+    fn task_registry_cancels_once_and_rejects_duplicates() {
+        let task_id = format!("test-task-{}", std::process::id());
+        finish_task(&task_id);
+        let receiver = register_task(&task_id).expect("register task");
+        assert!(!*receiver.borrow());
+        assert!(register_task(&task_id).is_err());
+        assert!(cancel_task(&task_id));
+        assert!(*receiver.borrow());
+        finish_task(&task_id);
+        assert!(!cancel_task(&task_id));
     }
 }

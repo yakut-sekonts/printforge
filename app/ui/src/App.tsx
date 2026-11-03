@@ -1,10 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  CommandDef, DocState, Lesson, MeshData, LessonCheck, GeoError,
-  TemplateDef, EdgeRef, EdgeFeatureKind, FaceDomeArgs, FaceFeatureArgs, PrintCheck, ImportResult,
-  DocStats, AiOperation, SheetBendArgs,
+  CommandDef, ConstrainedSketch, ConstrainedSketchExtrudeArgs, DocState, Lesson, MeshData,
+  LessonCheck, GeoError, ClearanceCalibrationArgs,
+  TemplateDef, EdgeRef, EdgeFeatureKind, FaceDomeArgs, FaceFeatureArgs, FitPocketArgs,
+  ImageReliefPreview, ImageReliefSettings, PrintCheck, ImportResult,
+  DocStats, AiOperation, DraftPrismArgs, LoftArgs, NativeE2eConfig, PerformanceConfig, RevolveArgs,
+  RibArgs, SheetBendArgs, ShellArgs, SketchExtrudeArgs, SketchSolveResult,
+  SplitConnectorPairArgs, SweepArgs,
+  TextReliefArgs, ThreadPairArgs,
+  VectorExtrudeArgs,
 } from "./types";
-import { backend, expandTilde, parseIpcError } from "./backend";
+import { backend, expandTilde, isTauri, parseIpcError } from "./backend";
 import { evalExpression } from "./expr";
 import { Viewport, faceArea, ViewName } from "./viewport";
 import {
@@ -43,6 +49,8 @@ export default function App() {
   const [doc, setDoc] = useState<DocState | null>(null);
   const [mesh, setMesh] = useState<MeshData | null>(null);
   const [computing, setComputing] = useState(false);
+  const [geometryBusy, setGeometryBusy] = useState(false);
+  const [geometryCancelling, setGeometryCancelling] = useState(false);
   const [selectedFace, setSelectedFace] = useState<number | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -78,15 +86,20 @@ export default function App() {
   const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [importedStats, setImportedStats] = useState<DocStats | null>(null);
+  const [constraintSolution, setConstraintSolution] = useState<SketchSolveResult | null>(null);
+  const [imageReliefPreview, setImageReliefPreview] = useState<ImageReliefPreview | null>(null);
   const [measureResult, setMeasureResult] = useState<{
     source?: string; bbox?: number[]; volume?: number;
     faceDiameter?: number; faceError?: string; distance?: number;
   } | null>(null);
   const [measureBusy, setMeasureBusy] = useState(false);
+  const [performanceConfig, setPerformanceConfig] = useState<PerformanceConfig | null>(null);
+  const [nativeE2eConfig, setNativeE2eConfig] = useState<NativeE2eConfig | null>(null);
 
   const viewportRef = useRef<Viewport | null>(null);
   const viewportEl = useRef<HTMLDivElement>(null);
   const meshToken = useRef(0);
+  const geometryOperationCount = useRef(0);
   const docRef = useRef<DocState | null>(null);
   const lessonRef = useRef<LessonRun | null>(null);
   const edgeToolRef = useRef(edgeTool);
@@ -97,6 +110,8 @@ export default function App() {
     preview: (_delta: number) => {},
     commit: (_delta: number) => {},
   });
+  const performanceReported = useRef(false);
+  const nativeE2eStarted = useRef(false);
   docRef.current = doc;
   lessonRef.current = lessonRun;
   edgeToolRef.current = edgeTool;
@@ -107,9 +122,20 @@ export default function App() {
     fetch("/commands.json").then((r) => r.json()).then((d) => setCommands(d.commands ?? [])).catch(() => {});
     fetch("/templates.json").then((r) => r.json()).then((d) => setTemplates(d.templates ?? [])).catch(() => {});
     fetch("/lessons.json").then((r) => r.json()).then((d) => setLessons(d.lessons ?? [])).catch(() => {});
-    backend.docGetState()
-      .then((s) => { if (s && s.stats) applyDoc(s); })
-      .catch(() => { /* бэкенд недоступен — пустое состояние */ });
+    const loadInitialDocument = async () => {
+      try {
+        const [perfConfig, e2eConfig] = isTauri()
+          ? await Promise.all([backend.performanceConfig(), backend.nativeE2eConfig()])
+          : [null, null];
+        setPerformanceConfig(perfConfig);
+        setNativeE2eConfig(e2eConfig);
+        const state = perfConfig?.enabled && perfConfig.mode === "workload" && perfConfig.project_path
+          ? await backend.docOpen(perfConfig.project_path)
+          : await backend.docGetState();
+        if (state?.stats) applyDoc(state);
+      } catch { /* бэкенд недоступен — пустое состояние */ }
+    };
+    void loadInitialDocument();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -140,6 +166,91 @@ export default function App() {
   }, [mesh]);
 
   useEffect(() => {
+    const config = performanceConfig;
+    const viewport = viewportRef.current;
+    if (!config?.enabled || performanceReported.current || !viewport) return;
+    if (!commands.length || !templates.length || !lessons.length) return;
+    if (config.mode === "workload" && (!doc?.stats?.is_valid || !mesh || computing)) return;
+    let cancelled = false;
+    const report = async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      const navigation = config.mode === "workload"
+        ? await viewport.measureNavigationFps(config.duration_ms)
+        : null;
+      if (cancelled) return;
+      performanceReported.current = true;
+      await backend.performanceReport({
+        mode: config.mode,
+        triangle_count: mesh?.triangle_count ?? 0,
+        vertex_count: mesh?.vertex_count ?? 0,
+        solid_count: doc?.stats?.solid_count ?? 0,
+        viewport: {
+          width: viewportEl.current?.clientWidth ?? 0,
+          height: viewportEl.current?.clientHeight ?? 0,
+          device_pixel_ratio: window.devicePixelRatio,
+        },
+        navigation,
+        user_agent: navigator.userAgent,
+      });
+    };
+    void report();
+    return () => { cancelled = true; };
+  }, [commands.length, computing, doc?.stats?.is_valid, doc?.stats?.solid_count,
+    lessons.length, mesh, performanceConfig, templates.length]);
+
+  useEffect(() => {
+    const config = nativeE2eConfig;
+    if (!config?.enabled || nativeE2eStarted.current) return;
+    if (!commands.length || !templates.length || !lessons.length || !viewportRef.current) return;
+    nativeE2eStarted.current = true;
+    const fingerprint = (state: DocState) => JSON.stringify({
+      doc_id: state.doc_id,
+      document_instance_id: state.document_instance_id,
+      revision: state.revision,
+      parts: state.parts,
+      operations: state.operations,
+      history_len: state.history_len,
+      history_index: state.history_index,
+    });
+    const run = async () => {
+      try {
+        const before = await backend.docGetState();
+        const taskId = `native-${config.mode}-${Date.now()}`;
+        const plan = backend.aiPlan("Создай шайбу 20×6×4 мм", taskId)
+          .then((value) => ({ ok: true as const, value }))
+          .catch((cause) => ({ ok: false as const, error: parseIpcError(cause) }));
+        await new Promise((resolve) => window.setTimeout(resolve, config.cancel_delay_ms));
+        const cancellation = await backend.aiCancel(taskId);
+        const outcome = await plan;
+        await new Promise((resolve) => window.setTimeout(resolve, 200));
+        const after = await backend.docGetState();
+        const recovery = config.mode === "ai-cad-cancel"
+          ? await backend.docCreate("washer", { outer_diameter: 20, inner_diameter: 6, height: 4 })
+          : null;
+        await backend.nativeE2eReport({
+          mode: config.mode,
+          cancellation,
+          outcome,
+          state_unchanged: fingerprint(before) === fingerprint(after),
+          before_revision: before.revision,
+          after_revision: after.revision,
+          recovery: recovery ? {
+            revision: recovery.revision,
+            is_valid: recovery.stats?.is_valid ?? false,
+            solid_count: recovery.stats?.solid_count ?? 0,
+          } : null,
+        });
+      } catch (cause) {
+        await backend.nativeE2eReport({
+          mode: config.mode,
+          probe_error: parseIpcError(cause),
+        });
+      }
+    };
+    void run();
+  }, [commands.length, lessons.length, nativeE2eConfig, templates.length]);
+
+  useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
     viewport.setEdgeSelectionMode(edgeTool.active, doc?.stats?.edges ?? []);
@@ -161,7 +272,7 @@ export default function App() {
     // страж устаревших ответов: та же пара doc_id+slot, но меньшая ревизия
     if (cur && cur.slot === state.slot && cur.doc_id === state.doc_id && state.revision < cur.revision) return;
     setDoc(state);
-    if (state.stats?.is_valid) {
+    if (state.stats && (state.stats.is_valid || state.stats.mesh_mode)) {
       const token = ++meshToken.current;
       setComputing(true);
       backend.docGetMesh()
@@ -178,8 +289,22 @@ export default function App() {
     }
   }, []);
 
-  const runBackend = useCallback(async (fn: () => Promise<DocState>): Promise<DocState | null> => {
+  const beginGeometryOperation = useCallback(() => {
+    geometryOperationCount.current += 1;
+    setGeometryBusy(true);
+  }, []);
+
+  const endGeometryOperation = useCallback(() => {
+    geometryOperationCount.current = Math.max(0, geometryOperationCount.current - 1);
+    if (geometryOperationCount.current === 0) setGeometryBusy(false);
+  }, []);
+
+  const runBackend = useCallback(async (
+    fn: () => Promise<DocState>,
+    cancellable = false,
+  ): Promise<DocState | null> => {
     setComputing(true);
+    if (cancellable) beginGeometryOperation();
     try {
       const state = await fn();
       applyDoc(state);
@@ -189,9 +314,25 @@ export default function App() {
       setStatusMsg(`Ошибка: ${err.message ?? String(e)}`);
       return null;
     } finally {
+      if (cancellable) endGeometryOperation();
       setComputing(false);
     }
-  }, [applyDoc]);
+  }, [applyDoc, beginGeometryOperation, endGeometryOperation]);
+
+  const cancelGeometry = useCallback(async () => {
+    if (!geometryBusy || geometryCancelling) return;
+    setGeometryCancelling(true);
+    try {
+      const result = await backend.geometryCancel();
+      setStatusMsg(result.cancelled
+        ? "Останавливаем вычисление; подтверждённая модель сохранена"
+        : "Активное вычисление уже завершилось");
+    } catch (error) {
+      setStatusMsg(`Не удалось отменить вычисление: ${parseIpcError(error).message}`);
+    } finally {
+      setGeometryCancelling(false);
+    }
+  }, [geometryBusy, geometryCancelling]);
 
   // ---------- уроки ----------
   const persistProgress = (run: LessonRun) => {
@@ -330,13 +471,13 @@ export default function App() {
 
   // ---------- команды документа ----------
   const createFromTemplate = useCallback(async (t: TemplateDef, params?: Record<string, number>) => {
-    const state = await runBackend(() => backend.docCreate(t.template_id, params));
+    const state = await runBackend(() => backend.docCreate(t.template_id, params), true);
     if (state) lessonEvent({ type: "params", state });
   }, [runBackend, lessonEvent]);
 
   // совместимость с уроком «Первая деталь»: создание учебной пластины
   const createPlate = useCallback(async () => {
-    const state = await runBackend(() => backend.docCreatePlate({ length: 80, width: 40, height: 6, hole_diameter: 4, hole_offset: 10 }));
+    const state = await runBackend(() => backend.docCreatePlate({ length: 80, width: 40, height: 6, hole_diameter: 4, hole_offset: 10 }), true);
     if (state) lessonEvent({ type: "params", state });
   }, [runBackend, lessonEvent]);
 
@@ -347,7 +488,7 @@ export default function App() {
     let num: number;
     try { num = evalExpression(raw, { ...(part?.params ?? cur.params) }); }
     catch (e) { setStatusMsg(`Ошибка выражения: ${(e as Error).message}`); return; }
-    const state = await runBackend(() => backend.docSetParameter(name, num, raw, partId));
+    const state = await runBackend(() => backend.docSetParameter(name, num, raw, partId), true);
     if (state) lessonEvent({ type: "params", state });
   }, [runBackend, lessonEvent]);
 
@@ -380,7 +521,7 @@ export default function App() {
       value,
       String(value),
       target.partId,
-    ));
+    ), true);
     if (state) {
       setStatusMsg(`${target.label}: ${value} мм`);
       lessonEvent({ type: "params", state });
@@ -494,7 +635,7 @@ export default function App() {
   }, [selectedPartId]);
 
   const addPart = useCallback(async (t: TemplateDef) => {
-    await runBackend(() => backend.docAddPart(t.template_id));
+    await runBackend(() => backend.docAddPart(t.template_id), true);
   }, [runBackend]);
 
   const runBoolean = useCallback(async (kind: "union" | "subtract" | "intersect", keepTool: boolean) => {
@@ -502,35 +643,113 @@ export default function App() {
     if (live.length < 2) return;
     const target = live.find((p) => p.part_id === selectedPartId) ?? live[0];
     const tool = live[(live.indexOf(target) + 1) % live.length];
-    await runBackend(() => backend.docBoolean(kind, target.part_id, tool.part_id, keepTool));
+    await runBackend(() => backend.docBoolean(kind, target.part_id, tool.part_id, keepTool), true);
   }, [runBackend, selectedPartId]);
 
   const runArray = useCallback(async (count: number, step: [number, number, number]) => {
     const id = activePartId();
     if (!id) return;
-    await runBackend(() => backend.docArray(id, count, step));
+    await runBackend(() => backend.docArray(id, count, step), true);
   }, [runBackend, activePartId]);
 
   const runMirror = useCallback(async (plane: "XY" | "XZ" | "YZ") => {
     const id = activePartId();
     if (!id) return;
-    await runBackend(() => backend.docMirror(id, plane));
+    await runBackend(() => backend.docMirror(id, plane), true);
   }, [runBackend, activePartId]);
 
   const runSplit = useCallback(async (plane: "XY" | "XZ" | "YZ", offset: number) => {
     const id = activePartId();
     if (!id) return;
-    await runBackend(() => backend.docSplit(id, plane, offset));
+    await runBackend(() => backend.docSplit(id, plane, offset), true);
   }, [runBackend, activePartId]);
 
   const runTransform = useCallback(async (translate: [number, number, number]) => {
     const id = activePartId();
     if (!id) return;
-    await runBackend(() => backend.docTransform(id, translate));
+    await runBackend(() => backend.docTransform(id, translate), true);
   }, [runBackend, activePartId]);
 
   const runProfileExtrude = useCallback(async (args: Parameters<typeof backend.docProfileExtrude>[0]) => {
-    await runBackend(() => backend.docProfileExtrude(args));
+    await runBackend(() => backend.docProfileExtrude(args), true);
+  }, [runBackend]);
+
+  const runSketchExtrude = useCallback(async (args: SketchExtrudeArgs) => {
+    const state = await runBackend(() => backend.docSketchExtrude(args), true);
+    if (state && !state.error) lessonEvent({ type: "operation", op: "sketch_extrude" });
+  }, [runBackend, lessonEvent]);
+
+  const runSketchSolve = useCallback(async (sketch: ConstrainedSketch) => {
+    setComputing(true);
+    beginGeometryOperation();
+    try {
+      const solution = await backend.sketchSolve(sketch);
+      setConstraintSolution(solution);
+      setStatusMsg(solution.degrees_of_freedom === 0
+        ? "Эскиз полностью определён"
+        : `Эскиз недоопределён: ${solution.degrees_of_freedom} DOF`);
+      lessonEvent({ type: "command", command_id: "op.sketch.solve" });
+    } catch (error) {
+      setConstraintSolution(null);
+      setStatusMsg(`Ошибка решателя: ${parseIpcError(error).message}`);
+    } finally {
+      endGeometryOperation();
+      setComputing(false);
+    }
+  }, [beginGeometryOperation, endGeometryOperation, lessonEvent]);
+
+  const runConstrainedSketchExtrude = useCallback(async (args: ConstrainedSketchExtrudeArgs) => {
+    const state = await runBackend(() => backend.docConstrainedSketchExtrude(args), true);
+    if (state && !state.error) lessonEvent({ type: "operation", op: "constrained_sketch_extrude" });
+  }, [runBackend, lessonEvent]);
+
+  const runRevolve = useCallback(async (args: RevolveArgs) => {
+    await runBackend(() => backend.docRevolve(args), true);
+  }, [runBackend]);
+
+  const runSweep = useCallback(async (args: SweepArgs) => {
+    await runBackend(() => backend.docSweep(args), true);
+  }, [runBackend]);
+
+  const runLoft = useCallback(async (args: LoftArgs) => {
+    await runBackend(() => backend.docLoft(args), true);
+  }, [runBackend]);
+
+  const runShell = useCallback(async (args: ShellArgs) => {
+    const state = await runBackend(() => backend.docShell(args), true);
+    if (state && !state.error) lessonEvent({ type: "operation", op: "shell" });
+  }, [runBackend, lessonEvent]);
+
+  const runDraftPrism = useCallback(async (args: DraftPrismArgs) => {
+    await runBackend(() => backend.docDraftPrism(args), true);
+  }, [runBackend]);
+
+  const runRib = useCallback(async (args: RibArgs) => {
+    await runBackend(() => backend.docRib(args), true);
+  }, [runBackend]);
+
+  const runFitPocket = useCallback(async (args: FitPocketArgs) => {
+    await runBackend(() => backend.docFitPocket(args), true);
+  }, [runBackend]);
+
+  const runVectorExtrude = useCallback(async (args: VectorExtrudeArgs) => {
+    await runBackend(() => backend.docVectorExtrude({ ...args, path: expandTilde(args.path) }), true);
+  }, [runBackend]);
+
+  const runTextRelief = useCallback(async (args: TextReliefArgs) => {
+    await runBackend(() => backend.docTextRelief(args), true);
+  }, [runBackend]);
+
+  const runThreadPair = useCallback(async (args: ThreadPairArgs) => {
+    await runBackend(() => backend.docThreadPair(args), true);
+  }, [runBackend]);
+
+  const runClearanceCalibration = useCallback(async (args: ClearanceCalibrationArgs) => {
+    await runBackend(() => backend.docClearanceCalibration(args), true);
+  }, [runBackend]);
+
+  const runSplitConnectorPair = useCallback(async (args: SplitConnectorPairArgs) => {
+    await runBackend(() => backend.docSplitConnectorPair(args), true);
   }, [runBackend]);
 
   const previewFaceFeature = useCallback((preview: FaceFeaturePreview | null) => {
@@ -539,7 +758,7 @@ export default function App() {
 
   const runFaceFeature = useCallback(async (args: FaceFeatureArgs) => {
     viewportRef.current?.setFaceFeaturePreview(null);
-    const state = await runBackend(() => backend.docFaceFeature(args));
+    const state = await runBackend(() => backend.docFaceFeature(args), true);
     if (!state || state.error) return;
     setSelectedFace(null);
     viewportRef.current?.setSelectedFace(null);
@@ -552,7 +771,7 @@ export default function App() {
 
   const runFaceDome = useCallback(async (args: FaceDomeArgs) => {
     viewportRef.current?.setFaceDomePreview(null);
-    const state = await runBackend(() => backend.docFaceDome(args));
+    const state = await runBackend(() => backend.docFaceDome(args), true);
     if (!state || state.error) return;
     setSelectedFace(null);
     viewportRef.current?.setSelectedFace(null);
@@ -565,7 +784,7 @@ export default function App() {
 
   const runSheetBend = useCallback(async (args: SheetBendArgs) => {
     viewportRef.current?.setSheetBendPreview(null);
-    const state = await runBackend(() => backend.docSheetBend(args));
+    const state = await runBackend(() => backend.docSheetBend(args), true);
     if (!state || state.error) return;
     setSelectedFace(null);
     viewportRef.current?.setSelectedFace(null);
@@ -575,23 +794,22 @@ export default function App() {
   const runArrayCircular = useCallback(async (count: number, angle: number, center: [number, number, number]) => {
     const id = activePartId();
     if (!id) return;
-    await runBackend(() => backend.docArrayCircular(id, count, angle, center));
+    await runBackend(() => backend.docArrayCircular(id, count, angle, center), true);
   }, [runBackend, activePartId]);
 
   const runAlign = useCallback(async (axis: "x" | "y" | "z", align: "center" | "min" | "max", value: number) => {
     const id = activePartId();
     if (!id) return;
-    await runBackend(() => backend.docAlign(id, axis, align, value));
+    await runBackend(() => backend.docAlign(id, axis, align, value), true);
   }, [runBackend, activePartId]);
 
   // ---------- измерения ----------
   const runMeasure = useCallback(async () => {
     setMeasureBusy(true);
+    beginGeometryOperation();
     try {
-      const [bboxRes, volRes] = await Promise.all([
-        backend.measure({ type: "bbox" }),
-        backend.measure({ type: "volume" }),
-      ]);
+      const bboxRes = await backend.measure({ type: "bbox" });
+      const volRes = await backend.measure({ type: "volume" });
       setMeasureResult((prev) => ({
         ...prev,
         source: (bboxRes.source as string) ?? "brep",
@@ -602,13 +820,15 @@ export default function App() {
     } catch (e) {
       setStatusMsg(`Ошибка измерения: ${parseIpcError(e).message}`);
     } finally {
+      endGeometryOperation();
       setMeasureBusy(false);
     }
-  }, []);
+  }, [beginGeometryOperation, endGeometryOperation]);
 
   const runMeasureFace = useCallback(async () => {
     if (selectedFace == null) return;
     setMeasureBusy(true);
+    beginGeometryOperation();
     try {
       const res = await backend.measure({ type: "face_diameter", face_index: selectedFace });
       setMeasureResult((prev) => ({ ...prev, faceDiameter: res.diameter as number | undefined, faceError: undefined }));
@@ -616,21 +836,24 @@ export default function App() {
       const err = parseIpcError(e);
       setMeasureResult((prev) => ({ ...prev, faceDiameter: undefined, faceError: err.message }));
     } finally {
+      endGeometryOperation();
       setMeasureBusy(false);
     }
-  }, [selectedFace]);
+  }, [selectedFace, beginGeometryOperation, endGeometryOperation]);
 
   const runMeasureDistance = useCallback(async (p0: [number, number, number], p1: [number, number, number]) => {
     setMeasureBusy(true);
+    beginGeometryOperation();
     try {
       const res = await backend.measure({ type: "distance", p0, p1 });
       setMeasureResult((prev) => ({ ...prev, distance: res.distance as number | undefined }));
     } catch (e) {
       setStatusMsg(`Ошибка измерения: ${parseIpcError(e).message}`);
     } finally {
+      endGeometryOperation();
       setMeasureBusy(false);
     }
-  }, []);
+  }, [beginGeometryOperation, endGeometryOperation]);
 
   // ---------- обработка рёбер ----------
   const startEdgeTool = useCallback((kind: EdgeFeatureKind) => {
@@ -678,7 +901,7 @@ export default function App() {
     }
     const state = await runBackend(() => current.kind === "fillet"
       ? backend.docFillet(current.selected!, size, current.partId ?? activePartId())
-      : backend.docChamfer(current.selected!, size, current.partId ?? activePartId()));
+      : backend.docChamfer(current.selected!, size, current.partId ?? activePartId()), true);
     if (state && !state.error) {
       cancelEdgeTool();
       setStatusMsg(current.kind === "fillet" ? "Скругление создано" : "Фаска создана");
@@ -702,6 +925,7 @@ export default function App() {
   // ---------- проверка печати ----------
   const runPrintCheck = useCallback(async (printer: { x: number; y: number; z: number }) => {
     setPrintBusy(true);
+    beginGeometryOperation();
     try {
       const res = await backend.printCheck(printer);
       setPrintChecks(res.checks ?? []);
@@ -709,20 +933,22 @@ export default function App() {
     } catch (e) {
       setStatusMsg(`Ошибка проверки: ${parseIpcError(e).message}`);
     } finally {
+      endGeometryOperation();
       setPrintBusy(false);
     }
-  }, []);
+  }, [beginGeometryOperation, endGeometryOperation]);
 
   // ---------- импорт ----------
   const runImport = useCallback(async (path: string, format: "step" | "stl", unitScale?: number) => {
     setImportBusy(true);
+    beginGeometryOperation();
     try {
       const res = await backend.docImport(expandTilde(path), format, unitScale);
       if (format === "stl" && unitScale === undefined) {
         // первый проход: показываем габарит и спрашиваем единицы
         setImportPreview(res);
       } else {
-        const meshData = await backend.docGetImportedMesh(res.mesh.path);
+        const meshData = await backend.docGetImportedMesh(res.mesh);
         setMesh(meshData);
         setImportedStats(res.stats);
         setImportPreview(null);
@@ -735,9 +961,77 @@ export default function App() {
       setStatusMsg(`Ошибка импорта: ${parseIpcError(e).message}`);
       setImportPreview(null);
     } finally {
+      endGeometryOperation();
       setImportBusy(false);
     }
-  }, []);
+  }, [beginGeometryOperation, endGeometryOperation]);
+
+  const applyMeshImport = useCallback(async (path: string, unitScale: number) => {
+    const state = await runBackend(() => backend.docMeshImportApply(expandTilde(path), "stl", unitScale), true);
+    if (state && !state.error) {
+      setImportPreview(null);
+      setStatusMsg(`Mesh применён к документу: ${expandTilde(path)}`);
+      lessonEvent({ type: "operation", op: "mesh_source" });
+    }
+  }, [runBackend, lessonEvent]);
+
+  const runMeshTransform = useCallback(async (translate: [number, number, number], scale: number) => {
+    await runBackend(() => backend.docMeshTransform(translate, [0, 0, 0], scale), true);
+  }, [runBackend]);
+
+  const runMeshRepair = useCallback(async () => {
+    const state = await runBackend(() => backend.docMeshRepair(), true);
+    if (state && !state.error) lessonEvent({ type: "operation", op: "mesh_repair" });
+  }, [runBackend, lessonEvent]);
+
+  const runMeshDecimate = useCallback(async (targetRatio: number) => {
+    const state = await runBackend(() => backend.docMeshDecimate(targetRatio), true);
+    if (state && !state.error) lessonEvent({ type: "operation", op: "mesh_decimate" });
+  }, [runBackend, lessonEvent]);
+
+  const previewImageRelief = useCallback(async (settings: ImageReliefSettings) => {
+    setComputing(true);
+    beginGeometryOperation();
+    try {
+      const preview = await backend.imageReliefPreview({
+        ...settings, path: expandTilde(settings.path),
+      });
+      const previewMesh = await backend.docGetImportedMesh(preview.mesh);
+      setMesh(previewMesh);
+      setImportedStats(preview.stats);
+      setImageReliefPreview(preview);
+      setStatusMsg("Decorative mesh preview готов; документ не изменён");
+      lessonEvent({ type: "command", command_id: "op.image_relief.preview" });
+    } catch (error) {
+      setImageReliefPreview(null);
+      setStatusMsg(`Ошибка image relief: ${parseIpcError(error).message}`);
+    } finally {
+      endGeometryOperation();
+      setComputing(false);
+    }
+  }, [beginGeometryOperation, endGeometryOperation, lessonEvent]);
+
+  const applyImageRelief = useCallback(async (
+    settings: ImageReliefSettings, expectedSha256: string,
+  ) => {
+    const state = await runBackend(() => backend.docImageReliefApply({
+      ...settings, path: expandTilde(settings.path),
+    }, expectedSha256), true);
+    if (state && !state.error) {
+      setImageReliefPreview(null);
+      setStatusMsg("Decorative mesh применён одной транзакцией");
+      lessonEvent({ type: "operation", op: "image_relief_source" });
+    }
+  }, [runBackend, lessonEvent]);
+
+  const cancelImageReliefPreview = useCallback(() => {
+    setImageReliefPreview(null);
+    setImportedStats(null);
+    const current = docRef.current;
+    if (current?.stats) applyDoc(current);
+    else setMesh(null);
+    setStatusMsg("Decorative mesh preview отменён; документ не изменён");
+  }, [applyDoc]);
 
   // ---------- файлы ----------
   const doSave = useCallback(async () => {
@@ -759,18 +1053,21 @@ export default function App() {
   const doExport = useCallback(async (format: "stl" | "step" | "3mf") => {
     const path = expandTilde(exportPath).replace(/\.(stl|step|stp|3mf)$/i, "") + "." + format;
     setComputing(true);
+    beginGeometryOperation();
     try {
       const res = await backend.docExport(path, format);
       const kb = (res.bytes / 1024).toFixed(1);
-      const vol = Math.round(res.stats.volume * 10) / 10;
-      setStatusMsg(`Экспортировано: ${res.path} — ${kb} КБ, объём ${vol} мм³`);
+      const volume = res.stats.volume;
+      const volumeText = volume == null ? "объём неизвестен" : `объём ${Math.round(volume * 10) / 10} мм³`;
+      setStatusMsg(`Экспортировано: ${res.path} — ${kb} КБ, ${volumeText}`);
       lessonEvent({ type: "exported" });
     } catch (e) {
       setStatusMsg(`Ошибка экспорта: ${parseIpcError(e).message}`);
     } finally {
+      endGeometryOperation();
       setComputing(false);
     }
-  }, [exportPath, lessonEvent]);
+  }, [exportPath, lessonEvent, beginGeometryOperation, endGeometryOperation]);
 
   const viewCommand = useCallback((id: string) => {
     const vp = viewportRef.current;
@@ -801,7 +1098,7 @@ export default function App() {
       plan_hash: planHash,
       action_id: actionId,
       mode: "apply",
-    }));
+    }), true);
     if (!state || state.error) return null;
     lessonEvent({ type: "params", state });
     setStatusMsg("AI-план применён одной транзакцией");
@@ -903,7 +1200,7 @@ export default function App() {
 
   const faceAreaValue = mesh && selectedFace != null ? faceArea(mesh, selectedFace) : null;
   const docName = doc?.path ? doc.path.split("/").pop()! : "Без названия";
-  const hasBody = (!!doc?.stats?.is_valid || !!importedStats) && !!mesh;
+  const hasBody = (!!doc?.stats?.is_valid || !!doc?.stats?.mesh_mode || !!importedStats) && !!mesh;
 
   return (
     <div className="app-shell">
@@ -977,6 +1274,22 @@ export default function App() {
           onSplit={(pl, off) => void runSplit(pl, off)}
           onTransform={(tr) => void runTransform(tr)}
           onProfileExtrude={(a) => void runProfileExtrude(a)}
+          onSketchExtrude={(a) => void runSketchExtrude(a)}
+          constraintSolution={constraintSolution}
+          onSketchSolve={(sketch) => void runSketchSolve(sketch)}
+          onConstrainedSketchExtrude={(a) => void runConstrainedSketchExtrude(a)}
+          onRevolve={(a) => void runRevolve(a)}
+          onSweep={(a) => void runSweep(a)}
+          onLoft={(a) => void runLoft(a)}
+          onShell={(a) => void runShell(a)}
+          onDraftPrism={(a) => void runDraftPrism(a)}
+          onRib={(a) => void runRib(a)}
+          onFitPocket={(a) => void runFitPocket(a)}
+          onVectorExtrude={(a) => void runVectorExtrude(a)}
+          onTextRelief={(a) => void runTextRelief(a)}
+          onThreadPair={(a) => void runThreadPair(a)}
+          onClearanceCalibration={(a) => void runClearanceCalibration(a)}
+          onSplitConnectorPair={(a) => void runSplitConnectorPair(a)}
           onArrayCircular={(c, ang, ctr) => void runArrayCircular(c, ang, ctr)}
           onAlign={(ax, al, v) => void runAlign(ax, al, v)}
           measureResult={measureResult}
@@ -998,7 +1311,15 @@ export default function App() {
           importPreview={importPreview}
           importBusy={importBusy}
           onImport={(p, f, s) => void runImport(p, f, s)}
+          onApplyMeshImport={(p, s) => void applyMeshImport(p, s)}
           onCancelImportPreview={() => setImportPreview(null)}
+          onMeshTransform={(translate, scale) => void runMeshTransform(translate, scale)}
+          onMeshRepair={() => void runMeshRepair()}
+          onMeshDecimate={(ratio) => void runMeshDecimate(ratio)}
+          imageReliefPreview={imageReliefPreview}
+          onImageReliefPreview={(settings) => void previewImageRelief(settings)}
+          onImageReliefApply={(settings, sha) => void applyImageRelief(settings, sha)}
+          onCancelImageReliefPreview={cancelImageReliefPreview}
           savePath={savePath} setSavePath={setSavePath}
           openPath={openPath} setOpenPath={setOpenPath}
           exportPath={exportPath} setExportPath={setExportPath}
@@ -1009,9 +1330,10 @@ export default function App() {
         {aiOpen && (
           <AiPanel
             documentRevision={doc?.revision ?? 0}
+            commands={commands}
             onClose={() => setAiOpen(false)}
             onApply={applyAiPlan}
-            onOpenHelp={() => openHelpArticle("ai-pomoshchnik")}
+            onOpenHelp={openHelpArticle}
           />
         )}
         {helpOpen && (
@@ -1030,7 +1352,10 @@ export default function App() {
       </div>
       <StatusBar
         doc={doc}
-        computing={computing}
+        computing={computing || geometryBusy}
+        geometryBusy={geometryBusy}
+        geometryCancelling={geometryCancelling}
+        onCancelGeometry={() => void cancelGeometry()}
         message={statusMsg}
         selectedFace={selectedFace}
         faceArea={faceAreaValue}

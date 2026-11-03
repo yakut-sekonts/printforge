@@ -110,3 +110,47 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle }} --config src-tauri/tauri.release.conf.json
+
+      - name: Validate installed Windows release and native performance
+        if: runner.os == 'Windows'
+        run: python scripts/run_windows_release_evidence.py
+
+      - name: Upload Windows release evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-release-evidence-${{ github.run_id }}
+          path: artifacts/windows-release/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-release:
+    name: Publish complete release
+    if: github.ref_type == 'tag'
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Publish draft after every installer passes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          notes="docs/releases/${tag}.md"
+          if [[ ! -f "$notes" ]]; then
+            echo "Release notes not found: $notes" >&2
+            exit 1
+          fi
+
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq .id)"
+          gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -f name="PrintForge ${tag}" \
+            -f body="$(cat "$notes")" \
+            -F draft=false \
+            -F prerelease=false

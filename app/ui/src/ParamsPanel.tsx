@@ -1,7 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type {
-  DocState, EdgeFeatureKind, GeoError, TemplateDef, EdgeRef, FaceDomeArgs, FaceFeatureArgs,
-  FaceFeatureProfile, FaceProfileKind, PrintCheck, ImportResult, Operation, SheetBendArgs,
+  ClearanceCalibrationArgs, ConstrainedSketch, ConstrainedSketchExtrudeArgs, DocState, DraftPrismArgs,
+  EdgeFeatureKind, GeoError, TemplateDef, EdgeRef, FaceDomeArgs,
+  FaceFeatureArgs, FaceFeatureProfile, FaceProfileKind, FitClearanceMode, FitFixtureId,
+  FitPocketArgs, ImageReliefPreview, ImageReliefSettings, LoftArgs, PrintCheck,
+  ImportResult, Operation, RevolveArgs, RibArgs,
+  SheetBendArgs, ShellArgs, SketchExtrudeArgs, SketchProfile, SplitConnectorPairArgs, SweepArgs,
+  SketchSolveResult, TextReliefArgs, ThreadPairArgs, VectorExtrudeArgs,
 } from "./types";
 import {
   faceDomeArgs as buildFaceDomeArgs, faceFeatureArgs as buildFaceFeatureArgs,
@@ -61,6 +66,22 @@ interface Props {
     depth?: number | "through";
     target_id?: string;
   }) => void;
+  onSketchExtrude: (args: SketchExtrudeArgs) => void;
+  constraintSolution: SketchSolveResult | null;
+  onSketchSolve: (sketch: ConstrainedSketch) => void;
+  onConstrainedSketchExtrude: (args: ConstrainedSketchExtrudeArgs) => void;
+  onRevolve: (args: RevolveArgs) => void;
+  onSweep: (args: SweepArgs) => void;
+  onLoft: (args: LoftArgs) => void;
+  onShell: (args: ShellArgs) => void;
+  onDraftPrism: (args: DraftPrismArgs) => void;
+  onRib: (args: RibArgs) => void;
+  onFitPocket: (args: FitPocketArgs) => void;
+  onVectorExtrude: (args: VectorExtrudeArgs) => void;
+  onTextRelief: (args: TextReliefArgs) => void;
+  onThreadPair: (args: ThreadPairArgs) => void;
+  onClearanceCalibration: (args: ClearanceCalibrationArgs) => void;
+  onSplitConnectorPair: (args: SplitConnectorPairArgs) => void;
   onArrayCircular: (count: number, angle: number, center: [number, number, number]) => void;
   onAlign: (axis: "x" | "y" | "z", align: "center" | "min" | "max", value: number) => void;
   measureResult: {
@@ -88,7 +109,15 @@ interface Props {
   importPreview: ImportResult | null;
   importBusy: boolean;
   onImport: (path: string, format: "step" | "stl", unitScale?: number) => void;
+  onApplyMeshImport: (path: string, unitScale: number) => void;
   onCancelImportPreview: () => void;
+  onMeshTransform: (translate: [number, number, number], scale: number) => void;
+  onMeshRepair: () => void;
+  onMeshDecimate: (targetRatio: number) => void;
+  imageReliefPreview: ImageReliefPreview | null;
+  onImageReliefPreview: (settings: ImageReliefSettings) => void;
+  onImageReliefApply: (settings: ImageReliefSettings, expectedSha256: string) => void;
+  onCancelImageReliefPreview: () => void;
   // файлы
   savePath: string; setSavePath: (v: string) => void;
   openPath: string; setOpenPath: (v: string) => void;
@@ -111,17 +140,73 @@ function fmtNum(v: number): string {
   return String(Math.round(v * 100) / 100);
 }
 
+function rectangleProfile(width: number, height: number, holeDiameter = 0): SketchProfile {
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
+  return {
+    regions: [{
+      outer: {
+        kind: "polygon",
+        points: [
+          [-halfWidth, -halfHeight], [halfWidth, -halfHeight],
+          [halfWidth, halfHeight], [-halfWidth, halfHeight],
+        ],
+      },
+      holes: holeDiameter > 0
+        ? [{ kind: "circle", center: [0, 0], radius: holeDiameter / 2 }]
+        : [],
+    }],
+  };
+}
+
+function constrainedRectangleSketch(width: number, height: number): ConstrainedSketch {
+  const order = ["bottom", "right", "top", "left"];
+  return {
+    entities: [
+      { id: "bottom", type: "line", start: [0.1, -0.2], end: [width - 0.2, 0.3] },
+      { id: "right", type: "line", start: [width + 0.2, 0.1], end: [width - 0.3, height - 0.2] },
+      { id: "top", type: "line", start: [width + 0.1, height + 0.2], end: [-0.2, height - 0.3] },
+      { id: "left", type: "line", start: [0.2, height + 0.1], end: [-0.1, 0.2] },
+    ],
+    constraints: [
+      ...order.map((entityId, index) => ({
+        type: "coincident" as const,
+        a: [entityId, "end"] as [string, "end"],
+        b: [order[(index + 1) % order.length], "start"] as [string, "start"],
+      })),
+      { type: "horizontal", entity: "bottom" },
+      { type: "horizontal", entity: "top" },
+      { type: "vertical", entity: "right" },
+      { type: "vertical", entity: "left" },
+      { type: "dimension", kind: "distance_x", a: ["bottom", "start"], b: ["bottom", "end"], value: width },
+      { type: "dimension", kind: "distance_y", a: ["right", "start"], b: ["right", "end"], value: height },
+      { type: "fix", point: ["bottom", "start"], value: [0, 0] },
+    ],
+    regions: [{ outer: order, holes: [] }],
+  };
+}
+
+function circleProfile(radius: number): SketchProfile {
+  return { regions: [{ outer: { kind: "circle", center: [0, 0], radius }, holes: [] }] };
+}
+
 function sameEdge(a: EdgeRef, b: EdgeRef): boolean {
   return a.kind === b.kind && a.solid_index === b.solid_index &&
     a.midpoint.every((v, i) => Math.abs(v - b.midpoint[i]) < 1e-6);
+}
+
+function isFaceFeatureProfile(
+  profile: FaceFeatureProfile | SketchProfile | undefined,
+): profile is FaceFeatureProfile {
+  return !!profile && "kind" in profile &&
+    ["rectangle", "circle", "ring", "slot"].includes(profile.kind);
 }
 
 function isSupportedFlatBendCut(operation: Operation, targetId: string | undefined): boolean {
   return operation.op === "face_feature" && operation.target_id === targetId &&
     operation.mode === "cut" && operation.depth === "through" &&
     operation.face_ref?.kind === "outer_planar" && operation.face_ref.axis === "z" &&
-    operation.face_ref.side === 1 && !!operation.profile &&
-    ["rectangle", "circle", "ring", "slot"].includes(operation.profile.kind);
+    operation.face_ref.side === 1 && isFaceFeatureProfile(operation.profile);
 }
 
 function flatCutBendSpan(
@@ -130,7 +215,7 @@ function flatCutBendSpan(
 ): { center: number; extent: number } | null {
   const profile = operation.profile;
   const anchor = operation.face_ref?.anchor;
-  if (!profile || !anchor) return null;
+  if (!isFaceFeatureProfile(profile) || !anchor) return null;
   const axisIndex = bendAxis === "x" ? 0 : 1;
   const center = Number(anchor[axisIndex]) + Number(profile.center?.[axisIndex]);
   let extent: number;
@@ -169,12 +254,51 @@ export function ParamsPanel(props: Props) {
   const [printer, setPrinter] = useState(loadPrinter);
   const [importPath, setImportPath] = useState("~/model.step");
   const [importFormat, setImportFormat] = useState<"step" | "stl">("step");
+  const [meshTranslate, setMeshTranslate] = useState({ x: "0", y: "0", z: "0" });
+  const [meshScale, setMeshScale] = useState("1");
+  const [meshTargetRatio, setMeshTargetRatio] = useState("0.5");
+  const [imagePath, setImagePath] = useState("~/relief.png");
+  const [imageWidth, setImageWidth] = useState("50");
+  const [imageReliefHeight, setImageReliefHeight] = useState("3");
+  const [imageBaseThickness, setImageBaseThickness] = useState("1.5");
+  const [imageSamples, setImageSamples] = useState("96");
+  const [imageSeed, setImageSeed] = useState("0");
+  const [imageNoise, setImageNoise] = useState("0.015");
+  const [imageInvert, setImageInvert] = useState(false);
   const [keepTool, setKeepTool] = useState(false);
   const [arrayCount, setArrayCount] = useState("2");
   const [arrayStep, setArrayStep] = useState({ x: "50", y: "0", z: "0" });
   const [mirrorPlane, setMirrorPlane] = useState<"XY" | "XZ" | "YZ">("YZ");
   const [splitPlane, setSplitPlane] = useState<"XY" | "XZ" | "YZ">("XY");
   const [splitOffset, setSplitOffset] = useState("0");
+  const [extendedTool, setExtendedTool] = useState<
+    "sketch" | "constraints" | "revolve" | "sweep" | "loft" | "shell" | "draft" | "rib" | "fit" |
+    "vector" | "text" | "thread" | "calibration" | "connector"
+  >("sketch");
+  const [extendedValues, setExtendedValues] = useState({
+    width: "40", height: "20", depth: "5", hole: "10",
+    innerRadius: "5", outerRadius: "10", angle: "360",
+    pathLength: "20", sectionRadius: "2", loftRadius1: "10",
+    loftRadius2: "5", loftHeight: "20",
+    shellOuterRadius: "10", shellHeight: "20", shellWall: "2", shellBottom: "3",
+    draftWidth: "20", draftDepth: "12", draftHeight: "10", draftAngle: "5",
+    baseLength: "40", baseWidth: "20", baseThickness: "4", ribLength: "15",
+    ribHeight: "12", ribWidth: "3", ribOverlap: "1",
+    fitFixture: "bearing_608", fitBodyLength: "32", fitBodyWidth: "32",
+    fitBodyHeight: "12", fitClearance: "0.2", fitClearanceMode: "diametral",
+    vectorPath: "~/profile.svg", vectorFormat: "svg", vectorHeight: "5", vectorUnitScale: "1",
+    textValue: "О", textFontSize: "10", textReliefHeight: "1", textBodyLength: "30",
+    textBodyWidth: "20", textBodyHeight: "4", textMode: "add",
+    threadDiameter: "10", threadPitch: "1.5", threadLength: "12", threadHand: "right",
+    threadClearance: "0.3", threadNutHeight: "5", threadNutAcrossFlats: "18",
+    calibrationValues: "0.10, 0.20, 0.35", calibrationNominal: "8",
+    calibrationLength: "24", calibrationWidth: "18", calibrationThickness: "3",
+    calibrationSpacing: "28", calibrationFontSize: "3", calibrationLabelHeight: "0.6",
+    calibrationProfile: "PLA test v1",
+    connectorLength: "40", connectorWidth: "24", connectorHeight: "10",
+    connectorPinRadius: "2", connectorPinLength: "6", connectorClearance: "0.25",
+    connectorSeparation: "5",
+  });
   const [translate, setTranslate] = useState({ x: "0", y: "0", z: "0" });
   const [profileKind, setProfileKind] = useState<"rectangle" | "circle" | "ring" | "slot">("rectangle");
   const [profileDims, setProfileDims] = useState({ width: "20", height: "10", diameter: "10", outer_diameter: "20", inner_diameter: "10", slot_width: "6", slot_length: "20" });
@@ -228,10 +352,12 @@ export function ParamsPanel(props: Props) {
     setFaceFeatureOpen(false);
     setFaceDomeOpen(false);
     setSheetBendOpen(false);
+    if (props.sheetBendTarget?.axis === "x") setSheetBendAxis("y");
+    if (props.sheetBendTarget?.axis === "y") setSheetBendAxis("x");
     props.onFaceFeaturePreview(null);
     props.onFaceDomePreview(null);
     props.onSheetBendPreview(null);
-  }, [props.selectedFace, props.onFaceFeaturePreview, props.onFaceDomePreview,
+  }, [props.selectedFace, props.sheetBendTarget, props.onFaceFeaturePreview, props.onFaceDomePreview,
     props.onSheetBendPreview]);
 
   const changedFields = useMemo(() => {
@@ -282,6 +408,9 @@ export function ParamsPanel(props: Props) {
     : null;
   const booleanReady = liveParts.length >= 2 && !!targetPart && !!toolPart;
   const num = (s: string) => Number(s.replace(",", ".")) || 0;
+  const setExtendedValue = (name: keyof typeof extendedValues, value: string) => {
+    setExtendedValues((current) => ({ ...current, [name]: value }));
+  };
   const faceNumber = (value: string) => Number(value.replace(",", "."));
 
   const faceFeatureProfile = useMemo<FaceFeatureProfile>(() => {
@@ -416,10 +545,13 @@ export function ParamsPanel(props: Props) {
     .filter((operation) => isSupportedFlatBendCut(operation, activePart?.part_id)),
   [activePart?.part_id, doc?.operations]);
 
+  const perpendicularFlangeBend = props.sheetBendTarget?.axis === "x" ||
+    props.sheetBendTarget?.axis === "y";
+
   const sheetBendStructuralReason = useMemo(() => {
     if (activePart?.template !== "plate_with_holes") return "Изгиб пока доступен только для пластины.";
     if (!props.sheetBendTarget) {
-      return "Для изгиба выберите верхнюю плоскую грань пластины.";
+      return "Для изгиба выберите верхнюю грань пластины или внешнюю грань готового фланца.";
     }
     let bendStarted = false;
     for (const operation of doc?.operations ?? []) {
@@ -433,11 +565,55 @@ export function ParamsPanel(props: Props) {
       }
       return "Перед изгибом допустимы сквозные вырезы; затем изгибы должны идти подряд.";
     }
+    if (perpendicularFlangeBend) {
+      if (existingSheetBends.length !== 1) {
+        return "Изгиб фланца должен следовать сразу после одного базового изгиба.";
+      }
+      const base = existingSheetBends[0];
+      if (Math.abs(base.angle - 90) > 1e-7) {
+        return "Изгиб фланца пока доступен только после базового изгиба 90°.";
+      }
+      if (base.bend_axis !== props.sheetBendTarget.axis ||
+          base.moving_side !== props.sheetBendTarget.side) {
+        return "Выберите внешнюю грань подвижного фланца базового изгиба.";
+      }
+      const baseLength = base.bend_axis === "x"
+        ? sheetBendDimensions.length
+        : sheetBendDimensions.width;
+      const baseAllowance = (base.inside_radius + sheetBendDimensions.thickness / 2) *
+        base.angle * Math.PI / 180;
+      const targetBoundary = base.position +
+        (base.moving_side < 0 ? -baseAllowance / 2 : baseAllowance / 2);
+      for (const operation of flatSheetCuts) {
+        const span = flatCutBendSpan(operation, base.bend_axis);
+        if (!span) return "Параметры пользовательского выреза повреждены.";
+        const featureMin = span.center - span.extent;
+        const featureMax = span.center + span.extent;
+        const onTargetFlange = base.moving_side < 0
+          ? featureMax < targetBoundary - 1e-7
+          : featureMin > targetBoundary + 1e-7;
+        const touchesTargetFlange = base.moving_side < 0
+          ? featureMin < targetBoundary + 1e-7
+          : featureMax > targetBoundary - 1e-7;
+        if (touchesTargetFlange && !onTargetFlange) {
+          return "Пользовательский вырез должен целиком лежать на прямом участке выбранного фланца.";
+        }
+      }
+      const flangeDepth = base.moving_side < 0
+        ? base.position + baseLength / 2 - baseAllowance / 2
+        : baseLength / 2 - base.position - baseAllowance / 2;
+      if (flangeDepth <= 0.1) return "Фланец слишком короткий для второго изгиба.";
+      return null;
+    }
+    if (existingSheetBends.some((operation) => operation.face_ref.axis !== "z")) {
+      return "После изгиба фланца новые линии пока не поддерживаются.";
+    }
     if (existingSheetBends.length >= 4) {
       return "Поддерживаются до четырёх последовательных линий изгиба.";
     }
     return null;
-  }, [activePart, doc?.operations, existingSheetBends, props.sheetBendTarget]);
+  }, [activePart, doc?.operations, existingSheetBends, props.sheetBendTarget,
+    perpendicularFlangeBend, sheetBendDimensions, flatSheetCuts]);
 
   const sheetBendError = useMemo(() => {
     if (sheetBendStructuralReason) return sheetBendStructuralReason;
@@ -467,9 +643,12 @@ export function ParamsPanel(props: Props) {
         }
       }
     }
-    for (const operation of flatSheetCuts) {
+    for (const operation of perpendicularFlangeBend ? [] : flatSheetCuts) {
       const span = flatCutBendSpan(operation, sheetBendAxis);
       if (!span) return "Параметры пользовательского выреза повреждены.";
+      if (!isFaceFeatureProfile(operation.profile)) {
+        return "Параметры пользовательского выреза повреждены.";
+      }
       const developedCut = span.center + developedLength / 2;
       if (developedCut + span.extent >= zoneMin && developedCut - span.extent <= zoneMax) {
         if (operation.profile?.kind !== "rectangle" && operation.profile?.kind !== "circle" &&
@@ -494,7 +673,7 @@ export function ParamsPanel(props: Props) {
         }
       }
     }
-    if (existingSheetBends.length > 0) {
+    if (existingSheetBends.length > 0 && !perpendicularFlangeBend) {
       if (existingSheetBends.some((existing) => existing.bend_axis !== sheetBendAxis)) {
         return "Последовательные изгибы должны быть параллельны и использовать одну ось.";
       }
@@ -525,7 +704,8 @@ export function ParamsPanel(props: Props) {
     }
     return null;
   }, [sheetBendStructuralReason, sheetBendPosition, sheetBendAngle, sheetBendRadius,
-    sheetBendAxis, sheetBendDimensions, sheetBendMovingSide, existingSheetBends, flatSheetCuts]);
+    sheetBendAxis, sheetBendDimensions, sheetBendMovingSide, existingSheetBends, flatSheetCuts,
+    perpendicularFlangeBend]);
 
   const sheetBendRequest = useMemo<SheetBendArgs | null>(() => {
     if (!props.sheetBendTarget || sheetBendError) return null;
@@ -572,6 +752,11 @@ export function ParamsPanel(props: Props) {
 
   const previewBbox = props.importPreview?.stats?.bbox;
   const previewExt = props.importPreview?.stats?.bbox_mesh;
+  const calibrationValues = extendedValues.calibrationValues
+    .split(",").map((value) => Number(value.trim()));
+  const calibrationValuesValid = calibrationValues.length >= 2 && calibrationValues.length <= 10 &&
+    calibrationValues.every((value) => Number.isFinite(value) && value >= 0) &&
+    new Set(calibrationValues).size === calibrationValues.length;
 
   return (
     <aside className="right-panel" aria-label="Параметры и инструменты">
@@ -639,6 +824,384 @@ export function ParamsPanel(props: Props) {
       ) : (
         <p className="panel-empty">Выберите шаблон слева, чтобы создать деталь.</p>
       )}
+
+      <section className="param-section extended-tools">
+        <h3>Расширенные тела</h3>
+        <p className="hint">Точные эскизные тела, траекторные операции, оболочка, уклон и ребро. Каждое применение добавляет одну операцию в историю.</p>
+        <div className="op-row">
+          <select value={extendedTool} aria-label="Расширенная операция" onChange={(event) => setExtendedTool(event.target.value as typeof extendedTool)}>
+            <option value="sketch">Эскиз → выдавливание</option>
+            <option value="constraints">Эскиз с ограничениями</option>
+            <option value="revolve">Вращение профиля</option>
+            <option value="sweep">Sweep по прямой</option>
+            <option value="loft">Loft окружностей</option>
+            <option value="shell">Цилиндрическая оболочка</option>
+            <option value="draft">Призма с уклоном</option>
+            <option value="rib">Ребро жёсткости</option>
+            <option value="fit">Параметрическая посадка</option>
+            <option value="vector">SVG / DXF → тело</option>
+            <option value="text">Текстовый рельеф</option>
+            <option value="thread">Резьбовая пара</option>
+            <option value="calibration">Калибровка зазоров</option>
+            <option value="connector">Разделение со штифтами</option>
+          </select>
+        </div>
+
+        {extendedTool === "sketch" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.width} aria-label="Ширина эскиза, мм" onChange={(event) => setExtendedValue("width", event.target.value)} /><span className="param-unit">ширина, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.height} aria-label="Высота эскиза, мм" onChange={(event) => setExtendedValue("height", event.target.value)} /><span className="param-unit">высота, мм</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.depth} aria-label="Глубина эскиза, мм" onChange={(event) => setExtendedValue("depth", event.target.value)} /><span className="param-unit">глубина, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.hole} aria-label="Диаметр отверстия эскиза, мм" onChange={(event) => setExtendedValue("hole", event.target.value)} /><span className="param-unit">Ø отверстия, мм</span></div>
+          </div>
+          <button
+            className="btn" data-cmd="op.sketch.extrude"
+            disabled={num(extendedValues.width) <= 0 || num(extendedValues.height) <= 0 || num(extendedValues.depth) <= 0 || num(extendedValues.hole) < 0 || num(extendedValues.hole) >= Math.min(num(extendedValues.width), num(extendedValues.height))}
+            onClick={() => props.onSketchExtrude({
+              profile: rectangleProfile(num(extendedValues.width), num(extendedValues.height), num(extendedValues.hole)),
+              plane: "XY", depth: num(extendedValues.depth), name: "Эскиз",
+            })}
+          >Создать по эскизу</button>
+        </>}
+
+        {extendedTool === "constraints" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.width} aria-label="Ширина ограниченного эскиза, мм" onChange={(event) => setExtendedValue("width", event.target.value)} /><span className="param-unit">ширина, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.height} aria-label="Высота ограниченного эскиза, мм" onChange={(event) => setExtendedValue("height", event.target.value)} /><span className="param-unit">высота, мм</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.depth} aria-label="Глубина ограниченного эскиза, мм" onChange={(event) => setExtendedValue("depth", event.target.value)} /><span className="param-unit">глубина, мм</span></div>
+          </div>
+          {props.constraintSolution && <div className="param-hint" role="status">
+            {props.constraintSolution.status === "fully_constrained" ? "Полностью определён" : "Недоопределён"}; DOF: {props.constraintSolution.degrees_of_freedom}; max residual: {props.constraintSolution.max_residual.toExponential(2)}
+            {props.constraintSolution.redundant_constraints > 0 ? `; совместимых избыточных: ${props.constraintSolution.redundant_constraints}` : ""}
+          </div>}
+          <div className="op-row">
+            <button
+              className="btn" data-cmd="op.sketch.solve"
+              disabled={num(extendedValues.width) <= 0 || num(extendedValues.height) <= 0}
+              onClick={() => props.onSketchSolve(constrainedRectangleSketch(num(extendedValues.width), num(extendedValues.height)))}
+            >Проверить ограничения</button>
+            <button
+              className="btn btn-primary" data-cmd="op.sketch.constraint.apply"
+              disabled={num(extendedValues.width) <= 0 || num(extendedValues.height) <= 0 || num(extendedValues.depth) <= 0}
+              onClick={() => props.onConstrainedSketchExtrude({
+                sketch: constrainedRectangleSketch(num(extendedValues.width), num(extendedValues.height)),
+                plane: "XY", depth: num(extendedValues.depth), name: "Ограниченный эскиз",
+              })}
+            >Создать тело</button>
+          </div>
+        </>}
+
+        {extendedTool === "revolve" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.innerRadius} aria-label="Внутренний радиус вращения, мм" onChange={(event) => setExtendedValue("innerRadius", event.target.value)} /><span className="param-unit">R внутр., мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.outerRadius} aria-label="Наружный радиус вращения, мм" onChange={(event) => setExtendedValue("outerRadius", event.target.value)} /><span className="param-unit">R наруж., мм</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.height} aria-label="Высота профиля вращения, мм" onChange={(event) => setExtendedValue("height", event.target.value)} /><span className="param-unit">высота, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.angle} aria-label="Угол вращения, градусы" onChange={(event) => setExtendedValue("angle", event.target.value)} /><span className="param-unit">угол, °</span></div>
+          </div>
+          <button
+            className="btn" data-cmd="op.revolve"
+            disabled={num(extendedValues.innerRadius) < 0 || num(extendedValues.outerRadius) <= num(extendedValues.innerRadius) || num(extendedValues.height) <= 0 || num(extendedValues.angle) <= 0 || num(extendedValues.angle) > 360}
+            onClick={() => {
+              const inner = num(extendedValues.innerRadius);
+              const outer = num(extendedValues.outerRadius);
+              const height = num(extendedValues.height);
+              props.onRevolve({
+                profile: { regions: [{ outer: { kind: "polygon", points: [[inner, 0], [outer, 0], [outer, height], [inner, height]] }, holes: [] }] },
+                plane: "XZ", axis: { point: [0, 0, 0], direction: [0, 0, 1] },
+                angle: num(extendedValues.angle), name: "Тело вращения",
+              });
+            }}
+          >Создать вращением</button>
+        </>}
+
+        {extendedTool === "sweep" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.sectionRadius} aria-label="Радиус sweep, мм" onChange={(event) => setExtendedValue("sectionRadius", event.target.value)} /><span className="param-unit">радиус, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.pathLength} aria-label="Длина sweep, мм" onChange={(event) => setExtendedValue("pathLength", event.target.value)} /><span className="param-unit">длина, мм</span></div>
+          </div>
+          <button
+            className="btn" data-cmd="op.sweep"
+            disabled={num(extendedValues.sectionRadius) <= 0 || num(extendedValues.pathLength) <= 0}
+            onClick={() => props.onSweep({
+              section: { kind: "circle", radius: num(extendedValues.sectionRadius) },
+              path: { points: [[0, 0, 0], [0, 0, num(extendedValues.pathLength)]] },
+              name: "Sweep",
+            })}
+          >Создать sweep</button>
+        </>}
+
+        {extendedTool === "loft" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.loftRadius1} aria-label="Первый радиус loft, мм" onChange={(event) => setExtendedValue("loftRadius1", event.target.value)} /><span className="param-unit">R1, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.loftRadius2} aria-label="Второй радиус loft, мм" onChange={(event) => setExtendedValue("loftRadius2", event.target.value)} /><span className="param-unit">R2, мм</span></div>
+          </div>
+          <div className="op-row"><div className="param-input op-field"><input inputMode="decimal" value={extendedValues.loftHeight} aria-label="Высота loft, мм" onChange={(event) => setExtendedValue("loftHeight", event.target.value)} /><span className="param-unit">высота, мм</span></div></div>
+          <button
+            className="btn" data-cmd="op.loft"
+            disabled={num(extendedValues.loftRadius1) <= 0 || num(extendedValues.loftRadius2) <= 0 || num(extendedValues.loftHeight) <= 0}
+            onClick={() => props.onLoft({
+              ruled: true,
+              sections: [
+                { plane: "XY", offset: 0, profile: circleProfile(num(extendedValues.loftRadius1)) },
+                { plane: "XY", offset: num(extendedValues.loftHeight), profile: circleProfile(num(extendedValues.loftRadius2)) },
+              ],
+              name: "Loft",
+            })}
+          >Создать loft</button>
+        </>}
+
+        {extendedTool === "shell" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.shellOuterRadius} aria-label="Наружный радиус оболочки, мм" onChange={(event) => setExtendedValue("shellOuterRadius", event.target.value)} /><span className="param-unit">R наруж., мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.shellHeight} aria-label="Высота оболочки, мм" onChange={(event) => setExtendedValue("shellHeight", event.target.value)} /><span className="param-unit">высота, мм</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.shellWall} aria-label="Толщина стенки оболочки, мм" onChange={(event) => setExtendedValue("shellWall", event.target.value)} /><span className="param-unit">стенка, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.shellBottom} aria-label="Толщина дна оболочки, мм" onChange={(event) => setExtendedValue("shellBottom", event.target.value)} /><span className="param-unit">дно, мм</span></div>
+          </div>
+          <button
+            className="btn" data-cmd="op.shell"
+            disabled={num(extendedValues.shellOuterRadius) <= 0 || num(extendedValues.shellHeight) <= 0 || num(extendedValues.shellWall) <= 0 || num(extendedValues.shellWall) >= num(extendedValues.shellOuterRadius) || num(extendedValues.shellBottom) <= 0 || num(extendedValues.shellBottom) >= num(extendedValues.shellHeight)}
+            onClick={() => props.onShell({
+              outer_radius: num(extendedValues.shellOuterRadius), height: num(extendedValues.shellHeight),
+              wall: num(extendedValues.shellWall), bottom: num(extendedValues.shellBottom), name: "Оболочка",
+            })}
+          >Создать оболочку</button>
+        </>}
+
+        {extendedTool === "draft" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.draftWidth} aria-label="Ширина основания уклона, мм" onChange={(event) => setExtendedValue("draftWidth", event.target.value)} /><span className="param-unit">ширина, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.draftDepth} aria-label="Глубина основания уклона, мм" onChange={(event) => setExtendedValue("draftDepth", event.target.value)} /><span className="param-unit">глубина, мм</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.draftHeight} aria-label="Высота тела с уклоном, мм" onChange={(event) => setExtendedValue("draftHeight", event.target.value)} /><span className="param-unit">высота, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.draftAngle} aria-label="Угол уклона, градусы" onChange={(event) => setExtendedValue("draftAngle", event.target.value)} /><span className="param-unit">угол, °</span></div>
+          </div>
+          <button
+            className="btn" data-cmd="op.draft"
+            disabled={num(extendedValues.draftWidth) <= 0 || num(extendedValues.draftDepth) <= 0 || num(extendedValues.draftHeight) <= 0 || Math.abs(num(extendedValues.draftAngle)) >= 89}
+            onClick={() => props.onDraftPrism({
+              width: num(extendedValues.draftWidth), depth: num(extendedValues.draftDepth),
+              height: num(extendedValues.draftHeight), angle: num(extendedValues.draftAngle),
+              name: "Тело с уклоном",
+            })}
+          >Создать тело с уклоном</button>
+        </>}
+
+        {extendedTool === "rib" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.baseLength} aria-label="Длина основания ребра, мм" onChange={(event) => setExtendedValue("baseLength", event.target.value)} /><span className="param-unit">основание X</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.baseWidth} aria-label="Ширина основания ребра, мм" onChange={(event) => setExtendedValue("baseWidth", event.target.value)} /><span className="param-unit">основание Y</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.baseThickness} aria-label="Толщина основания ребра, мм" onChange={(event) => setExtendedValue("baseThickness", event.target.value)} /><span className="param-unit">основание Z</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.ribLength} aria-label="Длина ребра, мм" onChange={(event) => setExtendedValue("ribLength", event.target.value)} /><span className="param-unit">длина ребра</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.ribHeight} aria-label="Высота ребра, мм" onChange={(event) => setExtendedValue("ribHeight", event.target.value)} /><span className="param-unit">высота ребра</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.ribWidth} aria-label="Толщина ребра, мм" onChange={(event) => setExtendedValue("ribWidth", event.target.value)} /><span className="param-unit">толщина ребра</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.ribOverlap} aria-label="Заглубление ребра, мм" onChange={(event) => setExtendedValue("ribOverlap", event.target.value)} /><span className="param-unit">заглубление</span></div>
+          </div>
+          <button
+            className="btn" data-cmd="op.rib"
+            disabled={num(extendedValues.baseLength) <= 0 || num(extendedValues.baseWidth) <= 0 || num(extendedValues.baseThickness) <= 0 || num(extendedValues.ribLength) <= 0 || num(extendedValues.ribLength) > num(extendedValues.baseLength) / 2 || num(extendedValues.ribHeight) <= 0 || num(extendedValues.ribWidth) <= 0 || num(extendedValues.ribWidth) > num(extendedValues.baseWidth) || num(extendedValues.ribOverlap) <= 0 || num(extendedValues.ribOverlap) >= num(extendedValues.baseThickness)}
+            onClick={() => props.onRib({
+              base_length: num(extendedValues.baseLength), base_width: num(extendedValues.baseWidth),
+              base_thickness: num(extendedValues.baseThickness), rib_length: num(extendedValues.ribLength),
+              rib_height: num(extendedValues.ribHeight), rib_width: num(extendedValues.ribWidth),
+              overlap: num(extendedValues.ribOverlap), name: "Ребро жёсткости",
+            })}
+          >Создать ребро</button>
+        </>}
+
+        {extendedTool === "fit" && <>
+          <div className="op-row">
+            <select value={extendedValues.fitFixture} aria-label="Размерная fixture посадки" onChange={(event) => setExtendedValue("fitFixture", event.target.value)}>
+              <option value="nut_m5">Гайка M5 — 8 × 4 мм</option>
+              <option value="bearing_608">Подшипник 608 — Ø22 × 7 мм</option>
+              <option value="heat_insert_m3">Термовставка M3 — Ø4,6 × 5 мм</option>
+            </select>
+            <select value={extendedValues.fitClearanceMode} aria-label="Смысл зазора посадки" onChange={(event) => setExtendedValue("fitClearanceMode", event.target.value)}>
+              <option value="radial">Радиальный</option>
+              <option value="diametral">Диаметральный</option>
+              <option value="one_sided">Односторонний +X</option>
+            </select>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.fitBodyLength} aria-label="Длина корпуса посадки, мм" onChange={(event) => setExtendedValue("fitBodyLength", event.target.value)} /><span className="param-unit">корпус X</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.fitBodyWidth} aria-label="Ширина корпуса посадки, мм" onChange={(event) => setExtendedValue("fitBodyWidth", event.target.value)} /><span className="param-unit">корпус Y</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.fitBodyHeight} aria-label="Высота корпуса посадки, мм" onChange={(event) => setExtendedValue("fitBodyHeight", event.target.value)} /><span className="param-unit">корпус Z</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.fitClearance} aria-label="Зазор посадки, мм" onChange={(event) => setExtendedValue("fitClearance", event.target.value)} /><span className="param-unit">зазор, мм</span></div>
+          </div>
+          <p className="hint">Fixture v1 хранит номинальные размеры явно. Радиальный зазор добавляется с двух сторон, диаметральный — к общему размеру, односторонний сохраняет сторону −X.</p>
+          <button
+            className="btn" data-cmd="op.fit_pocket"
+            disabled={num(extendedValues.fitBodyLength) <= 0 || num(extendedValues.fitBodyWidth) <= 0 || num(extendedValues.fitBodyHeight) <= 0 || num(extendedValues.fitClearance) < 0}
+            onClick={() => props.onFitPocket({
+              fixture_id: extendedValues.fitFixture as FitFixtureId,
+              fixture_version: "1",
+              body_length: num(extendedValues.fitBodyLength),
+              body_width: num(extendedValues.fitBodyWidth),
+              body_height: num(extendedValues.fitBodyHeight),
+              clearance: num(extendedValues.fitClearance),
+              clearance_mode: extendedValues.fitClearanceMode as FitClearanceMode,
+              name: "Посадка",
+            })}
+          >Создать посадку</button>
+        </>}
+
+        {extendedTool === "vector" && <>
+          <div className="op-row">
+            <select value={extendedValues.vectorFormat} aria-label="Формат векторного файла" onChange={(event) => setExtendedValue("vectorFormat", event.target.value)}>
+              <option value="svg">SVG</option>
+              <option value="dxf">DXF</option>
+            </select>
+            <div className="param-input op-field"><input value={extendedValues.vectorPath} aria-label="Путь к SVG или DXF" onChange={(event) => setExtendedValue("vectorPath", event.target.value)} /><span className="param-unit">файл</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.vectorHeight} aria-label="Высота векторного выдавливания, мм" onChange={(event) => setExtendedValue("vectorHeight", event.target.value)} /><span className="param-unit">высота, мм</span></div>
+            {extendedValues.vectorFormat === "dxf" && <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.vectorUnitScale} aria-label="Масштаб unitless DXF в миллиметрах" onChange={(event) => setExtendedValue("vectorUnitScale", event.target.value)} /><span className="param-unit">мм / unit</span></div>}
+          </div>
+          <p className="hint">Исходник до 1 МБ встраивается в проект. Внешние SVG-ресурсы и неподдерживаемые DXF-сущности отклоняются.</p>
+          <button
+            className="btn" data-cmd="op.vector_extrude"
+            disabled={!extendedValues.vectorPath.trim() || num(extendedValues.vectorHeight) <= 0 || (extendedValues.vectorFormat === "dxf" && num(extendedValues.vectorUnitScale) <= 0)}
+            onClick={() => props.onVectorExtrude({
+              path: extendedValues.vectorPath,
+              format: extendedValues.vectorFormat as "svg" | "dxf",
+              height: num(extendedValues.vectorHeight),
+              unit_scale: extendedValues.vectorFormat === "dxf" ? num(extendedValues.vectorUnitScale) : undefined,
+              name: "Векторное тело",
+            })}
+          >Импортировать и выдавить</button>
+        </>}
+
+        {extendedTool === "text" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input value={extendedValues.textValue} maxLength={80} aria-label="Текст рельефа" onChange={(event) => setExtendedValue("textValue", event.target.value)} /><span className="param-unit">текст</span></div>
+            <select value={extendedValues.textMode} aria-label="Режим текстового рельефа" onChange={(event) => setExtendedValue("textMode", event.target.value)}>
+              <option value="add">Выпуклый</option>
+              <option value="cut">Гравировка</option>
+            </select>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.textFontSize} aria-label="Размер текста, мм" onChange={(event) => setExtendedValue("textFontSize", event.target.value)} /><span className="param-unit">размер, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.textReliefHeight} aria-label="Высота или глубина текста, мм" onChange={(event) => setExtendedValue("textReliefHeight", event.target.value)} /><span className="param-unit">рельеф, мм</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.textBodyLength} aria-label="Длина основания текста, мм" onChange={(event) => setExtendedValue("textBodyLength", event.target.value)} /><span className="param-unit">основание X</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.textBodyWidth} aria-label="Ширина основания текста, мм" onChange={(event) => setExtendedValue("textBodyWidth", event.target.value)} /><span className="param-unit">основание Y</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.textBodyHeight} aria-label="Толщина основания текста, мм" onChange={(event) => setExtendedValue("textBodyHeight", event.target.value)} /><span className="param-unit">основание Z</span></div>
+          </div>
+          <p className="hint">JetBrains Mono 2.211 поставляется с приложением; скрытая подстановка другого шрифта запрещена.</p>
+          <button
+            className="btn" data-cmd="op.text_relief"
+            disabled={!extendedValues.textValue || num(extendedValues.textFontSize) <= 0 || num(extendedValues.textReliefHeight) <= 0 || num(extendedValues.textBodyLength) <= 0 || num(extendedValues.textBodyWidth) <= 0 || num(extendedValues.textBodyHeight) <= 0 || (extendedValues.textMode === "cut" && num(extendedValues.textReliefHeight) >= num(extendedValues.textBodyHeight))}
+            onClick={() => props.onTextRelief({
+              text: extendedValues.textValue,
+              font_size: num(extendedValues.textFontSize), relief_height: num(extendedValues.textReliefHeight),
+              body_length: num(extendedValues.textBodyLength), body_width: num(extendedValues.textBodyWidth),
+              body_height: num(extendedValues.textBodyHeight), mode: extendedValues.textMode as "add" | "cut",
+              name: "Текстовый рельеф",
+            })}
+          >Создать текст</button>
+        </>}
+
+        {extendedTool === "thread" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.threadDiameter} aria-label="Наружный диаметр резьбы, мм" onChange={(event) => setExtendedValue("threadDiameter", event.target.value)} /><span className="param-unit">Ø резьбы</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.threadPitch} aria-label="Шаг резьбы, мм" onChange={(event) => setExtendedValue("threadPitch", event.target.value)} /><span className="param-unit">шаг, мм</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.threadLength} aria-label="Рабочая длина резьбы, мм" onChange={(event) => setExtendedValue("threadLength", event.target.value)} /><span className="param-unit">длина, мм</span></div>
+          </div>
+          <div className="op-row">
+            <select value={extendedValues.threadHand} aria-label="Направление резьбы" onChange={(event) => setExtendedValue("threadHand", event.target.value)}>
+              <option value="right">Правая</option>
+              <option value="left">Левая</option>
+            </select>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.threadClearance} aria-label="Диаметральный зазор резьбы, мм" onChange={(event) => setExtendedValue("threadClearance", event.target.value)} /><span className="param-unit">зазор Ø</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.threadNutHeight} aria-label="Высота гайки, мм" onChange={(event) => setExtendedValue("threadNutHeight", event.target.value)} /><span className="param-unit">гайка Z</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.threadNutAcrossFlats} aria-label="Размер гайки под ключ, мм" onChange={(event) => setExtendedValue("threadNutAcrossFlats", event.target.value)} /><span className="param-unit">под ключ</span></div>
+          </div>
+          <p className="hint">Строится настоящая однозаходная винтовая пара profile metric-60-v1. Зазор диаметральный; гладкий цилиндр и metadata не заменяют резьбу.</p>
+          <button
+            className="btn" data-cmd="op.thread_pair"
+            disabled={num(extendedValues.threadDiameter) <= 0 || num(extendedValues.threadPitch) <= 0 || num(extendedValues.threadLength) < num(extendedValues.threadPitch) || num(extendedValues.threadClearance) <= 0 || num(extendedValues.threadNutHeight) <= 0 || num(extendedValues.threadNutHeight) >= num(extendedValues.threadLength) || num(extendedValues.threadNutAcrossFlats) <= num(extendedValues.threadDiameter) + num(extendedValues.threadClearance)}
+            onClick={() => props.onThreadPair({
+              profile_version: "metric-60-v1",
+              major_diameter: num(extendedValues.threadDiameter), pitch: num(extendedValues.threadPitch),
+              length: num(extendedValues.threadLength), hand: extendedValues.threadHand as "right" | "left",
+              starts: 1, clearance: num(extendedValues.threadClearance),
+              nut_height: num(extendedValues.threadNutHeight),
+              nut_across_flats: num(extendedValues.threadNutAcrossFlats), name: "Резьбовая пара",
+            })}
+          >Создать резьбовую пару</button>
+        </>}
+
+        {extendedTool === "calibration" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input value={extendedValues.calibrationValues} aria-label="Ряд диаметральных зазоров, мм" onChange={(event) => setExtendedValue("calibrationValues", event.target.value)} /><span className="param-unit">зазоры через запятую</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.calibrationNominal} aria-label="Номинальный диаметр калибровки, мм" onChange={(event) => setExtendedValue("calibrationNominal", event.target.value)} /><span className="param-unit">Ø номинал</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.calibrationLength} aria-label="Длина калибровочного образца, мм" onChange={(event) => setExtendedValue("calibrationLength", event.target.value)} /><span className="param-unit">образец X</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.calibrationWidth} aria-label="Ширина калибровочного образца, мм" onChange={(event) => setExtendedValue("calibrationWidth", event.target.value)} /><span className="param-unit">образец Y</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.calibrationThickness} aria-label="Толщина калибровочного образца, мм" onChange={(event) => setExtendedValue("calibrationThickness", event.target.value)} /><span className="param-unit">образец Z</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.calibrationSpacing} aria-label="Шаг размещения калибровочных образцов, мм" onChange={(event) => setExtendedValue("calibrationSpacing", event.target.value)} /><span className="param-unit">шаг X</span></div>
+            <div className="param-input op-field"><input value={extendedValues.calibrationProfile} aria-label="Имя профиля калибровки" onChange={(event) => setExtendedValue("calibrationProfile", event.target.value)} /><span className="param-unit">профиль</span></div>
+          </div>
+          <p className="hint">Каждый образец получает реальную BRep-метку значения. Профиль записывается в проект только по явному созданию этой серии и не меняет старые документы.</p>
+          <button
+            className="btn" data-cmd="op.clearance_calibration"
+            disabled={!calibrationValuesValid || num(extendedValues.calibrationNominal) <= 0 || num(extendedValues.calibrationLength) <= 0 || num(extendedValues.calibrationWidth) <= 0 || num(extendedValues.calibrationThickness) <= 0 || num(extendedValues.calibrationSpacing) < num(extendedValues.calibrationLength)}
+            onClick={() => props.onClearanceCalibration({
+              values: calibrationValues,
+              nominal_diameter: num(extendedValues.calibrationNominal),
+              coupon_length: num(extendedValues.calibrationLength), coupon_width: num(extendedValues.calibrationWidth),
+              thickness: num(extendedValues.calibrationThickness), spacing: num(extendedValues.calibrationSpacing),
+              font_size: num(extendedValues.calibrationFontSize), label_height: num(extendedValues.calibrationLabelHeight),
+              profile_name: extendedValues.calibrationProfile.trim() || undefined, name: "Калибровка зазоров",
+            })}
+          >Создать серию</button>
+        </>}
+
+        {extendedTool === "connector" && <>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.connectorLength} aria-label="Длина разделяемой детали, мм" onChange={(event) => setExtendedValue("connectorLength", event.target.value)} /><span className="param-unit">деталь X</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.connectorWidth} aria-label="Ширина разделяемой детали, мм" onChange={(event) => setExtendedValue("connectorWidth", event.target.value)} /><span className="param-unit">деталь Y</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.connectorHeight} aria-label="Высота разделяемой детали, мм" onChange={(event) => setExtendedValue("connectorHeight", event.target.value)} /><span className="param-unit">деталь Z</span></div>
+          </div>
+          <div className="op-row">
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.connectorPinRadius} aria-label="Радиус соединительного штифта, мм" onChange={(event) => setExtendedValue("connectorPinRadius", event.target.value)} /><span className="param-unit">R штифта</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.connectorPinLength} aria-label="Длина соединительного штифта, мм" onChange={(event) => setExtendedValue("connectorPinLength", event.target.value)} /><span className="param-unit">длина штифта</span></div>
+            <div className="param-input op-field"><input inputMode="decimal" value={extendedValues.connectorClearance} aria-label="Радиальный зазор соединителя, мм" onChange={(event) => setExtendedValue("connectorClearance", event.target.value)} /><span className="param-unit">зазор R</span></div>
+          </div>
+          <div className="op-row"><div className="param-input op-field"><input inputMode="decimal" value={extendedValues.connectorSeparation} aria-label="Зазор печатного размещения частей, мм" onChange={(event) => setExtendedValue("connectorSeparation", event.target.value)} /><span className="param-unit">разнос печати</span></div></div>
+          <p className="hint">Две половины размещаются раздельно для печати. В операции хранится обратный assembly transform; ядро проверяет отсутствие пересечения штифтов с ответными отверстиями.</p>
+          <button
+            className="btn" data-cmd="op.split_connector_pair"
+            disabled={num(extendedValues.connectorLength) <= 0 || num(extendedValues.connectorWidth) <= 0 || num(extendedValues.connectorHeight) <= 0 || num(extendedValues.connectorPinRadius) <= 0 || num(extendedValues.connectorPinLength) <= 0 || num(extendedValues.connectorClearance) <= 0 || num(extendedValues.connectorSeparation) <= 0}
+            onClick={() => props.onSplitConnectorPair({
+              length: num(extendedValues.connectorLength), width: num(extendedValues.connectorWidth),
+              height: num(extendedValues.connectorHeight), pin_radius: num(extendedValues.connectorPinRadius),
+              pin_length: num(extendedValues.connectorPinLength), radial_clearance: num(extendedValues.connectorClearance),
+              print_separation: num(extendedValues.connectorSeparation), name: "Разделённая деталь",
+            })}
+          >Создать две части</button>
+        </>}
+      </section>
 
       {props.selectedFace != null && props.faceArea != null && (
         <section className="face-info">
@@ -906,8 +1469,10 @@ export function ParamsPanel(props: Props) {
             <div className="face-feature-panel">
               <div className="face-feature-heading">
                 <div>
-                  <strong>Точный изгиб</strong>
-                  <span>Sheet metal: угол, радиус и линия изгиба</span>
+                  <strong>{perpendicularFlangeBend ? "Изгиб фланца" : "Точный изгиб"}</strong>
+                  <span>{perpendicularFlangeBend
+                    ? "Перпендикулярная линия на выбранном фланце"
+                    : "Sheet metal: угол, радиус и линия изгиба"}</span>
                 </div>
                 {!sheetBendOpen && (
                   <button
@@ -936,6 +1501,7 @@ export function ParamsPanel(props: Props) {
                     <select
                       value={sheetBendAxis}
                       aria-label="Направление изгиба"
+                      disabled={perpendicularFlangeBend}
                       onChange={(event) => setSheetBendAxis(event.target.value as "x" | "y")}
                     >
                       <option value="x">Сгибать по X · линия вдоль Y</option>
@@ -967,18 +1533,22 @@ export function ParamsPanel(props: Props) {
                     </div>
                     <select
                       value={sheetBendDirection}
-                      aria-label="Направление изгиба по Z"
+                      aria-label={perpendicularFlangeBend
+                        ? "Направление изгиба относительно выбранной грани"
+                        : "Направление изгиба по Z"}
                       onChange={(event) => setSheetBendDirection(Number(event.target.value) as -1 | 1)}
                     >
-                      <option value={1}>Вверх, +Z</option>
-                      <option value={-1}>Вниз, −Z</option>
+                      <option value={1}>{perpendicularFlangeBend ? "К выбранной стороне" : "Вверх, +Z"}</option>
+                      <option value={-1}>{perpendicularFlangeBend ? "От выбранной стороны" : "Вниз, −Z"}</option>
                     </select>
                   </div>
                   {sheetBendError ? (
                     <p className="error-inline" role="alert">{sheetBendError}</p>
                   ) : (
                     <p className="face-feature-preview">
-                      Синий preview не показывает контуры вырезов. Прямоугольный through-вырез может пересекать до двух bend-зон, круглый, кольцевой или паз — одну.
+                      {perpendicularFlangeBend
+                        ? "Синий preview показывает локальную форму без контуров отверстий. Through-вырез целиком на прямом участке фланца сохраняется после commit."
+                        : "Синий preview не показывает контуры вырезов. Прямоугольный through-вырез может пересекать до двух bend-зон, круглый, кольцевой или паз — одну."}
                     </p>
                   )}
                   <div className="push-pull-actions">
@@ -1487,10 +2057,10 @@ export function ParamsPanel(props: Props) {
                   Выберите единицы исходного файла:
                 </p>
                 <div className="fillet-actions">
-                  <button className="btn btn-primary" data-cmd="io.import" aria-label="Единицы — миллиметры" onClick={() => props.onImport(importPath, "stl", 1)}>
+                  <button className="btn btn-primary" data-cmd="io.mesh.apply" aria-label="Единицы — миллиметры" onClick={() => props.onApplyMeshImport(importPath, 1)}>
                     мм (×1)
                   </button>
-                  <button className="btn" data-cmd="io.import" aria-label="Единицы — дюймы" onClick={() => props.onImport(importPath, "stl", 25.4)}>
+                  <button className="btn" data-cmd="io.mesh.apply" aria-label="Единицы — дюймы" onClick={() => props.onApplyMeshImport(importPath, 25.4)}>
                     дюймы (×25,4)
                   </button>
                   <button className="btn" aria-label="Отменить импорт" onClick={props.onCancelImportPreview}>Отмена</button>
@@ -1501,6 +2071,73 @@ export function ParamsPanel(props: Props) {
             )}
           </div>
         )}
+      </section>
+
+      {doc?.stats?.mesh_mode && <section className="tool-section">
+        <h3 className="panel-section">Mesh workflow</h3>
+        <p className="hint">Исходник встроен в проект. Операции остаются mesh-операциями и не создают фиктивную параметрическую BRep-историю.</p>
+        {doc.stats.mesh_diagnostics && <div className="param-hint" role="status">
+          Треугольников: {doc.stats.triangle_count}; компонент: {doc.stats.mesh_diagnostics.components}; открытых рёбер: {doc.stats.mesh_diagnostics.boundary_edges}; self-intersection: не проверено.
+        </div>}
+        <div className="op-row">
+          {(["x", "y", "z"] as const).map((axis) => <div className="param-input op-field" key={`mesh-${axis}`}>
+            <input inputMode="decimal" value={meshTranslate[axis]} aria-label={`Mesh translate ${axis.toUpperCase()}, мм`} onChange={(event) => setMeshTranslate({ ...meshTranslate, [axis]: event.target.value })} />
+            <span className="param-unit">{axis.toUpperCase()}, мм</span>
+          </div>)}
+        </div>
+        <div className="op-row">
+          <div className="param-input op-field"><input inputMode="decimal" value={meshScale} aria-label="Mesh scale" onChange={(event) => setMeshScale(event.target.value)} /><span className="param-unit">scale</span></div>
+          <button className="btn" data-cmd="op.mesh.transform" disabled={num(meshScale) <= 0} onClick={() => props.onMeshTransform([num(meshTranslate.x), num(meshTranslate.y), num(meshTranslate.z)], num(meshScale))}>Трансформировать</button>
+        </div>
+        <div className="op-row">
+          <button className="btn" data-cmd="op.mesh.repair" onClick={props.onMeshRepair}>Закрыть поддерживаемое отверстие</button>
+        </div>
+        <div className="op-row">
+          <div className="param-input op-field"><input inputMode="decimal" value={meshTargetRatio} aria-label="Целевая доля треугольников" onChange={(event) => setMeshTargetRatio(event.target.value)} /><span className="param-unit">ratio</span></div>
+          <button className="btn" data-cmd="op.mesh.decimate" disabled={num(meshTargetRatio) <= 0 || num(meshTargetRatio) >= 1} onClick={() => props.onMeshDecimate(num(meshTargetRatio))}>Упростить mesh</button>
+        </div>
+      </section>}
+
+      <section className="tool-section">
+        <h3 className="panel-section">Декоративный relief по изображению</h3>
+        <p className="hint">Experimental mesh-only workflow. Результат не считается точной инженерной деталью.</p>
+        <div className="io-row"><input value={imagePath} aria-label="Путь к изображению relief" onChange={(event) => setImagePath(event.target.value)} /></div>
+        <div className="op-row">
+          <div className="param-input op-field"><input inputMode="decimal" value={imageWidth} aria-label="Ширина relief, мм" onChange={(event) => setImageWidth(event.target.value)} /><span className="param-unit">ширина, мм</span></div>
+          <div className="param-input op-field"><input inputMode="decimal" value={imageReliefHeight} aria-label="Высота relief, мм" onChange={(event) => setImageReliefHeight(event.target.value)} /><span className="param-unit">рельеф, мм</span></div>
+          <div className="param-input op-field"><input inputMode="decimal" value={imageBaseThickness} aria-label="Основание relief, мм" onChange={(event) => setImageBaseThickness(event.target.value)} /><span className="param-unit">основание, мм</span></div>
+        </div>
+        <div className="op-row">
+          <div className="param-input op-field"><input inputMode="numeric" value={imageSamples} aria-label="Разрешение relief" onChange={(event) => setImageSamples(event.target.value)} /><span className="param-unit">samples</span></div>
+          <div className="param-input op-field"><input inputMode="numeric" value={imageSeed} aria-label="Seed relief" onChange={(event) => setImageSeed(event.target.value)} /><span className="param-unit">seed</span></div>
+          <div className="param-input op-field"><input inputMode="decimal" value={imageNoise} aria-label="Noise relief" onChange={(event) => setImageNoise(event.target.value)} /><span className="param-unit">noise</span></div>
+        </div>
+        <label className="check-label"><input type="checkbox" checked={imageInvert} onChange={(event) => setImageInvert(event.target.checked)} /> Инвертировать высоту</label>
+        {props.imageReliefPreview && <div className="param-hint" role="status">
+          Preview: {props.imageReliefPreview.stats.triangle_count} треугольников; model heightmap-luminance-v1; source {props.imageReliefPreview.source_sha256.slice(0, 12)}…
+        </div>}
+        <div className="op-row">
+          <button
+            className="btn" data-cmd="op.image_relief.preview"
+            disabled={num(imageWidth) <= 0 || num(imageReliefHeight) <= 0 || num(imageBaseThickness) <= 0 || num(imageSamples) < 8 || num(imageSamples) > 192 || num(imageNoise) < 0 || num(imageNoise) > 0.2}
+            onClick={() => props.onImageReliefPreview({
+              path: imagePath, model: "heightmap-luminance-v1", seed: Math.trunc(num(imageSeed)),
+              width_mm: num(imageWidth), relief_height: num(imageReliefHeight),
+              base_thickness: num(imageBaseThickness), samples: Math.trunc(num(imageSamples)),
+              noise_strength: num(imageNoise), invert: imageInvert,
+            })}
+          >Preview</button>
+          {props.imageReliefPreview && <button
+            className="btn btn-primary" data-cmd="op.image_relief.apply"
+            onClick={() => props.onImageReliefApply({
+              path: imagePath, model: "heightmap-luminance-v1", seed: Math.trunc(num(imageSeed)),
+              width_mm: num(imageWidth), relief_height: num(imageReliefHeight),
+              base_thickness: num(imageBaseThickness), samples: Math.trunc(num(imageSamples)),
+              noise_strength: num(imageNoise), invert: imageInvert,
+            }, props.imageReliefPreview!.source_sha256)}
+          >Apply</button>}
+          {props.imageReliefPreview && <button className="btn" onClick={props.onCancelImageReliefPreview}>Отмена</button>}
+        </div>
       </section>
 
       <section className="io-forms">
@@ -1522,7 +2159,7 @@ export function ParamsPanel(props: Props) {
             <button
               key={f} className="btn" data-cmd={`export.${f}`}
               aria-label={`Экспортировать ${f.toUpperCase()}`}
-              disabled={!doc?.stats?.is_valid}
+              disabled={!doc?.stats?.is_valid || (f === "step" && !!doc?.stats?.mesh_mode)}
               onClick={() => props.onExport(f)}
             >
               {f.toUpperCase()}

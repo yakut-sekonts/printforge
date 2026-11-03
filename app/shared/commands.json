@@ -98,6 +98,14 @@
       "params": []
     },
     {
+      "command_id": "geometry.cancel",
+      "title": "Отменить вычисление",
+      "help_id": "istoriya-i-otmena",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
       "command_id": "doc.save",
       "title": "Сохранить проект",
       "help_id": "format-proekta",
@@ -189,6 +197,57 @@
       "command_id": "io.import",
       "title": "Импортировать модель",
       "help_id": "import-modeley",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "io.mesh.apply",
+      "title": "Применить импорт как mesh-документ",
+      "help_id": "mesh-operatsii",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "op.mesh.transform",
+      "title": "Трансформировать mesh",
+      "help_id": "mesh-operatsii",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала примените STL как mesh-документ",
+      "params": []
+    },
+    {
+      "command_id": "op.mesh.repair",
+      "title": "Закрыть поддерживаемое отверстие mesh",
+      "help_id": "mesh-operatsii",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала примените STL как mesh-документ",
+      "params": []
+    },
+    {
+      "command_id": "op.mesh.decimate",
+      "title": "Упростить mesh",
+      "help_id": "mesh-operatsii",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала примените STL как mesh-документ",
+      "params": [{"name": "target_ratio", "min": 0.01, "max": 0.99, "desc": "Целевая доля треугольников"}]
+    },
+    {
+      "command_id": "op.image_relief.preview",
+      "title": "Предпросмотр декоративного mesh по изображению",
+      "help_id": "dekorativnyy-relief",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "op.image_relief.apply",
+      "title": "Применить декоративный mesh",
+      "help_id": "dekorativnyy-relief",
       "shortcut": null,
       "availability": "always",
       "params": []
@@ -342,11 +401,11 @@
     },
     {
       "command_id": "op.sheet_bend",
-      "title": "Создать точный изгиб пластины",
+      "title": "Создать точный изгиб пластины или фланца",
       "help_id": "izgib-plastiny",
       "shortcut": null,
       "availability": "requires_body",
-      "disabled_reason": "Выберите верхнюю грань пластины; изгибы должны идти первыми и подряд",
+      "disabled_reason": "Выберите верхнюю грань пластины или внешнюю грань фланца; изгибы должны идти подряд",
       "params": [
         {
           "name": "position",
@@ -395,6 +454,193 @@
       "params": []
     },
     {
+      "command_id": "op.sketch.extrude",
+      "title": "Создать тело по эскизу",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {
+          "name": "depth",
+          "unit": "mm",
+          "min": 0.01,
+          "desc": "Глубина выдавливания замкнутого эскиза"
+        }
+      ]
+    },
+    {
+      "command_id": "op.sketch.solve",
+      "title": "Проверить ограничения эскиза",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "op.sketch.constraint.apply",
+      "title": "Создать тело по ограниченному эскизу",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "depth", "unit": "mm", "min": 0.01, "desc": "Глубина выдавливания решённого эскиза"}
+      ]
+    },
+    {
+      "command_id": "op.revolve",
+      "title": "Вращать профиль",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {
+          "name": "angle",
+          "unit": "deg",
+          "min": 0.01,
+          "max": 360,
+          "desc": "Угол вращения профиля вокруг заданной оси"
+        }
+      ]
+    },
+    {
+      "command_id": "op.sweep",
+      "title": "Протянуть сечение по траектории",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {
+          "name": "radius",
+          "unit": "mm",
+          "min": 0.01,
+          "desc": "Радиус круглого сечения"
+        },
+        {
+          "name": "path",
+          "unit": "mm",
+          "desc": "Последовательность точек XYZ траектории"
+        }
+      ]
+    },
+    {
+      "command_id": "op.loft",
+      "title": "Соединить сечения loft",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {
+          "name": "sections",
+          "desc": "Два или более упорядоченных замкнутых сечения"
+        }
+      ]
+    },
+    {
+      "command_id": "op.shell",
+      "title": "Создать оболочку",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "wall", "unit": "mm", "min": 0.01, "desc": "Толщина цилиндрической стенки"},
+        {"name": "bottom", "unit": "mm", "min": 0.01, "desc": "Толщина дна"}
+      ]
+    },
+    {
+      "command_id": "op.draft",
+      "title": "Создать тело с уклоном",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "angle", "unit": "deg", "desc": "Положительный угол сужает верхнее сечение"}
+      ]
+    },
+    {
+      "command_id": "op.rib",
+      "title": "Создать ребро жёсткости",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "rib_height", "unit": "mm", "min": 0.01, "desc": "Высота ребра над основанием"},
+        {"name": "rib_width", "unit": "mm", "min": 0.01, "desc": "Толщина ребра"},
+        {"name": "overlap", "unit": "mm", "min": 0.01, "desc": "Заглубление ребра в основание"}
+      ]
+    },
+    {
+      "command_id": "op.fit_pocket",
+      "title": "Создать параметрическую посадку",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "fixture_id", "desc": "Версионированная размерная fixture гайки, подшипника или термовставки"},
+        {"name": "clearance", "unit": "mm", "min": 0, "desc": "Зазор с явно выбранным смыслом"},
+        {"name": "clearance_mode", "desc": "radial, diametral или one_sided"}
+      ]
+    },
+    {
+      "command_id": "op.vector_extrude",
+      "title": "Импортировать SVG или DXF",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "path", "desc": "Локальный SVG или DXF до 1 МБ"},
+        {"name": "height", "unit": "mm", "min": 0.01, "desc": "Высота выдавливания"},
+        {"name": "unit_scale", "unit": "mm", "min": 0.000001, "desc": "Явный масштаб только для DXF без единиц"}
+      ]
+    },
+    {
+      "command_id": "op.text_relief",
+      "title": "Создать текстовый рельеф",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "text", "desc": "Строка до 80 символов"},
+        {"name": "font_size", "unit": "mm", "min": 0.01, "desc": "Размер фиксированного шрифта"},
+        {"name": "relief_height", "unit": "mm", "min": 0.01, "desc": "Высота рельефа или глубина гравировки"}
+      ]
+    },
+    {
+      "command_id": "op.thread_pair",
+      "title": "Создать резьбовую пару",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "major_diameter", "unit": "mm", "min": 0.01, "desc": "Наружный диаметр резьбы"},
+        {"name": "pitch", "unit": "mm", "min": 0.01, "desc": "Шаг однозаходной винтовой линии"},
+        {"name": "clearance", "unit": "mm", "min": 0.01, "desc": "Диаметральный зазор внутренней резьбы"}
+      ]
+    },
+    {
+      "command_id": "op.clearance_calibration",
+      "title": "Создать калибровку зазоров",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "values", "unit": "mm", "desc": "От 2 до 10 уникальных диаметральных зазоров"},
+        {"name": "nominal_diameter", "unit": "mm", "min": 0.01, "desc": "Номинальный диаметр сопряжения"},
+        {"name": "profile_name", "desc": "Явное имя пользовательского профиля серии"}
+      ]
+    },
+    {
+      "command_id": "op.split_connector_pair",
+      "title": "Разделить деталь со штифтами",
+      "help_id": "rasshirennye-tela",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {"name": "pin_radius", "unit": "mm", "min": 0.01, "desc": "Радиус двух соединительных штифтов"},
+        {"name": "pin_length", "unit": "mm", "min": 0.01, "desc": "Рабочая длина штифта"},
+        {"name": "radial_clearance", "unit": "mm", "min": 0.01, "desc": "Радиальный зазор ответного отверстия"}
+      ]
+    },
+    {
       "command_id": "ai.panel.open",
       "title": "AI-помощник",
       "help_id": "ai-pomoshchnik",
@@ -410,6 +656,19 @@
       "availability": "requires_ai",
       "disabled_reason": "AI-помощник выключен в настройках",
       "params": []
+    },
+    {
+      "command_id": "ai.help.answer",
+      "title": "Ответить по локальной справке",
+      "help_id": "ai-pomoshchnik",
+      "shortcut": null,
+      "availability": "always",
+      "params": [
+        {
+          "name": "query",
+          "desc": "Вопрос о возможностях и командах PrintForge"
+        }
+      ]
     }
   ]
 }

@@ -2,6 +2,7 @@
 import json
 import sys
 import threading
+import urllib.error
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -107,6 +108,7 @@ def test_transport_routes_to_selected_provider_without_secret_in_body(monkeypatc
     assert request["path"] == "/v1/chat/completions"
     assert request["json"]["model"] == "test-model"
     assert request["json"]["temperature"] == 0
+    assert "reasoning_effort" not in request["json"]
     assert request["headers"]["Authorization"] == "Bearer marker-secret"
     assert "marker-secret" not in json.dumps(request["json"])
 
@@ -165,3 +167,82 @@ def test_schema_repair_stops_after_second_invalid_response(monkeypatch):
                 lambda *_args: pytest.fail("preview не должен запускаться"),
             )
     assert len(server.requests) == 2
+
+
+def test_provider_timeout_never_starts_preview(monkeypatch):
+    monkeypatch.setattr(ai_planner, "_PROVIDER_CONFIG", {
+        "provider": "openai",
+        "base_url": "http://127.0.0.1:9/v1",
+        "model": "test-model",
+        "api_key": "",
+    })
+    preview_calls = []
+
+    def timeout(*_args, **_kwargs):
+        raise urllib.error.URLError(TimeoutError("controlled timeout"))
+
+    monkeypatch.setattr(ai_planner.urllib.request, "urlopen", timeout)
+    with pytest.raises(urllib.error.URLError, match="controlled timeout"):
+        ai_planner.ai_plan(
+            "сделай длину 100", FakeDoc(),
+            lambda *_args: preview_calls.append(True),
+        )
+    assert preview_calls == []
+
+
+def test_truncated_provider_body_never_starts_preview(monkeypatch):
+    monkeypatch.setattr(ai_planner, "_PROVIDER_CONFIG", {
+        "provider": "openai",
+        "base_url": "http://127.0.0.1:9/v1",
+        "model": "test-model",
+        "api_key": "",
+    })
+    preview_calls = []
+
+    class TruncatedResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b'{"choices": [{"message": '
+
+    monkeypatch.setattr(
+        ai_planner.urllib.request, "urlopen", lambda *_args, **_kwargs: TruncatedResponse())
+    with pytest.raises(json.JSONDecodeError):
+        ai_planner.ai_plan(
+            "сделай длину 100", FakeDoc(),
+            lambda *_args: preview_calls.append(True),
+        )
+    assert preview_calls == []
+
+
+def test_oversized_provider_body_is_rejected_before_preview(monkeypatch):
+    monkeypatch.setattr(ai_planner, "_PROVIDER_CONFIG", {
+        "provider": "openai",
+        "base_url": "http://127.0.0.1:9/v1",
+        "model": "test-model",
+        "api_key": "",
+    })
+    preview_calls = []
+
+    class OversizedResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, limit):
+            return b"x" * limit
+
+    monkeypatch.setattr(
+        ai_planner.urllib.request, "urlopen", lambda *_args, **_kwargs: OversizedResponse())
+    with pytest.raises(ValueError, match="превышает допустимый размер"):
+        ai_planner.ai_plan(
+            "сделай длину 100", FakeDoc(),
+            lambda *_args: preview_calls.append(True),
+        )
+    assert preview_calls == []

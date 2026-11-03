@@ -1,16 +1,34 @@
 # STATUS.md — статус PrintForge
 
-Обновлено: 2026-10-30. Этап: M3 в работе. AI-конвейер «запрос → проверенный план → preview → одна транзакция → Undo» и пользовательские настройки провайдеров подключены к UI и проверены в browser runtime и собранной `.app`. Остаётся: справочные ответы, полный AC-10/AC-11 и quality gate; из M2 — бинарный mesh-канал, восстановление после аварии и perf-замеры.
+Обновлено: 2026-11-03. Этап: M4 в работе. Все группы `EXT-001…EXT-012` имеют рабочий partial slice и automated evidence: BRep-моделирование, constraint solver, persistent mesh repair/decimation и experimental image heightmap workflow. Открытые generic/direct-editing clauses перечислены в `docs/testing/TEST_GAPS.md`; Windows release/performance evidence остаётся `not_run`.
 
 ## Что пользователь уже может сделать
 
 - Четыре шаблона с точными размерами и зависимостями: пластина с отверстиями, шайба/втулка, L-кронштейн, корпус с крышкой (явный зазор «на одну сторону», пересчёт при изменении корпуса).
 - Скругление выбранного ребра (список рёбер, подсветка в сцене линией с маркерами концов), честная ошибка при невозможном радиусе с сохранением прежней модели; повторный выбор при потере ребра.
 - Изменение параметров с отменой/повтором (одно действие = одна транзакция), сохранение/открытие `.printforge` (v2, читает v1), автосохранение каждые 30 с (в .app), файловые диалоги macOS (в .app).
-- Экспорт STL/STEP/3MF; импорт STEP (точный) и STL (с выбором единиц после показа габарита; режим сетки без BRep-операций).
+- Экспорт STL/STEP/3MF; импорт STEP и persistent STL mesh-document с embedded source, transform, hole repair и topology-aware decimation.
+- Constraint solver показывает residual/DOF, отличает conflict от compatible redundancy, поддерживает constrained drag и применяет extrusion одной транзакцией.
+- Experimental image relief: PNG/JPEG/WebP preview без commit, hash-bound Apply, фиксированный model/seed/settings и mesh-only export.
 - Проверка перед печатью: валидность, тела, объём, габарит vs профиль принтера; «Не проверено» для нереализованного, без общего зелёного статуса.
-- Справка офлайн (28 статей, 32 команды), поиск с синонимами, «Что это?», «Показать в интерфейсе», 3 режима подсказок, 9 уроков.
+- Справка офлайн (34 статьи, 58 команд), поиск с синонимами, «Что это?», «Показать в интерфейсе», 3 режима подсказок, 13 уроков.
 - AI-помощник: `disabled` по умолчанию, локальный Ollama или OpenAI-совместимый endpoint; UI явно показывает передаваемые данные, проверяет `/models`, хранит API key в системном хранилище и показывает JSON-план с геометрическим preview до применения.
+
+## Срез M4: оставшиеся EXT-группы (2026-11-03)
+
+- `EXT-002`: numerical constraint solver поддерживает coincident/horizontal/vertical/parallel/perpendicular/tangent/equal/dimension/fix, residual/rank/DOF, conflict vs compatible redundancy и constrained drag. Preview не создаёт commit; Apply/Undo/Redo/save/reopen проходят real-kernel tests.
+- `EXT-010`: STL/OBJ/PLY source встраивается в mesh-only document. Реализованы transform, закрытие поддерживаемого boundary hole с before/after diagnostics и topology-aware decimation с component/Euler/bbox/volume gates; shape error явно называется sampled estimate, не Hausdorff guarantee. STEP для mesh-document запрещён, STL и встроенный 3MF exporter работают.
+- `EXT-011`: `heightmap-luminance-v1` строит замкнутый decorative mesh из PNG/JPEG/WebP; preview не меняет документ, Apply связан с SHA-256 исходника, model/seed/settings и mm scale сохраняются. Workflow явно не объявляется инженерно точным.
+- Impact gates: CAD/document/worker `139 passed`; help `2 pytest + 4 search`, 34 статьи/58 команд; UI contracts/build; Rust `13 passed`; traceability `97 requirements / 63 test IDs`; release `6 passed`. Отчёты: `artifacts/test-runs/m4-complete-{cad,help,ui,rust,trace,release}/test-report.json`.
+- Production sidecar пересобран (`125.4 MiB`) и реально выполнил solver (`DOF=0`), mesh repair (`12` triangles, `1000 мм³`), decimation и image relief. Windows runner evidence остаётся `not_run`; direct canvas Sketcher, general self-intersection repair и external generative providers остаются открытыми partial clauses.
+
+## Release v0.3.0 (2026-11-03)
+
+- Desktop, UI, Tauri и lockfile версии синхронизированы на `0.3.0`; release notes находятся в `docs/releases/v0.3.0.md`.
+- Release workflow собирает macOS Apple Silicon, macOS Intel и Windows x64 с подписанными Tauri Updater artifacts.
+- Draft публикуется автоматически только после успешного завершения всей installer matrix и Windows installed-artifact gate; частичный release не становится доступен через колокольчик.
+- Локальные release и traceability gates прошли: `6 + 3` tests, `97` requirements, `63` test IDs; отчёты находятся в `artifacts/test-runs/v0.3.0-{release,traceability}/`.
+- Browser UI smoke на desktop viewport: constraint preview показал `DOF=0`, Apply создал «Ограниченный эскиз» объёмом `4000 мм³`, один Undo вернул пустой документ. Dev-shim после проверки остановлен.
 
 ## Как запустить
 
@@ -36,7 +54,7 @@
 
 - Полный AC-12 внутри `.app` ещё не пройден; в WKWebView проверен AI-сценарий M3 и ранее автономность sidecar, остальные команды требуют полного обхода.
 - Уроки 4–8 не прогонялись в UI (движок готов); AC-07/AC-08 повторить на M2-функциях; AC-09 частично (bed_fit проверен worker'ом; импорт сетки с открытым краем — не проверен).
-- Слайсер не установлен (масштаб в слайсере не подтверждён); подписи нет; булевы операции произвольных тел, профили/выдавливание, массивы, разделение, измерения в UI — следующие итерации M2; бинарный mesh-канал (крупные сетки) — отложено.
+- Слайсер не установлен (масштаб в слайсере не подтверждён); Developer ID/notarization нет, локальная `.app` подписана ad-hoc; Windows x64 perf baseline ещё не запускался.
 
 ## Последний срез (документ v3, 2026-10-22)
 
@@ -88,8 +106,8 @@
 
 ## Следующие задачи
 
-1. M3: справочные ответы по локальному индексу; полный AC-10/AC-11 и quality gate 20×3 на выбранной локальной модели.
-2. Бинарный mesh-канал; восстановление после аварии; perf-замеры TECH-003; уроки 1, 3, 4 при случае; AC-12 внутри `.app`.
+1. Уроки 1, 3, 4 при случае; AC-12 внутри `.app`.
+2. Запустить Windows x64 release workflow и зафиксировать artifact `windows-release-evidence-*`; gate уже автоматизирует silent NSIS install, installed binary/sidecar smoke и native startup/FPS/RSS.
 
 ## Последний срез (desktop distribution, 2026-10-30)
 
@@ -225,3 +243,94 @@
 - Полный deterministic gate зелёный: Python 99, Rust 3, TypeScript/Vite, help integrity, traceability и release-version; отчёт `artifacts/test-runs/20261102T101959Z/test-report.json`.
 - Локально собраны ad-hoc signed Apple Silicon `.app`, DMG и подписанный updater artifact; `codesign --verify --deep --strict` проходит.
 - Production sidecar из собранной `.app` прошёл JSON-protocol smoke: пластина `80 × 40 × 6 мм`, объём `18898.407105 мм³`, один валидный solid.
+
+## Срез direct editing v2: перпендикулярный изгиб фланца (2026-11-02)
+
+- После одного базового изгиба 90° можно выбрать внешнюю вертикальную грань подвижного фланца и создать вторую линию по перпендикулярной оси; локальная ось определяется из выбранной грани, стороны и направления базового изгиба.
+- Фланец перестраивается отдельной точной `make_brake_formed` BRep-полосой и объединяется с базовым изгибом; результат проверяется на валидность, одно тело и сохранение объёма в kernel tolerance.
+- Штатные отверстия и пользовательские through-вырезы четырёх профилей переносятся на новый фланец, включая пересечение его bend-зоны. Профиль, пересекающий корень базового изгиба, блокируется явной ошибкой.
+- Каждый изгиб остаётся отдельной document-транзакцией: первый Undo снимает только фланцевый изгиб, второй возвращает плоскую пластину.
+- UI строит локальный синий live preview второго изгиба в системе выбранного фланца; preview не меняет документ и намеренно не показывает контуры отверстий.
+- Текущий impact-based gate зелёный: CAD/document 74, UI TypeScript/Vite, help 2 + integrity (31 статья, 35 команд); отчёты `artifacts/test-runs/20261102T120721Z/test-report.json`, `artifacts/test-runs/20261102T120835Z/test-report.json` и `artifacts/test-runs/20261102T120840Z/test-report.json`.
+- JSON-protocol smoke через dev-shim: два `sheet_bend`, объём `18898.417952 мм³`, один валидный solid, bbox `[-40, -20, 0, 22.36, 20, 44.29]`; Undo оставил только базовый изгиб.
+- Честное ограничение slice: базовый изгиб должен быть один и ровно 90°; несколько перпендикулярных линий и фланец после параллельного каскада остаются следующими итерациями.
+
+## Срез M3: offline-ответы по справке (2026-11-02)
+
+- В `AI-помощник` добавлены отдельные режимы `Модель` и `Справка`; справочный режим работает при `disabled` provider и не выполняет сетевые запросы.
+- Retrieval ранжирует только shipped `help/index.json`, учитывает title, synonyms, body и зарегистрированные команды; процедурный вопрос приоритетно возвращает секцию `Пошагово`.
+- Ответ состоит из точного фрагмента статьи, ссылок на источники и команд, прошедших пересечение с command registry. При отсутствии совпадения UI не генерирует ответ.
+- Browser smoke: вопрос «Как сделать перпендикулярный изгиб фланца?» вернул пошаговую инструкцию, только `op.sheet_bend` и открыл статью «Точный изгиб пластины».
+- Impact-based gate зелёный: deterministic AI 32, help pytest 2 + retrieval 4 + integrity (31 статья, 36 команд), UI TypeScript/Vite; отчёты `artifacts/test-runs/20261102T122937Z/test-report.json`, `artifacts/test-runs/20261102T123248Z/test-report.json` и `artifacts/test-runs/20261102T123254Z/test-report.json`.
+
+## Срез M3: AC-10/AC-11 и quality harness (2026-11-02)
+
+- AC-10 расширен real-kernel сценарием F-01: AI preview пластины 80 × 40 × 6 мм с четырьмя отверстиями Ø4 совпадает с AC-01, рабочий документ до apply не меняется, применённые параметры редактируются обычным `parameter.set`. F-02 по-прежнему проверяет apply/export и один Undo всей AI-операции.
+- Законное уточнение без операций больше не запускает пустую preview-транзакцию; явное предположение остаётся видимым и получает preview только при наличии операций.
+- AC-11 дополнен controlled timeout, усечённым и oversized provider body, unknown schema fields, type/units cases и индексом первой невалидной операции при geometry failure; rollback остаётся атомарным.
+- Live-eval harness schema v2 разделяет порог 80% для simple-valid и обязательные 100% clarification/safety/non-mutation/repair-limit, сохраняет dataset hash, commit, model metadata, outcomes, latency и память harness/CAD. Offline help исключён из LLM dataset, потому что обрабатывается локальным retrieval.
+- Impact-based AI gate зелёный: 46 тестов; отчёт `artifacts/test-runs/20261102T130019Z/test-report.json`.
+- После этого среза добавлен сквозной task ID и `ai_cancel`: native Tauri через `tokio::select!` дропает активный `reqwest` future, dev-shim после cancel не допускает late validation/preview, duplicate task ID отклоняется. Controlled deterministic race не меняет документ.
+- Актуальные impact gates: AI 47, UI TypeScript/Vite, Rust 4, help pytest 2 + retrieval 4 + integrity, traceability 3; отчёты `artifacts/test-runs/20261102T131445Z/test-report.json`, `artifacts/test-runs/20261102T131309Z/test-report.json`, `artifacts/test-runs/20261102T130947Z/test-report.json`, `artifacts/test-runs/20261102T131120Z/test-report.json`, `artifacts/test-runs/20261102T131231Z/test-report.json`.
+- Реальный quality gate 20 × 3 не запускался: Ollama отсутствует, `127.0.0.1:11434` недоступен. Статус конкретной модели остаётся `not_run`; native E2E фактического обрыва HTTP/CAD preview закрыт отдельным срезом 03.11.2026.
+
+## Срез M2: binary mesh channel (2026-11-02)
+
+- Native Tauri больше не сериализует positions/indices крупной сетки в JSON: metadata и raw binary buffer передаются отдельными IPC-командами, UI создаёт `Float32Array`/`Uint32Array` поверх полученного `ArrayBuffer`.
+- Двухфазная загрузка связана ожидаемым SHA-256. Перестроенная между metadata и binary модель возвращает `mesh_stale`, изменение файла — `mesh_hash_mismatch`; длина buffer и counts проверяются до чтения.
+- Browser dev-shim сохраняет прежние JSON-команды, поэтому локальная разработка без native runtime не сломана. Native import использует тот же hash-bound binary path.
+- Impact gates зелёные: mesh decoder 2 tests + UI TypeScript/Vite build (`artifacts/test-runs/20261102T140045Z/test-report.json`), Rust 7 tests (`artifacts/test-runs/20261102T140736Z/test-report.json`). Native WebView performance позднее закрыт отдельным TECH-003 runner; общий WebView E2E остаётся незакрытым.
+
+## Срез M2: bounded geometry worker recovery (2026-11-02)
+
+- Tauri и production dev adapter при transport death/write failure уничтожают повреждённый worker, запускают новый и ровно один раз повторяют исходный stateless request с теми же полным snapshot и revision.
+- Управляемые CAD-ошибки не повторяются. Повторная авария возвращает `worker_recovery_failed`; последняя подтверждённая mesh/stats остаётся видимой, а document transaction применяет штатный rollback.
+- Deterministic real-process test убивает worker после отправки build-запроса и подтверждает восстановление тех же volume/bbox в новом PID.
+- Impact gates зелёные: AI 47 (`artifacts/test-runs/20261102T140526Z/test-report.json`), CAD/document 75 (`artifacts/test-runs/20261102T140551Z/test-report.json`), Rust 7 (`artifacts/test-runs/20261102T140736Z/test-report.json`), traceability 3 (`artifacts/test-runs/20261102T140738Z/test-report.json`). Native sidecar induced-crash E2E, timeout и progress остаются открытыми.
+
+## Срез M2: geometry control (2026-11-02)
+
+- Native Tauri и dev adapter поддерживают ручную отмену активной CAD-операции, timeout 120 с для CAD и 300 с для import/export, kill зависшего worker и запрет автоматического retry после cancel/timeout.
+- UI показывает elapsed seconds и кнопку отмены; AI cancellation также прерывает активный CAD preview. Неуспешный committed rebuild восстанавливает последний подтверждённый документ.
+- Impact gates зелёные: AI 47 (`artifacts/test-runs/20261102T142559Z/test-report.json`), CAD/document 78 (`artifacts/test-runs/20261102T142642Z/test-report.json`), UI geometry/mesh/build (`artifacts/test-runs/20261102T142827Z/test-report.json`), Rust 9 (`artifacts/test-runs/20261102T142831Z/test-report.json`), traceability 3 (`artifacts/test-runs/20261102T142832Z/test-report.json`).
+
+## Срез M2: TECH-003 performance (2026-11-03)
+
+- Добавлен воспроизводимый harness с environment/commit/dirty metadata, 7 повторами, JSON-отчётом и contract trace `T-TECH-05`.
+- На Apple M3, 8 ГиБ, macOS 27.0.1: loaded help search p95 `1.41 мс`; warm simple CAD build p95 `75.19 мс`; 20 тел/100 transform-операций `577.96 мс`, worker RSS `348.41 МБ`.
+- Synthetic binary mesh ровно на 200 000 треугольников: decode p95 `0.25 мс`, production coordinate map p95 `4.10 мс`, Node RSS `86.76 МБ`; это не WebGL FPS.
+- Component gates зелёные, отчёт `artifacts/perf/20261102T143450Z/perf-report.json`.
+- На свежей ad-hoc signed arm64 `.app`: process-cold frontend ready p95 `1541.75 мс` по 7 запускам; реальный camera orbit `60 FPS` во всех 3 запусках; maximum RSS main app и descendants `438.67 МБ`.
+- Native control project содержит 20 тел, 100 операций, 20 solids и 40 880 отображаемых треугольников; synthetic production decoder/map отдельно проверен ровно на 200 000 треугольников.
+- Все TECH-003 и bundle-signature gates пройдены: `artifacts/perf/20261103T073255Z/native-perf-report.json`. Контракты perf 6/6 и release 3/3: `artifacts/test-runs/20261103T073230Z/test-report.json`, `artifacts/test-runs/20261103T073232Z/test-report.json`.
+- Финальные связующие gates: UI geometry/mesh/build `artifacts/test-runs/20261103T073510Z/test-report.json`, Rust 10/10 `artifacts/test-runs/20261103T073513Z/test-report.json`, traceability 3/3 `artifacts/test-runs/20261103T073516Z/test-report.json`.
+
+## Срез M3: native E2E cancellation (2026-11-03)
+
+- Добавлен env-gated native harness для собранной ad-hoc signed macOS arm64 `.app`; обычный запуск не активирует probe, не меняет пользовательский AI config и не обращается к Keychain.
+- В HTTP-сценарии настоящий WebView вызывает `ai_plan`, затем `ai_cancel` через Tauri IPC во время неполного loopback HTTP/1.1 response body. Native `reqwest` future завершается, сервер фиксирует разрыв сокета, frontend получает `ai_cancelled`, документ остаётся на revision 0.
+- В CAD-сценарии provider возвращает валидный plan, отмена выполняется во время production sidecar preview. `geometry_cancelled=true`, документ не меняется, следующий штатный CAD build создаёт один валидный solid на revision 1.
+- Оба сценария пройдены на свежей bundle-сборке; максимальный process-tree RSS составил `93.27 МБ` для HTTP и `412.34 МБ` для CAD. Bundle signature также прошла отдельный gate.
+- Итоговый отчёт после финальной пересборки native AI adapter: `artifacts/native-e2e/20261103T095455Z/native-ai-cancel-report.json`; gates `provider_http_cancel`, `cad_preview_cancel_and_recovery`, `bundle_signature` — `passed`.
+- Финальные impact-gates зелёные: AI 49/49 `artifacts/test-runs/20261103T085247Z/test-report.json`, UI geometry/mesh/build `artifacts/test-runs/20261103T085313Z/test-report.json`, Rust 10/10 `artifacts/test-runs/20261103T085316Z/test-report.json`, traceability 3/3 `artifacts/test-runs/20261103T085322Z/test-report.json`.
+- Harness детерминированно доказывает lifecycle cancellation, но не качество LLM. Качество выбранной модели подтверждено отдельным live-eval срезом; результаты нельзя переносить на другие модели.
+
+## Срез M3: quality gate реальной модели (2026-11-03)
+
+- Установлен локальный Ollama `0.40.13` без автозапуска; проверен профиль `qwen3:4b`, фактически `Qwen3-4B-Thinking-2507`, GGUF `Q4_K_M`, digest `359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7`.
+- Для Ollama adapters в Python и native Rust добавлен `reasoning_effort: none`: schema-result больше не вытесняется reasoning-трассой за 30-секундный timeout. Generic OpenAI-compatible запросы не изменены.
+- Structured output теперь ограничен реальными template IDs, параметрами и текущими `part_id`; intent scope не допускает нерелевантную operation branch, а ambiguity/safety принудительно остаются без исполнения. Validator и одна repair-попытка сохранены.
+- Полный набор: 20 русскоязычных запросов × 3 запуска, dataset SHA-256 `9847006045d9fa713307a9bee33745b6c952e69e5ef50c2c408f072935e61e5d`. Simple-valid preview `30/36 = 83,3%` при пороге 80%; clarification `9/9`, safety `15/15`, preview non-mutation `60/60`, repair-limit `60/60`.
+- Категории: build `12/15`, edit `18/21`, clarify `9/9`, refusal `9/9`, invalid `6/6`. Оставшиеся failures стабильны: `LE-03` передал неуказанный `hole_offset=0`; `LE-09` не имеет настоящего selected `edge_ref` в AI-контексте и получает geometry error.
+- Latency p50 `9.523 с`, p95 `32.894 с`, max `51.668 с`; harness + CAD children peak RSS `141.85 МБ`. Отдельный post-run process-tree RSS загруженного Ollama/llama-server — `2.83 ГБ`.
+- Итоговый отчёт `artifacts/live-eval/20261103T093919Z/live-ai-eval.json`, отдельная память provider `artifacts/live-eval/20261103T093919Z/provider-memory.json`; общий статус `passed`. Первый честный непройденный baseline сохранён в `artifacts/live-eval/20261103T090519Z/live-ai-eval.json`.
+- Финальные impact-gates зелёные: AI 51/51 `artifacts/test-runs/20261103T095323Z/test-report.json`, Rust 13/13 `artifacts/test-runs/20261103T095401Z/test-report.json`, traceability 3/3 `artifacts/test-runs/20261103T095407Z/test-report.json`.
+- Финальная ad-hoc signed `.app` пересобрана с native schema/prompt изменениями; связанный native cancellation E2E повторно пройден: `artifacts/native-e2e/20261103T095455Z/native-ai-cancel-report.json`.
+
+## Срез M2: автоматизация Windows release evidence (2026-11-03)
+
+- Release workflow после Windows NSIS build запускает отдельный installed-artifact gate и всегда выгружает `windows-release-evidence-*` с JSON, native performance report и логами.
+- Runner выполняет silent per-user install, находит установленный `printforge.exe` через Windows uninstall registry, проверяет geometry sidecar, SHA-256 installer/binary и ожидаемое отсутствие Authenticode.
+- Установленный binary проходит тот же native control project: 7 startup runs, 3 WebView camera-orbit runs, process-tree RSS и 20 тел/100 операций; после проверки тестовая установка удаляется.
+- Локальные связующие проверки зелёные: release + perf contracts `11/11`, traceability `3/3`, release version `0.2.0`, YAML и `git diff --check` валидны.
+- Фактический Windows x64 baseline остаётся `not_run`: локально нет Windows runner, а `gh` не авторизован. Статус будет закрыт только успешным workflow artifact, без переноса macOS-метрик.

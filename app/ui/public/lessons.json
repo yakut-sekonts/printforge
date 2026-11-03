@@ -402,6 +402,106 @@
           }
         }
       ]
+    },
+    {
+      "lesson_id": "advanced-bodies",
+      "title": "Расширенные тела M4",
+      "goal": "Создать operation-only тело по эскизу, добавить оболочку и отменить только последнюю операцию",
+      "skills": [
+        "Эскизное тело",
+        "Цилиндрическая оболочка",
+        "История operation-only документа"
+      ],
+      "duration_min": 6,
+      "steps": [
+        {
+          "id": "m4-1",
+          "text": "В правой панели выберите «Эскиз → выдавливание», оставьте 40 × 20 × 5 мм и отверстие Ø10, затем нажмите «Создать по эскизу».",
+          "check": {"type": "operation", "op": "sketch_extrude"}
+        },
+        {
+          "id": "m4-2",
+          "text": "Выберите «Цилиндрическая оболочка» и создайте preset R10, высотой 20 мм, со стенкой 2 мм и дном 3 мм.",
+          "check": {"type": "operation", "op": "shell"}
+        },
+        {
+          "id": "m4-3",
+          "text": "Нажмите ⌘Z один раз. Оболочка исчезнет, а первое эскизное тело останется в документе.",
+          "check": {"type": "command", "command_id": "op.undo"}
+        }
+      ]
+    },
+    {
+      "lesson_id": "constraint-solver",
+      "title": "Ограничения эскиза",
+      "goal": "Проверить степени свободы и применить полностью определённый эскиз",
+      "skills": ["Constraint preview", "Residual и DOF", "Одна транзакция"],
+      "duration_min": 5,
+      "steps": [
+        {
+          "id": "cs-1",
+          "text": "Выберите «Эскиз с ограничениями», оставьте 40 × 20 мм и нажмите «Проверить ограничения». Убедитесь, что показано 0 DOF.",
+          "check": {"type": "command", "command_id": "op.sketch.solve"}
+        },
+        {
+          "id": "cs-2",
+          "text": "Нажмите «Создать тело»: решённый эскиз выдавится одной операцией.",
+          "check": {"type": "operation", "op": "constrained_sketch_extrude"}
+        },
+        {
+          "id": "cs-3",
+          "text": "Нажмите ⌘Z один раз, чтобы отменить всё тело.",
+          "check": {"type": "command", "command_id": "op.undo"}
+        }
+      ]
+    },
+    {
+      "lesson_id": "mesh-repair",
+      "title": "Ремонт STL mesh",
+      "goal": "Встроить STL с отверстием, закрыть поддерживаемый дефект и проверить Undo",
+      "skills": ["Embedded mesh source", "Boundary diagnostics", "Mesh Undo"],
+      "duration_min": 6,
+      "steps": [
+        {
+          "id": "mr-1",
+          "text": "Импортируйте STL с одним квадратным отверстием, выберите исходные единицы и примените его как mesh-документ.",
+          "check": {"type": "operation", "op": "mesh_source"}
+        },
+        {
+          "id": "mr-2",
+          "text": "В Mesh workflow нажмите «Закрыть поддерживаемое отверстие» и проверьте, что число открытых рёбер стало 0.",
+          "check": {"type": "operation", "op": "mesh_repair"}
+        },
+        {
+          "id": "mr-3",
+          "text": "Нажмите ⌘Z: исходная сетка с дефектом вернётся.",
+          "check": {"type": "command", "command_id": "op.undo"}
+        }
+      ]
+    },
+    {
+      "lesson_id": "image-relief",
+      "title": "Декоративный relief",
+      "goal": "Построить preview по изображению, применить mesh и экспортировать STL",
+      "skills": ["Image limits", "Preview и Apply", "Mesh-only export"],
+      "duration_min": 6,
+      "steps": [
+        {
+          "id": "ir-1",
+          "text": "Укажите PNG/JPEG/WebP и нажмите Preview. Документ на этом шаге не меняется.",
+          "check": {"type": "command", "command_id": "op.image_relief.preview"}
+        },
+        {
+          "id": "ir-2",
+          "text": "Проверьте размеры, model/seed и нажмите Apply.",
+          "check": {"type": "operation", "op": "image_relief_source"}
+        },
+        {
+          "id": "ir-3",
+          "text": "Экспортируйте decorative mesh в STL или 3MF. STEP для mesh-only документа недоступен.",
+          "check": {"type": "exported"}
+        }
+      ]
     }
   ]
 }

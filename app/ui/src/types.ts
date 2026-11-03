@@ -21,7 +21,9 @@ export interface Operation {
   target_id?: string;
   mode?: "add" | "cut";
   face_ref?: FaceFeatureRef;
-  profile?: FaceFeatureProfile;
+  profile?: FaceFeatureProfile | SketchProfile;
+  sketch?: ConstrainedSketch;
+  drag?: SketchDrag;
   depth?: number | "through";
   center?: [number, number];
   diameter?: number;
@@ -32,6 +34,283 @@ export interface Operation {
   inside_radius?: number;
   moving_side?: -1 | 1;
   direction?: -1 | 1;
+  plane?: "XY" | "XZ" | "YZ";
+  result_id?: string;
+  name?: string;
+  axis?: RevolveAxis;
+  section?: SweepSection;
+  path?: SweepPath;
+  sections?: LoftSection[];
+  ruled?: boolean;
+  frenet?: boolean;
+  outer_radius?: number;
+  wall?: number;
+  bottom?: number;
+  width?: number;
+  base_length?: number;
+  base_width?: number;
+  base_thickness?: number;
+  rib_length?: number;
+  rib_height?: number;
+  rib_width?: number;
+  overlap?: number;
+  fixture_id?: FitFixtureId;
+  fixture_version?: string;
+  body_length?: number;
+  body_width?: number;
+  body_height?: number;
+  clearance?: number;
+  clearance_mode?: FitClearanceMode;
+  pocket_depth?: number;
+  format?: "svg" | "dxf";
+  source_text?: string;
+  unit_scale?: number;
+  text?: string;
+  font_size?: number;
+  relief_height?: number;
+  profile_version?: string;
+  major_diameter?: number;
+  pitch?: number;
+  length?: number;
+  hand?: "right" | "left";
+  starts?: number;
+  nut_height?: number;
+  nut_across_flats?: number;
+  values?: number[];
+  nominal_diameter?: number;
+  coupon_length?: number;
+  coupon_width?: number;
+  thickness?: number;
+  spacing?: number;
+  label_height?: number;
+  profile_name?: string;
+  pin_radius?: number;
+  pin_length?: number;
+  radial_clearance?: number;
+  print_separation?: number;
+}
+
+export type Point2 = [number, number];
+export type Point3 = [number, number, number];
+
+export type SketchContour =
+  | { kind: "polygon"; points: Point2[] }
+  | { kind: "circle"; center: Point2; radius: number }
+  | {
+      kind: "segments";
+      segments: Array<
+        | { type: "line"; start: Point2; end: Point2 }
+        | { type: "arc"; start: Point2; mid: Point2; end: Point2 }
+      >;
+    };
+
+export interface SketchProfile {
+  regions: Array<{ outer: SketchContour; holes: SketchContour[] }>;
+}
+
+export interface RevolveAxis {
+  point: Point3;
+  direction: Point3;
+}
+
+export interface SweepSection {
+  kind: "circle";
+  radius: number;
+}
+
+export interface SweepPath {
+  points: Point3[];
+}
+
+export interface LoftSection {
+  plane: "XY" | "XZ" | "YZ";
+  offset: number;
+  profile: SketchProfile;
+}
+
+export interface SketchExtrudeArgs {
+  profile: SketchProfile;
+  plane: "XY" | "XZ" | "YZ";
+  depth: number;
+  result_id?: string;
+  name?: string;
+}
+
+export type ConstrainedSketchEntity =
+  | { id: string; type: "line"; start: Point2; end: Point2 }
+  | { id: string; type: "circle"; center: Point2; radius: number };
+
+export type SketchPointRef = [string, "start" | "end" | "center"];
+
+export type SketchConstraint =
+  | { type: "coincident"; a: SketchPointRef; b: SketchPointRef }
+  | { type: "horizontal" | "vertical"; entity: string }
+  | { type: "parallel" | "perpendicular" | "equal"; a: string; b: string }
+  | { type: "tangent"; line: string; circle: string; side?: -1 | 1 }
+  | { type: "dimension"; kind: "length" | "radius"; entity: string; value: number }
+  | { type: "dimension"; kind: "distance" | "distance_x" | "distance_y"; a: SketchPointRef; b: SketchPointRef; value: number }
+  | { type: "fix"; point: SketchPointRef; value: Point2 }
+  | { type: "fix"; entity: string; value?: number[] };
+
+export interface ConstrainedSketch {
+  entities: ConstrainedSketchEntity[];
+  constraints: SketchConstraint[];
+  regions?: Array<{ outer: string[] | string; holes: Array<string[] | string> }>;
+}
+
+export interface SketchDrag {
+  point: SketchPointRef;
+  value: Point2;
+}
+
+export interface SketchSolveResult {
+  status: "fully_constrained" | "under_constrained";
+  degrees_of_freedom: number;
+  constraint_rank: number;
+  residual_count: number;
+  redundant_constraints: number;
+  max_residual: number;
+  entities: ConstrainedSketchEntity[];
+}
+
+export interface ConstrainedSketchExtrudeArgs {
+  sketch: ConstrainedSketch;
+  drag?: SketchDrag;
+  plane: "XY" | "XZ" | "YZ";
+  depth: number;
+  result_id?: string;
+  name?: string;
+}
+
+export interface RevolveArgs {
+  profile: SketchProfile;
+  plane: "XY" | "XZ" | "YZ";
+  axis: RevolveAxis;
+  angle: number;
+  result_id?: string;
+  name?: string;
+}
+
+export interface SweepArgs {
+  section: SweepSection;
+  path: SweepPath;
+  frenet?: boolean;
+  result_id?: string;
+  name?: string;
+}
+
+export interface LoftArgs {
+  sections: LoftSection[];
+  ruled?: boolean;
+  result_id?: string;
+  name?: string;
+}
+
+export interface ShellArgs {
+  outer_radius: number;
+  height: number;
+  wall: number;
+  bottom: number;
+  result_id?: string;
+  name?: string;
+}
+
+export interface DraftPrismArgs {
+  width: number;
+  depth: number;
+  height: number;
+  angle: number;
+  result_id?: string;
+  name?: string;
+}
+
+export interface RibArgs {
+  base_length: number;
+  base_width: number;
+  base_thickness: number;
+  rib_length: number;
+  rib_height: number;
+  rib_width: number;
+  overlap: number;
+  result_id?: string;
+  name?: string;
+}
+
+export type FitFixtureId = "nut_m5" | "bearing_608" | "heat_insert_m3";
+export type FitClearanceMode = "radial" | "diametral" | "one_sided";
+
+export interface FitPocketArgs {
+  fixture_id: FitFixtureId;
+  fixture_version: "1";
+  body_length: number;
+  body_width: number;
+  body_height: number;
+  clearance: number;
+  clearance_mode: FitClearanceMode;
+  pocket_depth?: number;
+  result_id?: string;
+  name?: string;
+}
+
+export interface VectorExtrudeArgs {
+  path: string;
+  format: "svg" | "dxf";
+  height: number;
+  unit_scale?: number;
+  result_id?: string;
+  name?: string;
+}
+
+export interface TextReliefArgs {
+  text: string;
+  font_size: number;
+  relief_height: number;
+  body_length: number;
+  body_width: number;
+  body_height: number;
+  mode: "add" | "cut";
+  result_id?: string;
+  name?: string;
+}
+
+export interface ThreadPairArgs {
+  profile_version: "metric-60-v1";
+  major_diameter: number;
+  pitch: number;
+  length: number;
+  hand: "right" | "left";
+  starts: 1;
+  clearance: number;
+  nut_height: number;
+  nut_across_flats: number;
+  result_id?: string;
+  name?: string;
+}
+
+export interface ClearanceCalibrationArgs {
+  values: number[];
+  nominal_diameter: number;
+  coupon_length: number;
+  coupon_width: number;
+  thickness: number;
+  spacing: number;
+  font_size: number;
+  label_height: number;
+  profile_name?: string;
+  result_id?: string;
+  name?: string;
+}
+
+export interface SplitConnectorPairArgs {
+  length: number;
+  width: number;
+  height: number;
+  pin_radius: number;
+  pin_length: number;
+  radial_clearance: number;
+  print_separation: number;
+  result_id?: string;
+  name?: string;
 }
 
 export type EdgeFeatureKind = "fillet" | "chamfer";
@@ -97,12 +376,12 @@ export interface PartDef {
 export interface PartStats {
   part_id: string;
   name: string;
-  volume: number;
+  volume: number | null;
   solid_count: number;
 }
 
 export interface DocStats {
-  volume: number;
+  volume: number | null;
   solid_count: number;
   face_count: number | null;
   bbox: [number, number, number, number, number, number] | null;
@@ -115,6 +394,19 @@ export interface DocStats {
   lid_volume?: number;
   intersection_volume?: number;
   parts?: PartStats[];
+  mesh_mode?: boolean;
+  mesh_diagnostics?: {
+    watertight: boolean;
+    winding_consistent: boolean;
+    boundary_edges: number;
+    non_manifold_edges: number;
+    degenerate_triangles: number;
+    components: number;
+    euler_number: number;
+    self_intersection: "unknown";
+    self_intersection_detail: string;
+  };
+  mesh_history?: Array<Record<string, unknown>>;
 }
 
 export interface DocState {
@@ -147,9 +439,22 @@ export interface FaceRange {
 export interface MeshData {
   vertex_count: number;
   triangle_count: number;
-  positions: number[];
-  indices: number[];
+  positions: number[] | Float32Array;
+  indices: number[] | Uint32Array;
   face_ranges: FaceRange[];
+}
+
+export interface PerformanceConfig {
+  enabled: boolean;
+  mode: "startup" | "workload" | string;
+  project_path?: string | null;
+  duration_ms: number;
+}
+
+export interface NativeE2eConfig {
+  enabled: boolean;
+  mode: "ai-http-cancel" | "ai-cad-cancel" | string;
+  cancel_delay_ms: number;
 }
 
 export interface ExportResult {
@@ -169,10 +474,30 @@ export interface MeshResource {
   face_ranges: { face_index: number; solid_index?: number; tri_start: number; tri_count: number }[];
 }
 
+export type MeshResourceMetadata = Omit<MeshResource, "path">;
+
 export interface ImportResult {
   stats: DocStats;
   mesh: MeshResource;
   mode: "brep" | "mesh";
+}
+
+export interface ImageReliefSettings {
+  path: string;
+  model: "heightmap-luminance-v1";
+  seed: number;
+  width_mm: number;
+  relief_height: number;
+  base_thickness: number;
+  samples: number;
+  noise_strength: number;
+  invert: boolean;
+}
+
+export interface ImageReliefPreview {
+  stats: DocStats;
+  mesh: MeshResource;
+  source_sha256: string;
 }
 
 export interface PrintCheck {

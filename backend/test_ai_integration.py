@@ -3,6 +3,7 @@ import copy
 import json
 import math
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,36 @@ def test_ai_washer_preview_apply_export_and_single_undo(isolated_shim, tmp_path)
     assert redone["revision"] > undone["revision"]
 
 
+def test_ai_plate_preview_matches_ac01_and_applied_parameters_remain_editable(
+        isolated_shim):
+    before = _semantic_state(isolated_shim)
+    response = dev_shim.cmd_ai_plan({
+        "text": "Создай пластину 80 на 40 толщиной 6 с четырьмя отверстиями 4 мм",
+    })
+
+    expected_volume = 80 * 40 * 6 - 4 * math.pi * 4 * 6
+    preview = response["preview"]
+    assert preview["stats"]["volume"] == pytest.approx(
+        expected_volume, abs=max(0.001, 1e-6 * expected_volume))
+    assert preview["stats"]["solid_count"] == 1
+    assert preview["stats"]["bbox"] == pytest.approx([-40, -20, 0, 40, 20, 6])
+    assert _semantic_state(isolated_shim) == before
+
+    applied = dev_shim.cmd_doc_transaction(_transaction_args(response))
+    assert applied["params"] == {
+        "length": 80.0,
+        "width": 40.0,
+        "height": 6.0,
+        "hole_diameter": 4.0,
+        "hole_offset": 10,
+    }
+    edited = dev_shim.cmd_doc_set_parameter({"name": "length", "value": 100})
+    expected_edited_volume = 100 * 40 * 6 - 4 * math.pi * 4 * 6
+    assert edited["params"]["length"] == 100
+    assert edited["stats"]["volume"] == pytest.approx(
+        expected_edited_volume, abs=max(0.001, 1e-6 * expected_edited_volume))
+
+
 def test_manual_cad_works_with_ai_disabled(isolated_shim, monkeypatch):
     monkeypatch.setattr(ai_planner, "_PROVIDER_CONFIG", {
         "provider": "disabled", "base_url": "", "model": "", "api_key": "",
@@ -134,7 +165,7 @@ def test_ai_apply_is_atomic_when_last_operation_fails(isolated_shim):
         "operations": operations,
     })
 
-    with pytest.raises(RuntimeError, match="План не применён"):
+    with pytest.raises(RuntimeError, match="операция 2"):
         dev_shim.cmd_doc_transaction({
             "operations": operations,
             "base_revision": isolated_shim.revision,
@@ -290,3 +321,62 @@ def test_revision_is_checked_again_at_commit_boundary(isolated_shim, monkeypatch
         })
     assert isolated_shim.params["length"] == 90
     assert "commit-boundary" not in isolated_shim.applied_actions
+
+
+def test_cancelled_provider_task_never_creates_preview_or_changes_document(
+        isolated_shim, monkeypatch):
+    monkeypatch.setattr(ai_planner, "_PROVIDER_CONFIG", {
+        "provider": "openai",
+        "base_url": "http://127.0.0.1:9/v1",
+        "model": "test-model",
+        "api_key": "",
+    })
+    entered_provider = threading.Event()
+    release_provider = threading.Event()
+    outcome = {}
+    before = _semantic_state(isolated_shim)
+
+    def delayed_provider(*_args, **_kwargs):
+        entered_provider.set()
+        assert release_provider.wait(timeout=5)
+        return json.dumps({
+            "schema_version": 1,
+            "document_id": isolated_shim.doc_id,
+            "document_instance_id": isolated_shim.document_instance_id,
+            "base_revision": isolated_shim.revision,
+            "units": "mm",
+            "assumptions": [],
+            "questions": [],
+            "operations": [{
+                "command_id": "part.create.from_template",
+                "target_id": None,
+                "parameters": {
+                    "template": "washer",
+                    "params": {"outer_diameter": 20, "inner_diameter": 6, "height": 4},
+                },
+            }],
+            "summary": "Создать шайбу",
+        })
+
+    def run_plan():
+        try:
+            outcome["response"] = dev_shim.cmd_ai_plan({
+                "text": "создай шайбу",
+                "task_id": "cancel-test",
+            })
+        except RuntimeError as error:
+            outcome["error"] = str(error)
+
+    monkeypatch.setattr(ai_planner, "http_chat", delayed_provider)
+    thread = threading.Thread(target=run_plan)
+    thread.start()
+    assert entered_provider.wait(timeout=5)
+    assert dev_shim.cmd_ai_cancel({"task_id": "cancel-test"})["cancelled"] is True
+    release_provider.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert "ai_cancelled" in outcome["error"]
+    assert "response" not in outcome
+    assert _semantic_state(isolated_shim) == before
+    assert dev_shim.cmd_ai_cancel({"task_id": "cancel-test"})["cancelled"] is False

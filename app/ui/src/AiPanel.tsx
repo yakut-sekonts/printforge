@@ -1,13 +1,26 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { AiOperation, AiPlanResponse, AiProviderInfo } from "./types";
+import type { AiOperation, AiPlanResponse, AiProviderInfo, CommandDef } from "./types";
 import { backend, parseIpcError } from "./backend";
+import { findHelpAnswers, loadHelpIndex } from "./helpSearch";
+import type { HelpAnswerSource } from "./helpSearch";
 import { IconClose, IconSparkles } from "./icons";
+import { Markdown } from "./markdown";
 
 const EXAMPLE_PROMPT = "Создай шайбу: наружный диаметр 20 мм, внутренний 6 мм, высота 4 мм";
+const EXAMPLE_HELP_QUERY = "Как сделать перпендикулярный изгиб фланца?";
 const OLLAMA_DEFAULT_BASE = "http://127.0.0.1:11434/v1";
+type AiMode = "plan" | "help";
+
+function createTaskId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `ai-${crypto.randomUUID()}`;
+  }
+  return `ai-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 
 interface AiPanelProps {
   documentRevision: number;
+  commands: CommandDef[];
   onClose: () => void;
   onApply: (
     operations: AiOperation[],
@@ -16,7 +29,7 @@ interface AiPanelProps {
     planHash: string,
     actionId: string,
   ) => Promise<number | null>;
-  onOpenHelp: () => void;
+  onOpenHelp: (helpId: string) => void;
 }
 
 interface SettingsDraft {
@@ -27,7 +40,7 @@ interface SettingsDraft {
 
 const EMPTY_SETTINGS: SettingsDraft = { provider: "disabled", base_url: "", model: "" };
 
-function formatNumber(value: number | undefined): string {
+function formatNumber(value: number | null | undefined): string {
   if (value == null) return "—";
   return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(value);
 }
@@ -78,7 +91,8 @@ function dataDisclosure(settings: SettingsDraft): string {
   }
 }
 
-export function AiPanel({ documentRevision, onClose, onApply, onOpenHelp }: AiPanelProps) {
+export function AiPanel({ documentRevision, commands, onClose, onApply, onOpenHelp }: AiPanelProps) {
+  const [mode, setMode] = useState<AiMode>("plan");
   const [provider, setProvider] = useState<AiProviderInfo | null>(null);
   const [settings, setSettings] = useState<SettingsDraft>(EMPTY_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -90,12 +104,24 @@ export function AiPanel({ documentRevision, onClose, onApply, onOpenHelp }: AiPa
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [connectionWarning, setConnectionWarning] = useState(false);
   const [prompt, setPrompt] = useState(EXAMPLE_PROMPT);
+  const [helpQuery, setHelpQuery] = useState(EXAMPLE_HELP_QUERY);
+  const [helpResults, setHelpResults] = useState<HelpAnswerSource[]>([]);
+  const [helpSearched, setHelpSearched] = useState(false);
+  const [helpBusy, setHelpBusy] = useState(false);
+  const [helpError, setHelpError] = useState<string | null>(null);
   const [response, setResponse] = useState<AiPlanResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [planning, setPlanning] = useState(false);
   const [applying, setApplying] = useState(false);
   const [appliedRevision, setAppliedRevision] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const taskIdRef = useRef<string | null>(null);
+
+  const cancelCurrentPlan = () => {
+    const taskId = taskIdRef.current;
+    abortRef.current?.abort();
+    if (taskId) void backend.aiCancel(taskId).catch(() => undefined);
+  };
 
   useEffect(() => {
     let active = true;
@@ -109,7 +135,7 @@ export function AiPanel({ documentRevision, onClose, onApply, onOpenHelp }: AiPa
       .catch((cause) => { if (active) setSettingsError(parseIpcError(cause).message); });
     return () => {
       active = false;
-      abortRef.current?.abort();
+      cancelCurrentPlan();
     };
   }, []);
 
@@ -159,15 +185,17 @@ export function AiPanel({ documentRevision, onClose, onApply, onOpenHelp }: AiPa
 
   const requestPlan = async () => {
     if (!prompt.trim()) return;
-    abortRef.current?.abort();
+    cancelCurrentPlan();
     const controller = new AbortController();
+    const taskId = createTaskId();
     abortRef.current = controller;
+    taskIdRef.current = taskId;
     setPlanning(true);
     setAppliedRevision(null);
     setError(null);
     setResponse(null);
     try {
-      setResponse(await backend.aiPlan(prompt.trim(), controller.signal));
+      setResponse(await backend.aiPlan(prompt.trim(), taskId, controller.signal));
     } catch (cause) {
       if (!(cause instanceof DOMException && cause.name === "AbortError")) {
         setError(parseIpcError(cause).message);
@@ -177,6 +205,24 @@ export function AiPanel({ documentRevision, onClose, onApply, onOpenHelp }: AiPa
         abortRef.current = null;
         setPlanning(false);
       }
+      if (taskIdRef.current === taskId) taskIdRef.current = null;
+    }
+  };
+
+  const requestHelp = async () => {
+    if (!helpQuery.trim()) return;
+    setHelpBusy(true);
+    setHelpError(null);
+    setHelpSearched(false);
+    try {
+      const index = await loadHelpIndex();
+      setHelpResults(findHelpAnswers(index, helpQuery.trim(), commands));
+      setHelpSearched(true);
+    } catch {
+      setHelpResults([]);
+      setHelpError("Локальный индекс справки недоступен. Откройте справочник вручную.");
+    } finally {
+      setHelpBusy(false);
     }
   };
 
@@ -206,7 +252,16 @@ export function AiPanel({ documentRevision, onClose, onApply, onOpenHelp }: AiPa
   const preview = response?.preview;
   const applied = appliedRevision != null;
   const canApply = operations.length > 0 && questions.length === 0 && !preview?.error && !applied;
-  const busy = planning || applying || settingsBusy || connectionBusy;
+  const busy = planning || applying || settingsBusy || connectionBusy || helpBusy;
+  const activePrompt = mode === "plan" ? prompt : helpQuery;
+
+  const switchMode = (nextMode: AiMode) => {
+    if (nextMode === mode) return;
+    cancelCurrentPlan();
+    setMode(nextMode);
+    setError(null);
+    setHelpError(null);
+  };
 
   return (
     <aside className="ai-panel" aria-label="AI-помощник">
@@ -216,18 +271,41 @@ export function AiPanel({ documentRevision, onClose, onApply, onOpenHelp }: AiPa
         <button className="icon-btn" aria-label="Закрыть AI-помощник" onClick={onClose}><IconClose /></button>
       </header>
       <div className="ai-body">
-        <div className="ai-provider">
-          <span className={`pill ${provider?.available ? "pill-positive" : "pill-warning"}`}>
-            {provider == null ? "Проверка…" : provider.available ? "Доступен" : "Выключен"}
-          </span>
-          <span className="ai-provider-name">{providerTitle(provider)}</span>
-          <button className="link-btn" onClick={() => setSettingsOpen((value) => !value)}>
-            {settingsOpen ? "Скрыть настройки" : "Настроить"}
+        <div className="ai-mode-tabs" role="tablist" aria-label="Режим помощника">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "plan"}
+            className={mode === "plan" ? "active" : ""}
+            onClick={() => switchMode("plan")}
+          >
+            Модель
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "help"}
+            className={mode === "help" ? "active" : ""}
+            onClick={() => switchMode("help")}
+          >
+            Справка
           </button>
         </div>
 
-        {settingsOpen && (
-          <section className="ai-settings" aria-label="Настройки AI-провайдера">
+        {mode === "plan" ? (
+          <>
+            <div className="ai-provider">
+              <span className={`pill ${provider?.available ? "pill-positive" : "pill-warning"}`}>
+                {provider == null ? "Проверка…" : provider.available ? "Доступен" : "Выключен"}
+              </span>
+              <span className="ai-provider-name">{providerTitle(provider)}</span>
+              <button className="link-btn" onClick={() => setSettingsOpen((value) => !value)}>
+                {settingsOpen ? "Скрыть настройки" : "Настроить"}
+              </button>
+            </div>
+
+            {settingsOpen && (
+              <section className="ai-settings" aria-label="Настройки AI-провайдера">
             <label>
               <span>Провайдер</span>
               <select
@@ -342,27 +420,52 @@ export function AiPanel({ documentRevision, onClose, onApply, onOpenHelp }: AiPa
             {settings.provider !== "disabled" && settings.provider !== "scripted" && (
               <span className="ai-test-note">Проверка запрашивает только список `/models`; данные проекта не передаются.</span>
             )}
-          </section>
+              </section>
+            )}
+          </>
+        ) : (
+          <div className="ai-provider">
+            <span className="pill pill-positive">Offline</span>
+            <span className="ai-provider-name">Локальный справочник · данные не отправляются</span>
+          </div>
         )}
 
-        <label className="ai-prompt-label" htmlFor="ai-prompt">Опишите деталь или изменение</label>
+        <label className="ai-prompt-label" htmlFor="ai-prompt">
+          {mode === "plan" ? "Опишите деталь или изменение" : "Спросите о PrintForge"}
+        </label>
         <textarea
           id="ai-prompt"
           className="ai-prompt"
-          value={prompt}
+          value={activePrompt}
           rows={5}
           disabled={busy}
-          onChange={(event) => setPrompt(event.target.value)}
+          onChange={(event) => {
+            if (mode === "plan") setPrompt(event.target.value);
+            else {
+              setHelpQuery(event.target.value);
+              setHelpSearched(false);
+            }
+          }}
           onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
               event.preventDefault();
-              void requestPlan();
+              if (mode === "plan") void requestPlan();
+              else void requestHelp();
             }
           }}
         />
         <div className="ai-actions">
-          {planning ? (
-            <button className="btn" onClick={() => abortRef.current?.abort()}>Отменить запрос</button>
+          {mode === "plan" && planning ? (
+            <button className="btn" onClick={cancelCurrentPlan}>Отменить запрос</button>
+          ) : mode === "help" ? (
+            <button
+              className="btn btn-primary"
+              data-cmd="ai.help.answer"
+              disabled={!helpQuery.trim() || busy}
+              onClick={() => void requestHelp()}
+            >
+              {helpBusy ? "Поиск…" : "Ответить по справке"}
+            </button>
           ) : (
             <button
               className="btn btn-primary"
@@ -376,9 +479,10 @@ export function AiPanel({ documentRevision, onClose, onApply, onOpenHelp }: AiPa
           <span className="ai-shortcut">⌘↵</span>
         </div>
 
-        {error && <div className="error-box"><span className="error-title">AI-план не готов</span><p>{error}</p></div>}
+        {mode === "plan" && error && <div className="error-box"><span className="error-title">AI-план не готов</span><p>{error}</p></div>}
+        {mode === "help" && helpError && <div className="error-box"><span className="error-title">Справка недоступна</span><p>{helpError}</p></div>}
 
-        {response && (
+        {mode === "plan" && response && (
           <section className="ai-plan" aria-live="polite">
             <div>
               <h2 className="panel-section">Предложение</h2>
@@ -434,7 +538,54 @@ export function AiPanel({ documentRevision, onClose, onApply, onOpenHelp }: AiPa
           </section>
         )}
 
-        <button className="link-btn ai-help-link" onClick={onOpenHelp}>Как AI-помощник работает с данными и моделью?</button>
+        {mode === "help" && helpSearched && (
+          <section className="ai-plan ai-help-answer" aria-live="polite">
+            <div>
+              <h2 className="panel-section">Ответ из локальной справки</h2>
+              <span className="ai-test-note">Сетевой запрос не выполнялся.</span>
+            </div>
+            {helpResults.length > 0 ? (
+              <>
+                <div className="ai-help-excerpt">
+                  <Markdown source={helpResults[0].excerpt} />
+                </div>
+                {helpResults[0].commands.length > 0 && (
+                  <div className="ai-note">
+                    <strong>Команды из реестра</strong>
+                    <ul>
+                      {helpResults[0].commands.map((command) => (
+                        <li key={command.command_id}>
+                          <code>{command.command_id}</code> — {command.title}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <div className="ai-help-sources">
+                  <strong>Источники</strong>
+                  {helpResults.map((source) => (
+                    <button
+                      key={source.article.help_id}
+                      type="button"
+                      className="link-btn"
+                      onClick={() => onOpenHelp(source.article.help_id)}
+                    >
+                      {source.article.title}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="ai-note ai-questions">
+                В локальной справке нет подтверждённого ответа. Уточните термин или откройте справочник.
+              </div>
+            )}
+          </section>
+        )}
+
+        <button className="link-btn ai-help-link" onClick={() => onOpenHelp("ai-pomoshchnik")}>
+          Как помощник работает с данными и моделью?
+        </button>
       </div>
     </aside>
   );

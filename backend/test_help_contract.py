@@ -25,11 +25,13 @@ def test_shipped_help_and_lessons_match_authoritative_sources():
 
     assert public_commands == shared_commands
     assert public_lessons == shared_lessons
-    assert len(public_lessons["lessons"]) == 9
+    assert len(public_lessons["lessons"]) == 13
     assert {lesson["lesson_id"] for lesson in public_lessons["lessons"]} >= {
-        "navigation", "first-part", "save-export", "ai-assistant",
+        "navigation", "first-part", "save-export", "ai-assistant", "advanced-bodies",
+        "constraint-solver", "mesh-repair", "image-relief",
     }
     help_ids = {article["help_id"] for article in help_index["articles"]}
-    assert len(help_ids) == 31
+    assert len(help_ids) == 34
     assert "ai-pomoshchnik" in help_ids
+    assert len(public_commands["commands"]) == 58
     assert all(command["help_id"] in help_ids for command in public_commands["commands"])

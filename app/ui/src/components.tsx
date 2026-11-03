@@ -1,10 +1,11 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import type { CommandDef, DocState, TemplateDef, DocStats } from "./types";
 import {
   IconPlate, IconUndo, IconRedo, IconSave, IconOpen, IconExport,
   IconQuestion, IconCursorQuestion, IconBook, IconSparkles,
 } from "./icons";
 import { UpdateBell } from "./UpdateBell";
+import { geometryProgressLabel } from "./geometryControl";
 
 export function cmdEnabled(c: CommandDef, doc: DocState | null): boolean {
   switch (c.availability) {
@@ -207,7 +208,7 @@ export function LeftPanel({ doc, templates, importedStats, selectedPartId, onSel
   );
 }
 
-function fmt(v: number | undefined): string {
+function fmt(v: number | null | undefined): string {
   if (v == null) return "—";
   return String(Math.round(v * 100) / 100);
 }
@@ -215,12 +216,36 @@ function fmt(v: number | undefined): string {
 interface StatusBarProps {
   doc: DocState | null;
   computing: boolean;
+  geometryBusy: boolean;
+  geometryCancelling: boolean;
+  onCancelGeometry: () => void;
   message: string | null;
   selectedFace: number | null;
   faceArea: number | null;
 }
 
-export function StatusBar({ doc, computing, message, selectedFace, faceArea }: StatusBarProps) {
+export function StatusBar({
+  doc,
+  computing,
+  geometryBusy,
+  geometryCancelling,
+  onCancelGeometry,
+  message,
+  selectedFace,
+  faceArea,
+}: StatusBarProps) {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  useEffect(() => {
+    if (!geometryBusy) {
+      setElapsedSeconds(0);
+      return undefined;
+    }
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [geometryBusy]);
   const bbox = doc?.stats?.bbox;
   const dims = bbox
     ? `${fmt(bbox[3] - bbox[0])} × ${fmt(bbox[4] - bbox[1])} × ${fmt(bbox[5] - bbox[2])} мм`
@@ -237,7 +262,19 @@ export function StatusBar({ doc, computing, message, selectedFace, faceArea }: S
       <span className="status-spacer" />
       {computing && (
         <span className="status-item status-computing">
-          <span className="spinner" aria-hidden /> Вычисление…
+          <span className="spinner" aria-hidden />
+          {geometryProgressLabel(elapsedSeconds, geometryCancelling)}
+          {geometryBusy && (
+            <button
+              type="button"
+              className="status-cancel"
+              data-cmd="geometry.cancel"
+              disabled={geometryCancelling}
+              onClick={onCancelGeometry}
+            >
+              Отменить
+            </button>
+          )}
         </span>
       )}
       {doc?.error && <span className="status-item status-error">Ошибка геометрии</span>}

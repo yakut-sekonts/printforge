@@ -187,20 +187,27 @@ export function resolveSheetBendTarget(
   partId: string,
 ): FaceFeatureTarget | null {
   const face = analyzeFace(mesh, faceIndex);
-  if (!face?.planar || face.axis !== "z" || face.side !== 1) return null;
+  if (!face?.planar || !face.axis || !face.atBoundary) return null;
+  if (face.axis === "z" && face.side !== 1) return null;
 
   const bounds = meshBounds(mesh);
   const boundsCenter = (axis: 0 | 1 | 2) => (bounds.min[axis] + bounds.max[axis]) / 2;
+  const axes: Record<FaceAxis, [FaceAxis, FaceAxis]> = {
+    x: ["y", "z"],
+    y: ["x", "z"],
+    z: ["x", "y"],
+  };
+  const [uAxis, vAxis] = axes[face.axis];
   return {
     ...face,
     partId,
-    uAxis: "x",
-    vAxis: "y",
-    uLabel: "X",
-    vLabel: "Y",
+    uAxis,
+    vAxis,
+    uLabel: uAxis.toUpperCase(),
+    vLabel: vAxis.toUpperCase(),
     anchor: [
-      face.center[AXIS_INDEX.x] - boundsCenter(AXIS_INDEX.x),
-      face.center[AXIS_INDEX.y] - boundsCenter(AXIS_INDEX.y),
+      face.center[AXIS_INDEX[uAxis]] - boundsCenter(AXIS_INDEX[uAxis]),
+      face.center[AXIS_INDEX[vAxis]] - boundsCenter(AXIS_INDEX[vAxis]),
     ],
   };
 }

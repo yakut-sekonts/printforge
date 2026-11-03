@@ -1,8 +1,13 @@
 import type {
-  AiConnectionTest, AiOperation, AiPlanResponse, AiProviderConfig, AiProviderInfo,
-  DocState, EdgeRef, ExportResult, FaceDomeArgs, FaceFeatureArgs, GeoError, ImportResult, MeshData,
-  PrintCheckResult, SheetBendArgs,
+  AiConnectionTest, AiOperation, AiPlanResponse, AiProviderConfig, AiProviderInfo, ClearanceCalibrationArgs,
+  ConstrainedSketch, ConstrainedSketchExtrudeArgs, SketchDrag, SketchSolveResult,
+  DraftPrismArgs, LoftArgs, RevolveArgs, RibArgs, ShellArgs, SketchExtrudeArgs, SweepArgs,
+  DocState, EdgeRef, ExportResult, FaceDomeArgs, FaceFeatureArgs, FitPocketArgs, GeoError, ImportResult, MeshData,
+  ImageReliefPreview, ImageReliefSettings, MeshResource, MeshResourceMetadata,
+  NativeE2eConfig, PerformanceConfig, PrintCheckResult,
+  SheetBendArgs, SplitConnectorPairArgs, TextReliefArgs, ThreadPairArgs, VectorExtrudeArgs,
 } from "./types";
+import { decodeMeshBinary } from "./meshBinary";
 
 const HOME = "/Users/semenkontsevoy";
 
@@ -28,6 +33,7 @@ async function call<T>(command: string, args?: Record<string, unknown>, signal?:
   if (isTauri()) {
     const { invoke } = await import("@tauri-apps/api/core");
     try {
+      throwIfAborted(signal);
       const result = (await invoke<T>(command, args)) as T;
       throwIfAborted(signal);
       return result;
@@ -52,6 +58,15 @@ async function call<T>(command: string, args?: Record<string, unknown>, signal?:
     throw parseIpcError(errVal ?? `HTTP ${resp.status}`);
   }
   return data as T;
+}
+
+async function callBinary(command: string, args?: Record<string, unknown>): Promise<ArrayBuffer> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  try {
+    return await invoke<ArrayBuffer>(command, args);
+  } catch (error) {
+    throw parseIpcError(error);
+  }
 }
 
 export function parseIpcError(e: unknown): GeoError {
@@ -103,6 +118,36 @@ export const backend = {
     depth?: number | "through";
     target_id?: string;
   }) => call<DocState>("doc_profile_extrude", args as Record<string, unknown>),
+  docSketchExtrude: (args: SketchExtrudeArgs) =>
+    call<DocState>("doc_sketch_extrude", args as unknown as Record<string, unknown>),
+  sketchSolve: (sketch: ConstrainedSketch, drag?: SketchDrag, tolerance?: number) =>
+    call<SketchSolveResult>("sketch_solve", { sketch, drag, tolerance }),
+  docConstrainedSketchExtrude: (args: ConstrainedSketchExtrudeArgs) =>
+    call<DocState>("doc_constrained_sketch_extrude", args as unknown as Record<string, unknown>),
+  docRevolve: (args: RevolveArgs) =>
+    call<DocState>("doc_revolve", args as unknown as Record<string, unknown>),
+  docSweep: (args: SweepArgs) =>
+    call<DocState>("doc_sweep", args as unknown as Record<string, unknown>),
+  docLoft: (args: LoftArgs) =>
+    call<DocState>("doc_loft", args as unknown as Record<string, unknown>),
+  docShell: (args: ShellArgs) =>
+    call<DocState>("doc_shell", args as unknown as Record<string, unknown>),
+  docDraftPrism: (args: DraftPrismArgs) =>
+    call<DocState>("doc_draft_prism", args as unknown as Record<string, unknown>),
+  docRib: (args: RibArgs) =>
+    call<DocState>("doc_rib", args as unknown as Record<string, unknown>),
+  docFitPocket: (args: FitPocketArgs) =>
+    call<DocState>("doc_fit_pocket", args as unknown as Record<string, unknown>),
+  docVectorExtrude: (args: VectorExtrudeArgs) =>
+    call<DocState>("doc_vector_extrude", args as unknown as Record<string, unknown>),
+  docTextRelief: (args: TextReliefArgs) =>
+    call<DocState>("doc_text_relief", args as unknown as Record<string, unknown>),
+  docThreadPair: (args: ThreadPairArgs) =>
+    call<DocState>("doc_thread_pair", args as unknown as Record<string, unknown>),
+  docClearanceCalibration: (args: ClearanceCalibrationArgs) =>
+    call<DocState>("doc_clearance_calibration", args as unknown as Record<string, unknown>),
+  docSplitConnectorPair: (args: SplitConnectorPairArgs) =>
+    call<DocState>("doc_split_connector_pair", args as unknown as Record<string, unknown>),
   docFaceFeature: (args: FaceFeatureArgs) =>
     call<DocState>("doc_face_feature", args as unknown as Record<string, unknown>),
   docFaceDome: (args: FaceDomeArgs) =>
@@ -129,8 +174,24 @@ export const backend = {
       : config as unknown as Record<string, unknown>,
   ),
   aiTestConnection: () => call<AiConnectionTest>("ai_test_connection"),
-  aiPlan: (text: string, signal?: AbortSignal) =>
-    call<AiPlanResponse>("ai_plan", { text }, signal),
+  aiPlan: (text: string, taskId: string, signal?: AbortSignal) =>
+    call<AiPlanResponse>(
+      "ai_plan",
+      isTauri() ? { text, taskId } : { text, task_id: taskId },
+      signal,
+    ),
+  aiCancel: (taskId: string) =>
+    call<{ task_id: string; cancelled: boolean; geometry_cancelled: boolean }>(
+      "ai_cancel",
+      isTauri() ? { taskId } : { task_id: taskId },
+    ),
+  geometryCancel: () => call<{ cancelled: boolean }>("geometry_cancel"),
+  performanceConfig: () => call<PerformanceConfig>("performance_config"),
+  performanceReport: (payload: Record<string, unknown>) =>
+    call<boolean>("performance_report", { payload }),
+  nativeE2eConfig: () => call<NativeE2eConfig>("native_e2e_config"),
+  nativeE2eReport: (payload: Record<string, unknown>) =>
+    call<boolean>("native_e2e_report", { payload }),
   docTransaction: (args: {
     operations: AiOperation[];
     base_revision: number;
@@ -148,14 +209,46 @@ export const backend = {
   docUndo: () => call<DocState>("doc_undo"),
   docRedo: () => call<DocState>("doc_redo"),
   docGetState: () => call<DocState>("doc_get_state"),
-  docGetMesh: () => call<MeshData>("doc_get_mesh"),
-  docGetImportedMesh: (path: string) => call<MeshData>("doc_get_imported_mesh", { path }),
+  docGetMesh: async () => {
+    if (!isTauri()) return call<MeshData>("doc_get_mesh");
+    const metadata = await call<MeshResourceMetadata>("doc_get_mesh_meta");
+    const binary = await callBinary("doc_get_mesh_binary", { expectedSha256: metadata.sha256 });
+    return decodeMeshBinary(binary, metadata.face_ranges);
+  },
+  docGetImportedMesh: async (resource: MeshResource) => {
+    if (!isTauri()) return call<MeshData>("doc_get_imported_mesh", { path: resource.path });
+    const binary = await callBinary("doc_get_imported_mesh_binary", {
+      path: resource.path,
+      expectedSha256: resource.sha256,
+    });
+    return decodeMeshBinary(binary, resource.face_ranges);
+  },
   docSave: (path: string) => call<DocState>("doc_save", { path }),
   docOpen: (path: string) => call<DocState>("doc_open", { path }),
   docExport: (path: string, format: "stl" | "step" | "3mf", linearDeflection?: number) =>
     call<ExportResult>("doc_export", { path, format, linear_deflection: linearDeflection }),
   docImport: (path: string, format: "step" | "stl", unitScale?: number) =>
     call<ImportResult>("doc_import", { path, format, unit_scale: unitScale }),
+  docMeshImportApply: (path: string, format: "stl" | "obj" | "ply", unitScale: number) =>
+    call<DocState>("doc_mesh_import_apply", { path, format, unit_scale: unitScale }),
+  docMeshTransform: (
+    translate: [number, number, number], rotateDeg: [number, number, number],
+    scale: number | [number, number, number],
+  ) => call<DocState>("doc_mesh_transform", { translate, rotate_deg: rotateDeg, scale }),
+  docMeshRepair: (action: "fill_holes" = "fill_holes") =>
+    call<DocState>("doc_mesh_repair", { action }),
+  docMeshDecimate: (
+    targetRatio: number, minimumRatio?: number, maximumRatio?: number, volumeTolerance?: number,
+  ) => call<DocState>("doc_mesh_decimate", {
+    target_ratio: targetRatio, minimum_ratio: minimumRatio,
+    maximum_ratio: maximumRatio, volume_tolerance: volumeTolerance,
+  }),
+  imageReliefPreview: (settings: ImageReliefSettings) =>
+    call<ImageReliefPreview>("image_relief_preview", settings as unknown as Record<string, unknown>),
+  docImageReliefApply: (settings: ImageReliefSettings, expectedSha256: string) =>
+    call<DocState>("doc_image_relief_apply", {
+      ...settings, expected_sha256: expectedSha256,
+    } as unknown as Record<string, unknown>),
   printCheck: (printer: { x: number; y: number; z: number }) =>
     call<PrintCheckResult>("print_check", { printer }),
   // совместимость M1

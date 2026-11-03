@@ -341,6 +341,12 @@ mark { background: var(--pill-warning-bg); color: var(--accent-ink); border-radi
 .status-message { color: var(--accent-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
 .status-error { color: var(--negative); }
 .status-computing { display: inline-flex; align-items: center; gap: 6px; color: var(--accent-ink); }
+.status-cancel {
+  border: 0; padding: 0 3px; background: transparent; color: var(--negative);
+  font: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.status-cancel:disabled { opacity: 0.55; cursor: default; }
+.status-cancel:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; border-radius: 2px; }
 .spinner {
   width: 10px; height: 10px; border-radius: 50%;
   border: 1.5px solid var(--accent); border-top-color: transparent;
@@ -595,6 +601,18 @@ mark { background: var(--pill-warning-bg); color: var(--accent-ink); border-radi
 .ai-header > svg { color: var(--accent); }
 .ai-title { flex: 1; font-weight: 600; }
 .ai-body { flex: 1; overflow-y: auto; padding: var(--card-pad); }
+.ai-mode-tabs {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
+  margin-bottom: var(--gap); padding: 2px;
+  border-radius: var(--radius-control); background: var(--raised);
+}
+.ai-mode-tabs button {
+  min-height: 30px; border: 0; border-radius: calc(var(--radius-control) - 2px);
+  background: transparent; color: var(--muted); cursor: pointer;
+}
+.ai-mode-tabs button.active {
+  background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgb(27 26 24 / 12%);
+}
 .ai-provider {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin-bottom: var(--gap); color: var(--muted); font-size: var(--fs-small);
@@ -665,6 +683,14 @@ mark { background: var(--pill-warning-bg); color: var(--accent-ink); border-radi
 .ai-preview span { opacity: .8; }
 .ai-preview-error { border-color: var(--negative); background: var(--pill-negative-bg); color: var(--pill-negative-ink); }
 .ai-apply-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ai-help-excerpt {
+  border: 1px solid var(--border); border-radius: var(--radius-card);
+  padding: 10px 12px; background: var(--raised);
+}
+.ai-help-excerpt .markdown > :first-child { margin-top: 0; }
+.ai-help-excerpt .markdown > :last-child { margin-bottom: 0; }
+.ai-help-sources { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.ai-help-sources > strong { font-size: var(--fs-small); }
 .ai-help-link { margin-top: var(--gap); }
 
 @media (max-width: 1200px) {

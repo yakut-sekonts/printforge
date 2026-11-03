@@ -111,6 +111,41 @@ def test_non_finite_rejected():
     assert err and err["code"] == "plan_invalid"
 
 
+@pytest.mark.parametrize("plan", [
+    base_plan(unexpected=True, operations=[{
+        "command_id": "parameter.set", "target_id": "part-1",
+        "parameters": {"name": "length", "value": 10},
+    }]),
+    base_plan(operations=[{
+        "command_id": "parameter.set", "target_id": "part-1",
+        "parameters": {"name": "length", "value": 10}, "unexpected": True,
+    }]),
+    base_plan(operations=[{
+        "command_id": "part.create.from_template", "target_id": None,
+        "parameters": {"template": "washer", "params": {}, "unexpected": True},
+    }]),
+])
+def test_unknown_schema_fields_rejected(plan):
+    err = ai_planner.validate_plan(plan, FakeDoc())
+    assert err and err["code"] == "plan_invalid"
+
+
+def test_non_string_target_and_non_mm_units_rejected():
+    wrong_target = base_plan(operations=[{
+        "command_id": "parameter.set", "target_id": 1,
+        "parameters": {"name": "length", "value": 10},
+    }])
+    target_error = ai_planner.validate_plan(wrong_target, FakeDoc())
+    assert target_error and "target_id" in target_error["message"]
+
+    wrong_units = base_plan(units="inch", operations=[{
+        "command_id": "parameter.set", "target_id": "part-1",
+        "parameters": {"name": "length", "value": 10},
+    }])
+    units_error = ai_planner.validate_plan(wrong_units, FakeDoc())
+    assert units_error and "миллиметрах" in units_error["message"]
+
+
 def test_clarification_without_ops_is_legal():
     doc = FakeDoc()
     plan = base_plan(questions=["Уточните диаметр?"])
@@ -138,11 +173,44 @@ def test_scripted_planner_ac10():
     assert ai_planner.validate_plan(plan, doc) is None
 
 
+def test_scripted_planner_builds_ac10_plate_fixture():
+    doc = FakeDoc()
+    plan = ai_planner.scripted_plan(
+        "Создай пластину 80 на 40 толщиной 6 с четырьмя отверстиями 4 мм", doc)
+    operation = plan["operations"][0]
+    assert operation["command_id"] == "part.create.from_template"
+    assert operation["parameters"] == {
+        "template": "plate_with_holes",
+        "params": {
+            "length": 80,
+            "width": 40,
+            "height": 6,
+            "hole_diameter": 4,
+        },
+    }
+    assert ai_planner.validate_plan(plan, doc) is None
+
+
 def test_scripted_ambiguous_marks_assumption():
     doc = FakeDoc()
     plan = ai_planner.scripted_plan("сделай отверстие побольше", doc)
     assert plan["assumptions"], "ожидалось явное редактируемое предположение"
     assert plan["operations"][0]["parameters"]["value"] > 4
+
+
+def test_clarification_does_not_start_empty_preview(monkeypatch):
+    monkeypatch.setattr(ai_planner, "_PROVIDER_CONFIG", {
+        "provider": "scripted", "base_url": "", "model": "scripted-v1",
+        "api_key": "",
+    })
+    preview_calls = []
+    result = ai_planner.ai_plan(
+        "непонятный запрос", FakeDoc(),
+        lambda *_args: preview_calls.append(True),
+    )
+    assert result["plan"]["questions"]
+    assert result["preview"] is None
+    assert preview_calls == []
 
 
 def test_provider_configuration_never_returns_api_key(monkeypatch):
@@ -208,7 +276,55 @@ def test_ollama_plan_request_includes_json_schema(monkeypatch):
     response_format = captured["body"]["response_format"]
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["schema"] == schema
+    assert captured["body"]["reasoning_effort"] == "none"
     assert captured["timeout"] == ai_planner.AI_TIMEOUT_S
+
+
+def test_system_prompt_exposes_exact_semantic_contract():
+    doc = FakeDoc()
+    prompt = ai_planner.system_prompt(doc)
+
+    assert "washer {outer_diameter, inner_diameter, height}" in prompt
+    assert "plate_with_holes {length, width, height, hole_diameter, hole_offset}" in prompt
+    assert "Если пользователь меняет существующую деталь, используй parameter.set" in prompt
+    assert "Не выдумывай template, parameter name, part_id или edge_ref" in prompt
+    assert "backend применит defaults" in prompt
+    assert doc.document_instance_id in prompt
+
+
+def test_plan_schema_binds_templates_and_existing_parameters():
+    schema = ai_planner.plan_json_schema(FakeDoc())
+    variants = schema["properties"]["operations"]["items"]["oneOf"]
+
+    washer = next(
+        variant for variant in variants
+        if variant["properties"]["parameters"]["properties"]
+        .get("template", {}).get("const") == "washer")
+    washer_params = washer["properties"]["parameters"]["properties"]["params"]
+    assert set(washer_params["properties"]) == {
+        "outer_diameter", "inner_diameter", "height"}
+    assert washer_params["additionalProperties"] is False
+
+    length_edit = next(
+        variant for variant in variants
+        if variant["properties"]["command_id"]["const"] == "parameter.set"
+        and variant["properties"]["parameters"]["properties"]["name"]["const"]
+        == "length")
+    assert length_edit["properties"]["target_id"]["const"] == "part-1"
+
+    edit_schema = ai_planner.plan_json_schema(
+        FakeDoc(), "Измени длину детали на 100 мм")
+    edit_variants = edit_schema["properties"]["operations"]["items"]["oneOf"]
+    assert len(edit_variants) == 1
+    assert (edit_variants[0]["properties"]["parameters"]["properties"]
+            ["name"]["const"] == "length")
+
+    clarification_schema = ai_planner.plan_json_schema(
+        type("EmptyDoc", (), {"doc_id": "doc", "document_instance_id": "instance",
+                              "revision": 0, "parts": []})(),
+        "Сделай деталь покрепче")
+    assert clarification_schema["properties"]["operations"]["maxItems"] == 0
+    assert clarification_schema["properties"]["questions"]["minItems"] == 1
 
 
 def test_ai_transaction_single_undo_clears_derived_geometry(monkeypatch):

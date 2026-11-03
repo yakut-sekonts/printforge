@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { FaceAxis, FaceRange, FaceFeatureProfile, MeshData, EdgeRef } from "./types";
+import { mapMeshPositionsForViewport } from "./meshBinary";
 import type {
   FaceDomePreview, FaceEditTarget, FaceFeaturePreview, SheetBendPreview,
 } from "./faceEditing";
@@ -134,10 +135,14 @@ function faceDomeGeometry(diameter: number, height: number): THREE.BufferGeometr
   return geometry;
 }
 
-function sheetBendGeometry(preview: SheetBendPreview): THREE.BufferGeometry {
-  const { args, bends, length, width, thickness } = preview;
-  const developedLength = args.bend_axis === "x" ? length : width;
-  const stationWidth = args.bend_axis === "x" ? width : length;
+function brakeFormGeometry(
+  args: SheetBendPreview["args"],
+  bends: SheetBendPreview["bends"],
+  developedLength: number,
+  stationWidth: number,
+  thickness: number,
+  transformPoint: (x: number, y: number, z: number) => [number, number, number],
+): THREE.BufferGeometry {
   const specs = bends.map((bend) => {
     const angle = THREE.MathUtils.degToRad(bend.angle);
     const delta = bend.direction * angle;
@@ -245,10 +250,6 @@ function sheetBendGeometry(preview: SheetBendPreview): THREE.BufferGeometry {
   }
   stationPositions.push(developedLength);
 
-  const transformPoint = (x: number, y: number, z: number): [number, number, number] => {
-    if (args.bend_axis === "y") return [-y, x, z];
-    return [x, y, z];
-  };
   const section = (developed: number) => {
     const [rawX, rawZ, localAngle] = pointAt(developed);
     const innerX = rawX + shiftX;
@@ -285,6 +286,126 @@ function sheetBendGeometry(preview: SheetBendPreview): THREE.BufferGeometry {
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
   return geometry;
+}
+
+function sheetBendGeometry(preview: SheetBendPreview): THREE.BufferGeometry {
+  const { args, bends, length, width, thickness, target } = preview;
+  if (target.axis === "z" || target.axis == null) {
+    const developedLength = args.bend_axis === "x" ? length : width;
+    const stationWidth = args.bend_axis === "x" ? width : length;
+    return brakeFormGeometry(
+      args,
+      bends,
+      developedLength,
+      stationWidth,
+      thickness,
+      (x, y, z) => args.bend_axis === "y" ? [-y, x, z] : [x, y, z],
+    );
+  }
+
+  const base = bends[0];
+  const baseDevelopedLength = base.bend_axis === "x" ? length : width;
+  const flangeWidth = base.bend_axis === "x" ? width : length;
+  const baseAngle = THREE.MathUtils.degToRad(base.angle);
+  const baseDelta = base.direction * baseAngle;
+  const baseAllowance = (base.inside_radius + thickness / 2) * baseAngle;
+  const baseCenter = base.position + baseDevelopedLength / 2;
+  const zoneStart = baseCenter - baseAllowance / 2;
+  const zoneEnd = baseCenter + baseAllowance / 2;
+  const pathRadius = base.direction > 0
+    ? base.inside_radius
+    : base.inside_radius + thickness;
+  const initialAngle = base.moving_side < 0 ? -baseDelta : 0;
+  const lineEnd: [number, number] = [
+    zoneStart * Math.cos(initialAngle),
+    zoneStart * Math.sin(initialAngle),
+  ];
+  const advance = (
+    point: [number, number],
+    tangentAngle: number,
+    delta: number,
+    radius: number,
+  ): [number, number] => {
+    const absoluteDelta = Math.abs(delta);
+    const localX = radius * Math.sin(absoluteDelta);
+    const localZ = Math.sign(delta) * radius * (1 - Math.cos(absoluteDelta));
+    const cosine = Math.cos(tangentAngle);
+    const sine = Math.sin(tangentAngle);
+    return [
+      point[0] + localX * cosine - localZ * sine,
+      point[1] + localX * sine + localZ * cosine,
+    ];
+  };
+  const arcEnd = advance(lineEnd, initialAngle, baseDelta, pathRadius);
+  const finalAngle = initialAngle + baseDelta;
+  const finalPoint: [number, number] = [
+    arcEnd[0] + (baseDevelopedLength - zoneEnd) * Math.cos(finalAngle),
+    arcEnd[1] + (baseDevelopedLength - zoneEnd) * Math.sin(finalAngle),
+  ];
+  const negativeFlange = base.moving_side < 0;
+  const anchorDeveloped = negativeFlange ? baseDevelopedLength : 0;
+  const anchorPoint: [number, number] = negativeFlange ? finalPoint : [0, 0];
+  const rootPoint = negativeFlange ? lineEnd : arcEnd;
+  const rootTangent2d: [number, number] = negativeFlange
+    ? [-Math.cos(initialAngle), -Math.sin(initialAngle)]
+    : [Math.cos(finalAngle), Math.sin(finalAngle)];
+  const flangeDepth = negativeFlange ? zoneStart : baseDevelopedLength - zoneEnd;
+  const shiftX = -baseDevelopedLength / 2 + anchorDeveloped - anchorPoint[0];
+  const shiftZ = -anchorPoint[1];
+  const rootCross = rootPoint[0] + shiftX;
+  const rootZ = thickness + rootPoint[1] + shiftZ;
+  const root: [number, number, number] = base.bend_axis === "x"
+    ? [rootCross, 0, rootZ]
+    : [0, rootCross, rootZ];
+  const tangent: [number, number, number] = base.bend_axis === "x"
+    ? [rootTangent2d[0], 0, rootTangent2d[1]]
+    : [0, rootTangent2d[0], rootTangent2d[1]];
+  const selectedNormal: [number, number, number] = target.axis === "x"
+    ? [target.side, 0, 0]
+    : [0, target.side, 0];
+  const thicknessAxis: [number, number, number] = [
+    base.direction * selectedNormal[0],
+    base.direction * selectedNormal[1],
+    base.direction * selectedNormal[2],
+  ];
+  const localXAxis: [number, number, number] = [
+    tangent[1] * thicknessAxis[2] - tangent[2] * thicknessAxis[1],
+    tangent[2] * thicknessAxis[0] - tangent[0] * thicknessAxis[2],
+    tangent[0] * thicknessAxis[1] - tangent[1] * thicknessAxis[0],
+  ];
+  const perpendicularAxis: [number, number, number] = base.bend_axis === "x"
+    ? [0, 1, 0]
+    : [1, 0, 0];
+  const localAxisSign = Math.round(
+    localXAxis[0] * perpendicularAxis[0] +
+    localXAxis[1] * perpendicularAxis[1] +
+    localXAxis[2] * perpendicularAxis[2],
+  ) as -1 | 1;
+  const localArgs: SheetBendPreview["args"] = {
+    ...args,
+    face_ref: { ...args.face_ref, axis: "z", side: 1 },
+    bend_axis: "x",
+    position: localAxisSign * args.position,
+    moving_side: (localAxisSign * args.moving_side) as -1 | 1,
+    direction: (base.direction * args.direction) as -1 | 1,
+  };
+  const planeOrigin: [number, number, number] = [
+    root[0] + flangeDepth / 2 * tangent[0],
+    root[1] + flangeDepth / 2 * tangent[1],
+    root[2] + flangeDepth / 2 * tangent[2],
+  ];
+  return brakeFormGeometry(
+    localArgs,
+    [localArgs],
+    flangeWidth,
+    flangeDepth,
+    thickness,
+    (x, y, z) => [
+      planeOrigin[0] + x * localXAxis[0] + y * tangent[0] + z * thicknessAxis[0],
+      planeOrigin[1] + x * localXAxis[1] + y * tangent[1] + z * thicknessAxis[1],
+      planeOrigin[2] + x * localXAxis[2] + y * tangent[2] + z * thicknessAxis[2],
+    ],
+  );
 }
 
 function makeTextSprite(text: string): THREE.Sprite {
@@ -374,6 +495,14 @@ export class Viewport {
   private downPos = { x: 0, y: 0 };
   private orthoMode = false;
   private halfSize = 100;
+  private navigationProbe: {
+    durationMs: number;
+    startedAt: number | null;
+    frames: number;
+    position: THREE.Vector3;
+    quaternion: THREE.Quaternion;
+    resolve: (result: { fps: number; frames: number; duration_ms: number }) => void;
+  } | null = null;
 
   constructor(container: HTMLElement, events: ViewportEvents) {
     this.container = container;
@@ -488,11 +617,48 @@ export class Viewport {
     this.ortho.updateProjectionMatrix();
   }
 
-  private animate = () => {
+  private animate = (timestamp = performance.now()) => {
     requestAnimationFrame(this.animate);
+    const probe = this.navigationProbe;
+    if (probe) {
+      if (probe.startedAt === null) probe.startedAt = timestamp;
+      probe.frames += 1;
+      const offset = this.camera.position.clone().sub(this.controls.target);
+      offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), 0.012);
+      this.camera.position.copy(this.controls.target).add(offset);
+      this.camera.lookAt(this.controls.target);
+      const elapsed = timestamp - probe.startedAt;
+      if (elapsed >= probe.durationMs) {
+        this.camera.position.copy(probe.position);
+        this.camera.quaternion.copy(probe.quaternion);
+        this.controls.update();
+        this.navigationProbe = null;
+        probe.resolve({
+          fps: elapsed > 0 ? Math.max(0, probe.frames - 1) * 1000 / elapsed : 0,
+          frames: probe.frames,
+          duration_ms: elapsed,
+        });
+      }
+    }
     if (this.controls.enableDamping) this.controls.update();
     this.render();
   };
+
+  measureNavigationFps(durationMs: number): Promise<{ fps: number; frames: number; duration_ms: number }> {
+    if (this.navigationProbe) {
+      return Promise.reject(new Error("Измерение viewport FPS уже выполняется"));
+    }
+    return new Promise((resolve) => {
+      this.navigationProbe = {
+        durationMs: Math.max(500, durationMs),
+        startedAt: null,
+        frames: 0,
+        position: this.camera.position.clone(),
+        quaternion: this.camera.quaternion.clone(),
+        resolve,
+      };
+    });
+  }
 
   private render() {
     this.renderer.render(this.scene, this.camera);
@@ -1040,14 +1206,11 @@ export class Viewport {
       this.rebuildDimensions(null);
       return;
     }
-    const pos = new Float32Array(data.positions.length);
-    for (let i = 0; i < data.positions.length; i += 3) {
-      const [x, y, z] = docToThree(data.positions[i], data.positions[i + 1], data.positions[i + 2]);
-      pos[i] = x; pos[i + 1] = y; pos[i + 2] = z;
-    }
+    const pos = mapMeshPositionsForViewport(data.positions);
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    geo.setIndex(data.indices);
+    const indices = data.indices instanceof Uint32Array ? data.indices : new Uint32Array(data.indices);
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeVertexNormals();
     const mat = new THREE.MeshStandardMaterial({ color: COLOR.body, roughness: 0.75, metalness: 0.05 });
     this.mesh = new THREE.Mesh(geo, mat);

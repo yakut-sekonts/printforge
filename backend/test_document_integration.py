@@ -1,6 +1,8 @@
 """Документ: сохранение идентичности проекта и новое instance при reopen."""
+import json
 import math
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,36 @@ def _stop_worker():
         worker.terminate()
         worker.wait(timeout=10)
     dev_shim._worker = None
+
+
+def test_worker_restarts_once_after_transport_death():
+    _stop_worker()
+    params = {
+        "template": "plate_with_holes",
+        "params": {"length": 80, "width": 40, "height": 6,
+                   "hole_diameter": 4, "hole_offset": 10},
+    }
+    try:
+        confirmed = dev_shim.worker_call("build", params, revision=1)
+        failed_worker = dev_shim._worker
+        failed_pid = failed_worker.pid
+
+        class KillBeforeRead:
+            def readline(self):
+                failed_worker.kill()
+                failed_worker.wait(timeout=10)
+                return ""
+
+        failed_worker.stdout = KillBeforeRead()
+        recovered = dev_shim.worker_call("build", params, revision=1)
+
+        assert dev_shim._worker.pid != failed_pid
+        assert recovered["stats"]["volume"] == pytest.approx(
+            confirmed["stats"]["volume"], rel=1e-9)
+        assert recovered["stats"]["bbox"] == pytest.approx(
+            confirmed["stats"]["bbox"], abs=1e-9)
+    finally:
+        _stop_worker()
 
 
 def test_save_reopen_preserves_document_id_and_replaces_instance(monkeypatch, tmp_path):
@@ -40,6 +72,249 @@ def test_save_reopen_preserves_document_id_and_replaces_instance(monkeypatch, tm
         assert reopened["params"]["length"] == 100
         assert reopened["stats"]["volume"] == pytest.approx(created["stats"]["volume"], rel=1e-6)
         assert reopened["dirty"] is False
+    finally:
+        _stop_worker()
+
+
+def test_future_project_version_has_explicit_update_error(monkeypatch, tmp_path):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    project = tmp_path / "future.printforge"
+    with zipfile.ZipFile(project, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("document.json", json.dumps({
+            "schema_version": 999,
+            "document_id": 1,
+            "parts": [],
+            "operations": [],
+        }))
+
+    with pytest.raises(RuntimeError) as error:
+        dev_shim.cmd_doc_open({"path": str(project)})
+    assert "unsupported_project_version" in str(error.value)
+    assert "Обновите PrintForge" in str(error.value)
+
+
+def test_operation_only_sketch_is_one_transaction_and_survives_reopen(monkeypatch, tmp_path):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    sketch = {
+        "regions": [{
+            "outer": {"kind": "polygon", "points": [[0, 0], [40, 0], [40, 20], [0, 20]]},
+            "holes": [{"kind": "circle", "center": [20, 10], "radius": 5}],
+        }],
+    }
+    try:
+        changed = dev_shim.cmd_doc_sketch_extrude({
+            "profile": sketch,
+            "plane": "XY",
+            "depth": 5,
+            "name": "Тестовый эскиз",
+        })
+        assert changed["parts"] == []
+        assert changed["operations"][-1]["op"] == "sketch_extrude"
+        assert changed["history_len"] == 2
+        assert changed["stats"]["volume"] == pytest.approx((800 - 25 * math.pi) * 5, abs=1e-6)
+
+        project = tmp_path / "operation-only.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["parts"] == []
+        assert reopened["operations"] == changed["operations"]
+        assert reopened["stats"]["volume"] == pytest.approx(changed["stats"]["volume"], abs=1e-6)
+
+        restored = dev_shim.cmd_doc_undo({})
+        assert restored["operations"] == []
+        assert restored["stats"] is None
+    finally:
+        _stop_worker()
+
+
+def test_shell_draft_and_rib_are_independent_transactions(monkeypatch, tmp_path):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        shell = dev_shim.cmd_doc_shell({
+            "outer_radius": 10, "height": 20, "wall": 2, "bottom": 3,
+        })
+        drafted = dev_shim.cmd_doc_draft_prism({
+            "width": 20, "depth": 12, "height": 10, "angle": 5,
+        })
+        ribbed = dev_shim.cmd_doc_rib({
+            "base_length": 40, "base_width": 20, "base_thickness": 4,
+            "rib_length": 15, "rib_height": 12, "rib_width": 3, "overlap": 1,
+        })
+
+        assert [operation["op"] for operation in ribbed["operations"]] == [
+            "shell", "draft_prism", "rib"]
+        assert shell["history_len"] == 2
+        assert drafted["history_len"] == 3
+        assert ribbed["history_len"] == 4
+        assert ribbed["stats"]["solid_count"] == 3
+
+        without_rib = dev_shim.cmd_doc_undo({})
+        assert [operation["op"] for operation in without_rib["operations"]] == [
+            "shell", "draft_prism"]
+        restored = dev_shim.cmd_doc_redo({})
+        assert restored["stats"]["volume"] == pytest.approx(
+            ribbed["stats"]["volume"], abs=1e-6)
+
+        project = tmp_path / "shell-draft-rib.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["operations"] == ribbed["operations"]
+        assert reopened["stats"]["volume"] == pytest.approx(
+            ribbed["stats"]["volume"], abs=1e-6)
+    finally:
+        _stop_worker()
+
+
+def test_fit_pocket_clearance_semantics_survive_reopen(monkeypatch, tmp_path):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        changed = dev_shim.cmd_doc_fit_pocket({
+            "fixture_id": "bearing_608", "fixture_version": "1",
+            "body_length": 32, "body_width": 32, "body_height": 12,
+            "clearance": 0.4, "clearance_mode": "radial",
+        })
+        assert changed["operations"][-1]["clearance_mode"] == "radial"
+        assert changed["stats"]["parts"][0]["metadata"]["effective_size"] == pytest.approx(22.8)
+
+        undone = dev_shim.cmd_doc_undo({})
+        assert undone["operations"] == []
+        restored = dev_shim.cmd_doc_redo({})
+        assert restored["stats"]["volume"] == pytest.approx(
+            changed["stats"]["volume"], abs=1e-6)
+
+        project = tmp_path / "fit-pocket.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["operations"] == changed["operations"]
+        assert reopened["stats"]["parts"][0]["metadata"]["fixture_id"] == "bearing_608"
+    finally:
+        _stop_worker()
+
+
+def test_vector_source_and_text_font_identity_survive_reopen(monkeypatch, tmp_path):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    svg_path = tmp_path / "profile.svg"
+    svg_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="20mm" height="10mm" '
+        'viewBox="0 0 200 100"><rect width="200" height="100"/></svg>')
+    try:
+        vector = dev_shim.cmd_doc_vector_extrude({
+            "path": str(svg_path), "format": "svg", "height": 5,
+        })
+        text = dev_shim.cmd_doc_text_relief({
+            "text": "О", "font_size": 10, "relief_height": 1,
+            "body_length": 30, "body_width": 20, "body_height": 4, "mode": "add",
+        })
+        assert vector["history_len"] == 2
+        assert text["history_len"] == 3
+        assert text["operations"][0]["source_text"].startswith("<svg")
+        assert text["stats"]["parts"][1]["metadata"]["font"] == "JetBrains Mono 2.211"
+
+        project = tmp_path / "portable-vector-text.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        svg_path.unlink()
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["operations"] == text["operations"]
+        assert reopened["stats"]["volume"] == pytest.approx(text["stats"]["volume"], abs=1e-6)
+    finally:
+        _stop_worker()
+
+
+def test_real_thread_pair_is_one_transaction_and_survives_reopen(monkeypatch, tmp_path):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        changed = dev_shim.cmd_doc_thread_pair({
+            "profile_version": "metric-60-v1",
+            "major_diameter": 10, "pitch": 1.5, "length": 12,
+            "hand": "right", "starts": 1, "clearance": 0.3,
+            "nut_height": 5, "nut_across_flats": 18,
+        })
+        assert changed["history_len"] == 2
+        assert changed["stats"]["solid_count"] == 2
+        assert changed["stats"]["parts"][0]["metadata"]["assembly_intersection_volume"] == 0
+
+        undone = dev_shim.cmd_doc_undo({})
+        assert undone["operations"] == []
+        restored = dev_shim.cmd_doc_redo({})
+        assert restored["stats"]["volume"] == pytest.approx(
+            changed["stats"]["volume"], abs=1e-6)
+
+        project = tmp_path / "thread-pair.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["operations"] == changed["operations"]
+        assert reopened["stats"]["solid_count"] == 2
+    finally:
+        _stop_worker()
+
+
+def test_clearance_calibration_series_is_one_transaction(monkeypatch, tmp_path):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        changed = dev_shim.cmd_doc_clearance_calibration({
+            "values": [0.1, 0.2, 0.35], "nominal_diameter": 8,
+            "coupon_length": 24, "coupon_width": 18, "thickness": 3,
+            "spacing": 28, "font_size": 3, "label_height": 0.6,
+            "profile_name": "PLA test v1",
+        })
+        assert changed["history_len"] == 2
+        assert changed["stats"]["solid_count"] == 3
+        assert [part["metadata"]["label"] for part in changed["stats"]["parts"]] == [
+            "0.10", "0.20", "0.35"]
+
+        project = tmp_path / "clearance-calibration.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["operations"] == changed["operations"]
+        assert reopened["stats"]["solid_count"] == 3
+        assert dev_shim.cmd_doc_undo({})["operations"] == []
+    finally:
+        _stop_worker()
+
+
+def test_split_connector_pair_is_one_transaction_and_survives_reopen(monkeypatch, tmp_path):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        changed = dev_shim.cmd_doc_split_connector_pair({
+            "length": 40, "width": 24, "height": 10,
+            "pin_radius": 2, "pin_length": 6,
+            "radial_clearance": 0.25, "print_separation": 5,
+        })
+        assert changed["history_len"] == 2
+        assert changed["stats"]["solid_count"] == 2
+        assert changed["stats"]["parts"][1]["metadata"]["assembly_translation"] == [0, -29, 0]
+
+        project = tmp_path / "split-connector.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["operations"] == changed["operations"]
+        assert reopened["stats"]["volume"] == pytest.approx(
+            changed["stats"]["volume"], abs=1e-6)
+        assert dev_shim.cmd_doc_undo({})["operations"] == []
     finally:
         _stop_worker()
 
@@ -178,6 +453,53 @@ def test_parallel_sheet_bends_are_independent_document_transactions(monkeypatch)
         undo_first = dev_shim.cmd_doc_undo({})
         assert undo_first["operations"] == []
         assert undo_first["stats"]["bbox"] == pytest.approx(created["stats"]["bbox"], abs=1e-6)
+    finally:
+        _stop_worker()
+
+
+def test_perpendicular_flange_bend_is_independent_document_transaction(monkeypatch):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        created = dev_shim.cmd_doc_create({"template": "plate_with_holes", "params": {}})
+        target_id = created["parts"][0]["part_id"]
+        first = dev_shim.cmd_doc_sheet_bend({
+            "target_id": target_id,
+            "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1,
+                         "anchor": [0, 0], "selected_area": 3149.73},
+            "bend_axis": "x",
+            "position": 0,
+            "angle": 90,
+            "inside_radius": 3,
+            "moving_side": 1,
+            "direction": 1,
+        })
+        second = dev_shim.cmd_doc_sheet_bend({
+            "target_id": target_id,
+            "face_ref": {"kind": "outer_planar", "axis": "x", "side": 1,
+                         "anchor": [0, 0], "selected_area": 1000},
+            "bend_axis": "y",
+            "position": 0,
+            "angle": 90,
+            "inside_radius": 2,
+            "moving_side": 1,
+            "direction": 1,
+        })
+        assert second["error"] is None
+        assert second["history_len"] == first["history_len"] + 1
+        assert len(second["operations"]) == 2
+        assert second["stats"]["solid_count"] == 1
+        assert second["stats"]["volume"] == pytest.approx(
+            created["stats"]["volume"], abs=3e-2)
+
+        undo_flange = dev_shim.cmd_doc_undo({})
+        assert len(undo_flange["operations"]) == 1
+        assert undo_flange["stats"]["bbox"] == pytest.approx(first["stats"]["bbox"], abs=1e-6)
+        undo_base = dev_shim.cmd_doc_undo({})
+        assert undo_base["operations"] == []
+        assert undo_base["stats"]["bbox"] == pytest.approx(created["stats"]["bbox"], abs=1e-6)
     finally:
         _stop_worker()
 
@@ -526,5 +848,182 @@ def test_edge_features_are_independent_document_transactions(monkeypatch):
         undo_chamfer = dev_shim.cmd_doc_undo({})
         assert undo_chamfer["operations"] == []
         assert undo_chamfer["stats"]["volume"] == pytest.approx(created["stats"]["volume"], rel=1e-6)
+    finally:
+        _stop_worker()
+
+
+def test_constrained_sketch_preview_apply_undo_and_reopen(monkeypatch, tmp_path):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    order = ["bottom", "right", "top", "left"]
+    sketch = {
+        "entities": [
+            {"id": "bottom", "type": "line", "start": [0.1, -0.2], "end": [39.8, 0.3]},
+            {"id": "right", "type": "line", "start": [40.2, 0.1], "end": [39.7, 19.8]},
+            {"id": "top", "type": "line", "start": [40.1, 20.2], "end": [-0.2, 19.7]},
+            {"id": "left", "type": "line", "start": [0.2, 20.1], "end": [-0.1, 0.2]},
+        ],
+        "constraints": [
+            *[
+                {"type": "coincident", "a": [entity_id, "end"],
+                 "b": [order[(index + 1) % 4], "start"]}
+                for index, entity_id in enumerate(order)
+            ],
+            {"type": "horizontal", "entity": "bottom"},
+            {"type": "horizontal", "entity": "top"},
+            {"type": "vertical", "entity": "right"},
+            {"type": "vertical", "entity": "left"},
+            {"type": "dimension", "kind": "distance_x", "a": ["bottom", "start"],
+             "b": ["bottom", "end"], "value": 40},
+            {"type": "dimension", "kind": "distance_y", "a": ["right", "start"],
+             "b": ["right", "end"], "value": 20},
+            {"type": "fix", "point": ["bottom", "start"], "value": [0, 0]},
+        ],
+        "regions": [{"outer": order, "holes": []}],
+    }
+    try:
+        before = dev_shim.cmd_doc_get_state({})
+        preview = dev_shim.cmd_sketch_solve({"sketch": sketch})
+        after_preview = dev_shim.cmd_doc_get_state({})
+        assert preview["degrees_of_freedom"] == 0
+        assert after_preview["history_len"] == before["history_len"]
+        assert after_preview["operations"] == []
+
+        applied = dev_shim.cmd_doc_constrained_sketch_extrude({
+            "sketch": sketch, "plane": "XY", "depth": 5,
+        })
+        assert applied["error"] is None
+        assert applied["history_len"] == before["history_len"] + 1
+        assert applied["stats"]["volume"] == pytest.approx(4000, abs=1e-5)
+
+        undone = dev_shim.cmd_doc_undo({})
+        assert undone["operations"] == []
+        redone = dev_shim.cmd_doc_redo({})
+        assert redone["stats"]["volume"] == pytest.approx(4000, abs=1e-5)
+
+        project = tmp_path / "constrained-sketch.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["operations"][0]["op"] == "constrained_sketch_extrude"
+        assert reopened["stats"]["parts"][0]["metadata"]["degrees_of_freedom"] == 0
+    finally:
+        _stop_worker()
+
+
+def test_mesh_source_repair_undo_save_reopen_and_export_policy(monkeypatch, tmp_path):
+    import numpy as np
+    import trimesh
+
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    source = trimesh.creation.box(extents=[10, 10, 10])
+    removed = np.where(source.face_normals[:, 2] > 0.9)[0]
+    source.update_faces(~np.isin(np.arange(len(source.faces)), removed))
+    source.remove_unreferenced_vertices()
+    source_path = tmp_path / "mesh with hole.stl"
+    source.export(source_path)
+    try:
+        applied = dev_shim.cmd_doc_mesh_import_apply({
+            "path": str(source_path), "format": "stl", "unit_scale": 1,
+        })
+        assert applied["operations"][0]["op"] == "mesh_source"
+        assert applied["stats"]["mesh_mode"] is True
+        assert applied["stats"]["mesh_diagnostics"]["boundary_edges"] == 4
+
+        repaired = dev_shim.cmd_doc_mesh_repair({"action": "fill_holes"})
+        assert repaired["error"] is None
+        assert repaired["stats"]["is_valid"] is True
+        assert repaired["stats"]["volume"] == pytest.approx(1000, abs=1e-5)
+        assert repaired["history_len"] == applied["history_len"] + 1
+
+        undone = dev_shim.cmd_doc_undo({})
+        assert undone["stats"]["mesh_diagnostics"]["boundary_edges"] == 4
+        redone = dev_shim.cmd_doc_redo({})
+        assert redone["stats"]["mesh_diagnostics"]["boundary_edges"] == 0
+
+        project = tmp_path / "persistent-mesh.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        source_path.unlink()
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["stats"]["is_valid"] is True
+        assert reopened["stats"]["volume"] == pytest.approx(1000, abs=1e-5)
+
+        exported = tmp_path / "repaired.stl"
+        result = dev_shim.cmd_doc_export({"path": str(exported), "format": "stl"})
+        assert result["bytes"] > 0
+        assert trimesh.load(exported).is_watertight is True
+        exported_3mf = tmp_path / "repaired.3mf"
+        result_3mf = dev_shim.cmd_doc_export({"path": str(exported_3mf), "format": "3mf"})
+        assert result_3mf["bytes"] > 0
+        with zipfile.ZipFile(exported_3mf) as archive:
+            assert {"[Content_Types].xml", "_rels/.rels", "3D/3dmodel.model"} <= set(archive.namelist())
+            model_xml = archive.read("3D/3dmodel.model")
+            assert model_xml.count(b"<triangle ") == 12
+        with pytest.raises(RuntimeError) as step_error:
+            dev_shim.cmd_doc_export({"path": str(tmp_path / "fake.step"), "format": "step"})
+        assert "mesh_step_unsupported" in str(step_error.value)
+    finally:
+        _stop_worker()
+
+
+def test_image_relief_preview_apply_hash_guard_and_reopen(monkeypatch, tmp_path):
+    import numpy as np
+    from PIL import Image
+
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    image_path = tmp_path / "gradient image.png"
+    pixels = np.tile(np.linspace(0, 255, 32, dtype=np.uint8), (16, 1))
+    Image.fromarray(pixels, mode="L").save(image_path)
+    settings = {
+        "path": str(image_path), "model": "heightmap-luminance-v1", "seed": 7,
+        "width_mm": 40, "relief_height": 4, "base_thickness": 2,
+        "samples": 24, "noise_strength": 0.01, "invert": False,
+    }
+    try:
+        before = dev_shim.cmd_doc_get_state({})
+        preview = dev_shim.cmd_image_relief_preview(settings)
+        after_preview = dev_shim.cmd_doc_get_state({})
+        assert preview["stats"]["is_valid"] is True
+        assert preview["stats"]["mesh_mode"] is True
+        assert after_preview["history_len"] == before["history_len"]
+        assert after_preview["operations"] == []
+
+        changed_pixels = np.flip(pixels, axis=1)
+        Image.fromarray(changed_pixels, mode="L").save(image_path)
+        with pytest.raises(RuntimeError) as changed:
+            dev_shim.cmd_doc_image_relief_apply({
+                **settings, "expected_sha256": preview["source_sha256"],
+            })
+        assert "image_changed" in str(changed.value)
+        assert dev_shim.cmd_doc_get_state({})["operations"] == []
+
+        Image.fromarray(pixels, mode="L").save(image_path)
+        applied = dev_shim.cmd_doc_image_relief_apply({
+            **settings, "expected_sha256": preview["source_sha256"],
+        })
+        assert applied["error"] is None
+        assert applied["history_len"] == before["history_len"] + 1
+        assert applied["operations"][0]["model"] == "heightmap-luminance-v1"
+        assert applied["operations"][0]["seed"] == 7
+
+        project = tmp_path / "image-relief.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        image_path.unlink()
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        metadata = reopened["stats"]["mesh_history"][0]
+        assert metadata["seed"] == 7
+        assert metadata["settings"]["width_mm"] == 40
+        assert metadata["quality"]["engineering_accuracy"] is False
+
+        exported = tmp_path / "image-relief.stl"
+        export = dev_shim.cmd_doc_export({"path": str(exported), "format": "stl"})
+        assert export["bytes"] > 0
     finally:
         _stop_worker()

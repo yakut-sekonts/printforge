@@ -2,14 +2,19 @@
 """Dev-shim PrintForge (M2): IPC-контракт app/shared/ipc.md по HTTP.
 ТОЛЬКО ДЛЯ РАЗРАБОТКИ. Запуск: backend/.venv/bin/python scripts/dev_shim.py
 """
+import base64
 import copy
+import hashlib
 import json
 import struct
 import subprocess
 import sys
+import threading
 import time
+import uuid
 import zipfile
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from contextlib import nullcontext
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,30 +25,120 @@ import ai_planner
 
 _worker = None
 _req_n = 0
+_ai_tasks = {}
+_ai_tasks_lock = threading.Lock()
+_command_lock = threading.Lock()
+_geometry_task = None
+_geometry_task_lock = threading.Lock()
+
+
+def _cancel_geometry_task():
+    global _worker
+    with _geometry_task_lock:
+        task = _geometry_task
+        if task is None:
+            return False
+        task.set()
+    worker = _worker
+    if worker is not None and worker.poll() is None:
+        worker.kill()
+        worker.wait(timeout=10)
+    return True
+
+
+def worker_timeout_seconds(method):
+    return 300 if method in {"import", "export"} else 120
+
+
+def _read_worker_line(worker, method):
+    result = {}
+    finished = threading.Event()
+
+    def read_line():
+        try:
+            result["line"] = worker.stdout.readline()
+        except BaseException as error:  # noqa: BLE001
+            result["error"] = error
+        finally:
+            finished.set()
+
+    threading.Thread(target=read_line, daemon=True).start()
+    timeout = worker_timeout_seconds(method)
+    if not finished.wait(timeout=timeout):
+        if worker.poll() is None:
+            worker.kill()
+            worker.wait(timeout=10)
+        raise geo_error(
+            "worker_timeout",
+            f"Geometry worker не завершил {method} за {timeout} с. "
+            "Процесс остановлен; последняя подтверждённая модель сохранена.")
+    if "error" in result:
+        raise result["error"]
+    return result.get("line", "")
 
 
 def worker_call(method, params, revision=0):
-    global _worker, _req_n
-    if _worker is None or _worker.poll() is not None:
-        _worker = subprocess.Popen(
-            [str(PYTHON), str(WORKER)], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, bufsize=1)
-    _req_n += 1
-    req = {"request_id": f"s{_req_n}", "schema_version": 1,
-           "document_id": "doc", "revision": revision,
-           "method": method, "params": params}
-    _worker.stdin.write(json.dumps(req) + "\n")
-    _worker.stdin.flush()
-    line = _worker.stdout.readline()
-    resp = json.loads(line)
-    if resp.get("ok"):
-        return resp.get("result")
-    err = resp.get("error", {})
-    raise RuntimeError(json.dumps({
-        "code": err.get("code", "geometry_error"),
-        "message": err.get("message", "ошибка геометрии"),
-        "detail": err.get("detail", "")}, ensure_ascii=False))
+    global _worker, _req_n, _geometry_task
+    cancelled = threading.Event()
+    with _geometry_task_lock:
+        if _geometry_task is not None:
+            raise geo_error("worker_busy", "Другая geometry operation уже выполняется.")
+        _geometry_task = cancelled
+    try:
+        last_failure = "неизвестная transport error"
+        for attempt in range(2):
+            try:
+                if _worker is None or _worker.poll() is not None:
+                    _worker = subprocess.Popen(
+                        [str(PYTHON), str(WORKER)], stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                        text=True, bufsize=1)
+                _req_n += 1
+                req = {"request_id": f"s{_req_n}", "schema_version": 1,
+                       "document_id": "doc", "revision": revision,
+                       "method": method, "params": params}
+                _worker.stdin.write(json.dumps(req) + "\n")
+                _worker.stdin.flush()
+                line = _read_worker_line(_worker, method)
+                if cancelled.is_set():
+                    raise geo_error(
+                        "geometry_cancelled",
+                        "Операция геометрии отменена. Последняя подтверждённая модель сохранена.")
+                if not line:
+                    raise BrokenPipeError("geometry worker завершился без ответа")
+                resp = json.loads(line)
+            except RuntimeError:
+                _worker = None
+                raise
+            except (BrokenPipeError, OSError, json.JSONDecodeError) as exc:
+                last_failure = str(exc)
+                if _worker is not None and _worker.poll() is None:
+                    _worker.kill()
+                    _worker.wait(timeout=10)
+                _worker = None
+                if cancelled.is_set():
+                    raise geo_error(
+                        "geometry_cancelled",
+                        "Операция геометрии отменена. Последняя подтверждённая модель сохранена.") from exc
+                if attempt == 0:
+                    continue
+                raise geo_error(
+                    "worker_recovery_failed",
+                    "Geometry worker повторно завершился после автоматического "
+                    f"перезапуска: {last_failure}. Последняя подтверждённая "
+                    "модель сохранена.") from exc
+            if resp.get("ok"):
+                return resp.get("result")
+            err = resp.get("error", {})
+            raise RuntimeError(json.dumps({
+                "code": err.get("code", "geometry_error"),
+                "message": err.get("message", "ошибка геометрии"),
+                "detail": err.get("detail", "")}, ensure_ascii=False))
+        raise geo_error("worker_recovery_failed", last_failure)
+    finally:
+        with _geometry_task_lock:
+            if _geometry_task is cancelled:
+                _geometry_task = None
 
 
 def geo_error(code, message):
@@ -141,7 +236,7 @@ class Doc:
         }
 
     def build_params(self):
-        if not self.parts:
+        if not self.parts and not self.operations:
             return {"template": None, "params": {}, "operations": []}
         # единый v3-путь: реальные part_id во всех статусах и операциях
         ops = []
@@ -153,7 +248,7 @@ class Doc:
 
     def rebuild(self):
         self.revision += 1
-        if not self.template:
+        if not self.parts and not self.operations:
             self.stats = None
             self.mesh = None
             self.error = None
@@ -187,9 +282,20 @@ def cmd_doc_create(a):
     d.operations = []
     d._part_n = 0
     d.add_part(template, a.get("params") or {})
-    d.commit()
-    d.rebuild()
+    _rebuild_committed(d)
     return d.state(ACTIVE[0])
+
+
+def _rebuild_committed(document):
+    document.commit()
+    document.rebuild()
+    if document.error and document.index > 0:
+        error = document.error
+        document.history.pop()
+        document.index -= 1
+        document.restore(document.history[document.index])
+        document.error = error
+        document.dirty = True
 
 
 def cmd_doc_set_parameter(a):
@@ -209,21 +315,14 @@ def cmd_doc_set_parameter(a):
         d.expressions[key] = a["expression"]
     else:
         d.expressions.pop(key, None)
-    d.commit()
-    d.rebuild()
+    _rebuild_committed(d)
     return d.state(ACTIVE[0])
 
 
 def _apply_op(a, op):
     d = doc()
     d.operations.append(op)
-    d.commit()
-    d.rebuild()
-    if d.error:
-        d.history.pop()
-        d.index -= 1
-        d.restore(d.history[d.index])
-        d.dirty = True
+    _rebuild_committed(d)
     return d.state(ACTIVE[0])
 
 
@@ -235,8 +334,7 @@ def cmd_doc_add_part(a):
     if template not in DEFAULTS:
         raise geo_error("unknown_template", f"Неизвестный шаблон: {template}")
     d.add_part(template, a.get("params") or {})
-    d.commit()
-    d.rebuild()
+    _rebuild_committed(d)
     return d.state(ACTIVE[0])
 
 
@@ -282,6 +380,210 @@ def cmd_doc_profile_extrude(a):
         if d.parts:
             op["target_id"] = d.parts[0]["part_id"]
     return _apply_op(a, op)
+
+
+def cmd_doc_sketch_extrude(a):
+    return _apply_op(a, {
+        "op": "sketch_extrude",
+        "profile": a["profile"],
+        "plane": a.get("plane", "XY"),
+        "depth": a["depth"],
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_sketch_solve(a):
+    return worker_call("solve_sketch", {
+        "sketch": a["sketch"],
+        "drag": a.get("drag"),
+        "tolerance": a.get("tolerance", 1e-7),
+    }, doc().revision)
+
+
+def cmd_doc_constrained_sketch_extrude(a):
+    return _apply_op(a, {
+        "op": "constrained_sketch_extrude",
+        "sketch": a["sketch"],
+        "drag": a.get("drag"),
+        "plane": a.get("plane", "XY"),
+        "depth": a["depth"],
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_doc_revolve(a):
+    return _apply_op(a, {
+        "op": "revolve",
+        "profile": a["profile"],
+        "plane": a.get("plane", "XZ"),
+        "axis": a.get("axis") or {"point": [0, 0, 0], "direction": [0, 0, 1]},
+        "angle": a["angle"],
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_doc_sweep(a):
+    return _apply_op(a, {
+        "op": "sweep",
+        "section": a["section"],
+        "path": a["path"],
+        "frenet": bool(a.get("frenet", False)),
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_doc_loft(a):
+    return _apply_op(a, {
+        "op": "loft",
+        "sections": a["sections"],
+        "ruled": bool(a.get("ruled", True)),
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_doc_shell(a):
+    return _apply_op(a, {
+        "op": "shell",
+        "outer_radius": a["outer_radius"],
+        "height": a["height"],
+        "wall": a["wall"],
+        "bottom": a["bottom"],
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_doc_draft_prism(a):
+    return _apply_op(a, {
+        "op": "draft_prism",
+        "width": a["width"],
+        "depth": a["depth"],
+        "height": a["height"],
+        "angle": a["angle"],
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_doc_rib(a):
+    return _apply_op(a, {
+        "op": "rib",
+        "base_length": a["base_length"],
+        "base_width": a["base_width"],
+        "base_thickness": a["base_thickness"],
+        "rib_length": a["rib_length"],
+        "rib_height": a["rib_height"],
+        "rib_width": a["rib_width"],
+        "overlap": a["overlap"],
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_doc_fit_pocket(a):
+    operation = {
+        "op": "fit_pocket",
+        "fixture_id": a["fixture_id"],
+        "fixture_version": a.get("fixture_version", "1"),
+        "body_length": a["body_length"],
+        "body_width": a["body_width"],
+        "body_height": a["body_height"],
+        "clearance": a.get("clearance", 0),
+        "clearance_mode": a.get("clearance_mode", "diametral"),
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    }
+    if a.get("pocket_depth") is not None:
+        operation["pocket_depth"] = a["pocket_depth"]
+    return _apply_op(a, operation)
+
+
+def cmd_doc_vector_extrude(a):
+    path = Path(a["path"])
+    try:
+        source_text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise geo_error("file_read_failed", f"Не удалось прочитать векторный файл: {exc}") from exc
+    operation = {
+        "op": "vector_extrude",
+        "format": a["format"],
+        "source_text": source_text,
+        "height": a["height"],
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    }
+    if a.get("unit_scale") is not None:
+        operation["unit_scale"] = a["unit_scale"]
+    return _apply_op(a, operation)
+
+
+def cmd_doc_text_relief(a):
+    return _apply_op(a, {
+        "op": "text_relief",
+        "text": a["text"],
+        "font_size": a["font_size"],
+        "relief_height": a["relief_height"],
+        "body_length": a["body_length"],
+        "body_width": a["body_width"],
+        "body_height": a["body_height"],
+        "mode": a.get("mode", "add"),
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_doc_thread_pair(a):
+    return _apply_op(a, {
+        "op": "thread_pair",
+        "profile_version": a.get("profile_version", "metric-60-v1"),
+        "major_diameter": a["major_diameter"],
+        "pitch": a["pitch"],
+        "length": a["length"],
+        "hand": a.get("hand", "right"),
+        "starts": int(a.get("starts", 1)),
+        "clearance": a["clearance"],
+        "nut_height": a["nut_height"],
+        "nut_across_flats": a["nut_across_flats"],
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_doc_clearance_calibration(a):
+    return _apply_op(a, {
+        "op": "clearance_calibration",
+        "values": a["values"],
+        "nominal_diameter": a["nominal_diameter"],
+        "coupon_length": a["coupon_length"],
+        "coupon_width": a["coupon_width"],
+        "thickness": a["thickness"],
+        "spacing": a["spacing"],
+        "font_size": a["font_size"],
+        "label_height": a["label_height"],
+        "profile_name": a.get("profile_name"),
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
+
+
+def cmd_doc_split_connector_pair(a):
+    return _apply_op(a, {
+        "op": "split_connector_pair",
+        "length": a["length"],
+        "width": a["width"],
+        "height": a["height"],
+        "pin_radius": a["pin_radius"],
+        "pin_length": a["pin_length"],
+        "radial_clearance": a["radial_clearance"],
+        "print_separation": a["print_separation"],
+        "result_id": a.get("result_id"),
+        "name": a.get("name"),
+    })
 
 
 def cmd_doc_face_feature(a):
@@ -461,17 +763,23 @@ def cmd_doc_open(a):
             document = json.loads(z.read("document.json"))
     except (zipfile.BadZipFile, KeyError, json.JSONDecodeError):
         raise geo_error("bad_file", "Это не файл проекта PrintForge или файл повреждён.")
-    template = document.get("template") or "plate_with_holes"
-    if template not in DEFAULTS:
+    schema_version = int(document.get("schema_version", 1))
+    if schema_version > 3:
+        raise geo_error(
+            "unsupported_project_version",
+            f"Проект создан в более новой версии формата ({schema_version}). Обновите PrintForge.")
+    template = document.get("template")
+    operations = document.get("operations") or []
+    if template is not None and template not in DEFAULTS:
         raise geo_error("bad_file", f"Неизвестный шаблон в проекте: {template}")
     d.__init__(document.get("document_id"))
     if document.get("parts"):
         d.parts = document["parts"]
         d._part_n = len(d.parts)
-    else:
+    elif template is not None:
         d.add_part(template, {k: float(v) for k, v in (document.get("parameters") or {}).items()})
     d.expressions = document.get("expressions") or {}
-    d.operations = document.get("operations") or []
+    d.operations = operations
     d.commit()
     d.path = str(path)
     d.dirty = False
@@ -481,7 +789,7 @@ def cmd_doc_open(a):
 
 def cmd_doc_export(a):
     d = doc()
-    if not d.template:
+    if not d.parts and not d.operations:
         raise geo_error("no_model", "нет модели для экспорта")
     fmt = a.get("format", "stl")
     p = d.build_params()
@@ -498,37 +806,166 @@ def cmd_doc_import(a):
                                   "unit_scale": a.get("unit_scale", 1.0)})
 
 
+def _require_mesh_document(document):
+    if not document.operations or document.operations[0].get("op") not in {
+            "mesh_source", "image_relief_source"}:
+        raise geo_error("mesh_source_missing", "Сначала примените STL как mesh-документ.")
+
+
+def cmd_doc_mesh_import_apply(a):
+    d = doc()
+    path = Path(a["path"]).expanduser()
+    mesh_format = str(a.get("format", "stl")).lower()
+    if mesh_format not in {"stl", "obj", "ply"}:
+        raise geo_error("bad_params", f"Mesh workflow не поддерживает формат {mesh_format}.")
+    try:
+        source = path.read_bytes()
+    except OSError as exc:
+        raise geo_error("file_read_failed", f"Не удалось прочитать mesh: {exc}") from exc
+    if len(source) > 25 * 1024 * 1024:
+        raise geo_error("mesh_too_large", "Mesh source превышает лимит 25 MiB.")
+    d.parts = []
+    d.expressions = {}
+    d.operations = [{
+        "op": "mesh_source",
+        "format": mesh_format,
+        "source_base64": base64.b64encode(source).decode("ascii"),
+        "unit_scale": float(a.get("unit_scale", 1.0)),
+        "source_name": path.name,
+    }]
+    d._part_n = 0
+    _rebuild_committed(d)
+    return d.state(ACTIVE[0])
+
+
+def cmd_doc_mesh_transform(a):
+    _require_mesh_document(doc())
+    return _apply_op(a, {
+        "op": "mesh_transform",
+        "translate": a.get("translate") or [0, 0, 0],
+        "rotate_deg": a.get("rotate_deg") or [0, 0, 0],
+        "scale": a.get("scale", 1),
+    })
+
+
+def cmd_doc_mesh_repair(a):
+    _require_mesh_document(doc())
+    return _apply_op(a, {"op": "mesh_repair", "action": a.get("action", "fill_holes")})
+
+
+def cmd_doc_mesh_decimate(a):
+    _require_mesh_document(doc())
+    operation = {"op": "mesh_decimate", "target_ratio": a["target_ratio"]}
+    for key in ("minimum_ratio", "maximum_ratio", "volume_tolerance"):
+        if a.get(key) is not None:
+            operation[key] = a[key]
+    return _apply_op(a, operation)
+
+
+def _image_relief_operation(a):
+    path = Path(a["path"]).expanduser()
+    try:
+        source = path.read_bytes()
+    except OSError as exc:
+        raise geo_error("file_read_failed", f"Не удалось прочитать изображение: {exc}") from exc
+    if len(source) > 8 * 1024 * 1024:
+        raise geo_error("image_too_large", "Изображение превышает лимит 8 MiB.")
+    source_sha256 = hashlib.sha256(source).hexdigest()
+    expected = a.get("expected_sha256")
+    if expected and expected != source_sha256:
+        raise geo_error("image_changed", "Изображение изменилось после preview. Выполните preview повторно.")
+    image_format = path.suffix.lower().lstrip(".")
+    if image_format == "jpg":
+        image_format = "jpeg"
+    return {
+        "op": "image_relief_source",
+        "format": image_format,
+        "source_base64": base64.b64encode(source).decode("ascii"),
+        "source_name": path.name,
+        "model": a.get("model", "heightmap-luminance-v1"),
+        "seed": int(a.get("seed", 0)),
+        "width_mm": float(a.get("width_mm", 50)),
+        "relief_height": float(a.get("relief_height", 3)),
+        "base_thickness": float(a.get("base_thickness", 1.5)),
+        "samples": int(a.get("samples", 96)),
+        "noise_strength": float(a.get("noise_strength", 0.015)),
+        "invert": bool(a.get("invert", False)),
+    }, source_sha256
+
+
+def cmd_image_relief_preview(a):
+    operation, source_sha256 = _image_relief_operation(a)
+    result = worker_call("image_relief_preview", {
+        key: value for key, value in operation.items() if key != "op"
+    }, doc().revision)
+    return {**result, "source_sha256": source_sha256}
+
+
+def cmd_doc_image_relief_apply(a):
+    operation, _ = _image_relief_operation(a)
+    d = doc()
+    d.parts = []
+    d.expressions = {}
+    d.operations = [operation]
+    d._part_n = 0
+    _rebuild_committed(d)
+    return d.state(ACTIVE[0])
+
+
 def cmd_print_check(a):
     d = doc()
-    if not d.template:
+    if not d.parts and not d.operations:
         raise geo_error("no_model", "Сначала создайте деталь")
     p = d.build_params()
     p["printer"] = a.get("printer") or {}
     return worker_call("print_check", p, d.revision)
 
 
+class PlanOperationError(ValueError):
+    def __init__(self, index, cause):
+        super().__init__(str(cause))
+        self.index = index
+
+
 def _apply_plan_ops_to(d, ops):
     """Применить проверенные операции плана к документу d как один снимок."""
-    for op in ops:
-        cid = op["command_id"]
-        params = op["parameters"]
-        if cid == "part.create.from_template":
-            d.parts = []
-            d.expressions = {}
-            d.operations = []
-            d._part_n = 0
-            d.add_part(params["template"], params.get("params") or {})
-        elif cid == "parameter.set":
-            part = next(p for p in d.parts if p["part_id"] == op["target_id"])
-            part["params"][params["name"]] = float(params["value"])
-        elif cid == "op.fillet":
-            d.operations = [o for o in d.operations if o.get("op") != "fillet"]
-            fop = {"op": "fillet", "radius": float(params["radius"]),
-                   "edge_ref": params.get("edge_ref")}
-            tid = op.get("target_id") or (d.parts[0]["part_id"] if d.parts else None)
-            if tid:
-                fop["part_id"] = tid
-            d.operations.append(fop)
+    for index, op in enumerate(ops, 1):
+        try:
+            cid = op["command_id"]
+            params = op["parameters"]
+            if cid == "part.create.from_template":
+                d.parts = []
+                d.expressions = {}
+                d.operations = []
+                d._part_n = 0
+                d.add_part(params["template"], params.get("params") or {})
+            elif cid == "parameter.set":
+                part = next(p for p in d.parts if p["part_id"] == op["target_id"])
+                part["params"][params["name"]] = float(params["value"])
+            elif cid == "op.fillet":
+                d.operations = [o for o in d.operations if o.get("op") != "fillet"]
+                fop = {"op": "fillet", "radius": float(params["radius"]),
+                       "edge_ref": params.get("edge_ref")}
+                tid = op.get("target_id") or (d.parts[0]["part_id"] if d.parts else None)
+                if tid:
+                    fop["part_id"] = tid
+                d.operations.append(fop)
+        except (KeyError, StopIteration, TypeError, ValueError) as error:
+            raise PlanOperationError(index, error) from error
+
+
+def _first_failing_plan_operation(d, ops):
+    """Локализовать первую геометрически невалидную операцию только при ошибке."""
+    for index in range(1, len(ops) + 1):
+        probe = copy.deepcopy(d)
+        try:
+            _apply_plan_ops_to(probe, ops[:index])
+        except PlanOperationError as error:
+            return error.index
+        probe.rebuild()
+        if probe.error:
+            return index
+    return len(ops)
 
 
 def cmd_doc_transaction(a):
@@ -568,20 +1005,35 @@ def cmd_doc_transaction(a):
         try:
             _apply_plan_ops_to(tmp, ops)
             tmp.rebuild()
-        except Exception as e:  # noqa: BLE001
-            raise geo_error("geometry_error", f"Предпросмотр не удался: {e}")
-        return {"mode": "preview", "stats": tmp.stats, "error": tmp.error,
+        except PlanOperationError as error:
+            raise geo_error(
+                "geometry_error",
+                f"Предпросмотр не удался на операции {error.index}: {error}") from error
+        preview_error = tmp.error
+        if preview_error:
+            preview_error = {
+                **preview_error,
+                "operation_index": _first_failing_plan_operation(d, ops),
+            }
+        return {"mode": "preview", "stats": tmp.stats, "error": preview_error,
                 "parts": tmp.parts, "plan_hash": expected_hash,
                 "base_revision": base,
                 "document_instance_id": d.document_instance_id}
     # Сначала строим копию. Рабочий документ меняется только на commit boundary.
     tmp = copy.deepcopy(d)
-    _apply_plan_ops_to(tmp, ops)
-    tmp.rebuild()
-    if tmp.error:
+    try:
+        _apply_plan_ops_to(tmp, ops)
+    except PlanOperationError as error:
         raise geo_error(
             "geometry_error",
-            f"План не применён: {tmp.error.get('message', 'ошибка геометрии')}")
+            f"План не применён: операция {error.index}: {error}") from error
+    tmp.rebuild()
+    if tmp.error:
+        operation_index = _first_failing_plan_operation(d, ops)
+        raise geo_error(
+            "geometry_error",
+            f"План не применён: операция {operation_index}: "
+            f"{tmp.error.get('message', 'ошибка геометрии')}")
     current = doc()
     if current is not d or current.document_instance_id != instance_id or current.revision != base:
         raise geo_error("plan_stale", "Документ изменился перед применением плана.")
@@ -631,15 +1083,46 @@ def cmd_ai_plan(a):
     text = (a.get("text") or "").strip()
     if not text:
         raise geo_error("bad_request", "Пустой запрос.")
-    return ai_planner.ai_plan(
-        text, d,
-        lambda ops, base, digest: cmd_doc_transaction({
-            "operations": ops,
-            "base_revision": base,
-            "document_instance_id": d.document_instance_id,
-            "plan_hash": digest,
-            "mode": "preview",
-        }))
+    task_id = str(a.get("task_id") or f"legacy-{uuid.uuid4()}")
+    if (not task_id or len(task_id) > 128
+            or any(not (char.isascii() and (char.isalnum() or char in "-_:"))
+                   for char in task_id)):
+        raise geo_error("bad_request", "Некорректный task_id AI-задачи.")
+    cancelled = threading.Event()
+    with _ai_tasks_lock:
+        if task_id in _ai_tasks:
+            raise geo_error("ai_task_conflict", "AI-задача с таким task_id уже выполняется.")
+        _ai_tasks[task_id] = cancelled
+    try:
+        return ai_planner.ai_plan(
+            text, d,
+            lambda ops, base, digest: cmd_doc_transaction({
+                "operations": ops,
+                "base_revision": base,
+                "document_instance_id": d.document_instance_id,
+                "plan_hash": digest,
+                "mode": "preview",
+            }),
+            cancelled.is_set,
+        )
+    finally:
+        with _ai_tasks_lock:
+            _ai_tasks.pop(task_id, None)
+
+
+def cmd_ai_cancel(a):
+    task_id = str(a.get("task_id") or "")
+    with _ai_tasks_lock:
+        task = _ai_tasks.get(task_id)
+        if task is not None:
+            task.set()
+    geometry_cancelled = _cancel_geometry_task() if task is not None else False
+    return {"task_id": task_id, "cancelled": task is not None,
+            "geometry_cancelled": geometry_cancelled}
+
+
+def cmd_geometry_cancel(_args):
+    return {"cancelled": _cancel_geometry_task()}
 
 
 def cmd_ai_chat(a):
@@ -690,6 +1173,12 @@ HANDLERS = {
     "doc_export": cmd_doc_export,
     "doc_export_stl": cmd_doc_export_stl,
     "doc_import": cmd_doc_import,
+    "doc_mesh_import_apply": cmd_doc_mesh_import_apply,
+    "doc_mesh_transform": cmd_doc_mesh_transform,
+    "doc_mesh_repair": cmd_doc_mesh_repair,
+    "doc_mesh_decimate": cmd_doc_mesh_decimate,
+    "image_relief_preview": cmd_image_relief_preview,
+    "doc_image_relief_apply": cmd_doc_image_relief_apply,
     "print_check": cmd_print_check,
     "doc_add_part": cmd_doc_add_part,
     "doc_boolean": cmd_doc_boolean,
@@ -698,6 +1187,21 @@ HANDLERS = {
     "doc_split": cmd_doc_split,
     "doc_transform": cmd_doc_transform,
     "doc_profile_extrude": cmd_doc_profile_extrude,
+    "doc_sketch_extrude": cmd_doc_sketch_extrude,
+    "sketch_solve": cmd_sketch_solve,
+    "doc_constrained_sketch_extrude": cmd_doc_constrained_sketch_extrude,
+    "doc_revolve": cmd_doc_revolve,
+    "doc_sweep": cmd_doc_sweep,
+    "doc_loft": cmd_doc_loft,
+    "doc_shell": cmd_doc_shell,
+    "doc_draft_prism": cmd_doc_draft_prism,
+    "doc_rib": cmd_doc_rib,
+    "doc_fit_pocket": cmd_doc_fit_pocket,
+    "doc_vector_extrude": cmd_doc_vector_extrude,
+    "doc_text_relief": cmd_doc_text_relief,
+    "doc_thread_pair": cmd_doc_thread_pair,
+    "doc_clearance_calibration": cmd_doc_clearance_calibration,
+    "doc_split_connector_pair": cmd_doc_split_connector_pair,
     "doc_face_feature": cmd_doc_face_feature,
     "doc_face_dome": cmd_doc_face_dome,
     "doc_sheet_bend": cmd_doc_sheet_bend,
@@ -709,6 +1213,8 @@ HANDLERS = {
     "ai_configure": cmd_ai_configure,
     "ai_test_connection": cmd_ai_test_connection,
     "ai_plan": cmd_ai_plan,
+    "ai_cancel": cmd_ai_cancel,
+    "geometry_cancel": cmd_geometry_cancel,
     "ai_chat": cmd_ai_chat,
     "doc_new_tutorial": cmd_doc_new_tutorial,
     "doc_switch_slot": cmd_doc_switch_slot,
@@ -740,13 +1246,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
-            result = handler(args)
-            # автосохранение: debounce 30 с после изменений (DOC-007)
-            d = doc()
-            if d.dirty and d.path and time.time() - AUTOSAVE["at"] > 30:
-                save_doc(d, Path(d.path))
-                d.dirty = False
-                AUTOSAVE = {"path": d.path, "at": time.time()}
+            guard = nullcontext() if name in {"ai_cancel", "geometry_cancel"} else _command_lock
+            with guard:
+                result = handler(args)
+                # автосохранение: debounce 30 с после изменений (DOC-007)
+                if name != "ai_cancel":
+                    d = doc()
+                    if d.dirty and d.path and time.time() - AUTOSAVE["at"] > 30:
+                        save_doc(d, Path(d.path))
+                        d.dirty = False
+                        AUTOSAVE = {"path": d.path, "at": time.time()}
             body = json.dumps(result, ensure_ascii=False).encode()
             self.send_response(200)
         except RuntimeError as e:
@@ -766,4 +1275,4 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print("dev-shim: http://localhost:8787 (Ctrl+C для остановки)",
           file=sys.stderr)
-    HTTPServer(("127.0.0.1", 8787), Handler).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", 8787), Handler).serve_forever()

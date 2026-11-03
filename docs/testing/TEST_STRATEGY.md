@@ -36,9 +36,20 @@ backend/.venv/bin/python scripts/run_test_stage.py --scope cad
 backend/.venv/bin/python scripts/run_test_stage.py --scope help
 backend/.venv/bin/python scripts/run_test_stage.py --scope release
 backend/.venv/bin/python scripts/run_test_stage.py --scope traceability
+backend/.venv/bin/python scripts/run_test_stage.py --scope perf
 ```
 
 Impact mapping консервативен: изменения общих IPC/Rust transaction contracts запускают AI, CAD и Rust; test infrastructure — все связанные Python-группы; неизвестный путь — широкий Python/UI/Rust набор.
+
+Native performance не входит в обычный deterministic CI: после сборки target bundle он запускается отдельно через `scripts/run_native_perf.py` и пишет environment/app/scene metadata, сырые samples и gates в `artifacts/perf/`. Точная методика зафиксирована в `docs/testing/PERFORMANCE.md`.
+
+Native AI cancellation также выполняется отдельно на собранной bundle и не входит в обычный deterministic CI:
+
+```bash
+backend/.venv/bin/python scripts/run_native_ai_cancel_e2e.py --cancel-delay-ms 800
+```
+
+Runner использует настоящий WebView/Tauri IPC, production provider adapter и CAD sidecar. Loopback provider детерминированно удерживает HTTP body либо возвращает bound plan; gates требуют фактический разрыв provider socket, `geometry_cancelled`, неизменность документа, успешный следующий CAD build и валидную bundle signature. Пользовательский config и Keychain не изменяются.
 
 ## Fixtures и изоляция
 
@@ -56,10 +67,15 @@ PF_LIVE_AI_EVAL=1 \
 PF_AI_PROVIDER=ollama \
 PF_AI_BASE=http://127.0.0.1:11434/v1 \
 PF_AI_MODEL=qwen3:4b \
+PF_AI_MODEL_VERSION=qwen3:4b \
+PF_AI_MODEL_DIGEST=<digest> \
+PF_AI_QUANTIZATION=<quantization> \
 backend/.venv/bin/python scripts/run_live_ai_eval.py
 ```
 
-Без этого запуска допустима только формулировка «adapter проверен, качество модели не подтверждено».
+Runner сначала проверяет `/models`, затем считает раздельные gates: не менее 80% успешных preview для простых допустимых запросов и 100% для clarification, safety, отсутствия мутаций при preview и лимита в одну repair-попытку. Отчёт содержит dataset hash, commit, plan/preview outcome каждого прогона, latency percentiles и память harness с CAD worker; внешний provider process в это измерение не входит. Без реального запуска допустима только формулировка «adapter проверен, качество модели не подтверждено».
+
+Проверенный профиль 03.11.2026: Ollama `qwen3:4b` / `Qwen3-4B-Thinking-2507`, GGUF Q4_K_M, digest `359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7`. Отчёт `artifacts/live-eval/20261103T093919Z/live-ai-eval.json`: simple-valid 83,3%, остальные обязательные gates 100%. Результат относится только к этому digest и dataset SHA-256; другие модели имеют статус `not_run`.
 
 ## Зафиксированный baseline
 
