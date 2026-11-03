@@ -127,20 +127,46 @@ def wait_for_installation(timeout: float) -> tuple[dict[str, str], Path]:
     raise TimeoutError("PrintForge не найден в Windows uninstall registry после установки")
 
 
+def windows_powershell() -> str:
+    windows_dir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    executable = (
+        windows_dir
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    return str(executable) if executable.is_file() else "powershell.exe"
+
+
 def authenticode_status(path: Path) -> dict[str, object]:
     command = (
+        "$ErrorActionPreference = 'Stop'; "
+        "Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; "
         "$signature = Get-AuthenticodeSignature -LiteralPath $args[0]; "
         "[ordered]@{Status=[string]$signature.Status; "
         "StatusMessage=$signature.StatusMessage; "
         "SignerSubject=if ($signature.SignerCertificate) "
         "{$signature.SignerCertificate.Subject} else {$null}} | ConvertTo-Json -Compress"
     )
+    environment = os.environ.copy()
+    environment["PRINTFORGE_AUTHENTICODE_PATH"] = str(path)
+    command = command.replace("$args[0]", "$env:PRINTFORGE_AUTHENTICODE_PATH")
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command, str(path)],
+        [
+            windows_powershell(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
         check=False,
         capture_output=True,
         text=True,
         timeout=30,
+        env=environment,
     )
     if result.returncode != 0:
         raise RuntimeError(f"Get-AuthenticodeSignature failed: {result.stderr.strip()}")

@@ -1,6 +1,7 @@
 """Static release contract. Не заменяет native E2E и smoke артефакта."""
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -83,6 +84,44 @@ def test_windows_release_evidence_extracts_executable_paths():
     assert run_windows_release_evidence.executable_from_command(
         "C:\\PrintForge\\printforge.exe,0"
     ) == Path("C:\\PrintForge\\printforge.exe")
+
+
+def test_windows_authenticode_uses_windows_powershell_and_environment(monkeypatch, tmp_path):
+    installer = tmp_path / "PrintForge_0.3.0_x64-setup.exe"
+    installer.write_bytes(b"installer")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({
+                "Status": "NotSigned",
+                "StatusMessage": "The file is not digitally signed.",
+                "SignerSubject": None,
+            }),
+            stderr="",
+        )
+
+    monkeypatch.setattr(run_windows_release_evidence, "windows_powershell", lambda: "powershell.exe")
+    monkeypatch.setattr(run_windows_release_evidence.subprocess, "run", fake_run)
+
+    result = run_windows_release_evidence.authenticode_status(installer)
+
+    assert result["Status"] == "NotSigned"
+    assert captured["command"][:6] == [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+    ]
+    assert "$env:PRINTFORGE_AUTHENTICODE_PATH" in captured["command"][-1]
+    assert str(installer) not in captured["command"][-1]
+    assert captured["kwargs"]["env"]["PRINTFORGE_AUTHENTICODE_PATH"] == str(installer)
 
 
 def test_repository_license_is_apache_2_0():
