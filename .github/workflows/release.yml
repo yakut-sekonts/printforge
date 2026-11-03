@@ -146,7 +146,17 @@ jobs:
             exit 1
           fi
 
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq .id)"
+          release_id="$(
+            gh api \
+              --method GET \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${tag}\" and .draft == true) | .id" \
+              | head -n 1
+          )"
+          if [[ -z "$release_id" ]]; then
+            echo "Draft release not found for tag: $tag" >&2
+            exit 1
+          fi
           gh api \
             --method PATCH \
             "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
