@@ -52,3 +52,14 @@ backend/.venv/bin/python scripts/run_native_perf.py --startup-runs 7 --workload-
 - Полный RSS main app и всех descendant processes: maximum `438 665 216 bytes`; target `< 2 GiB` пройден.
 
 Полный native-отчёт: `artifacts/perf/20261103T073255Z/native-perf-report.json`. Все TECH-003 gates на контрольной macOS arm64 машине пройдены. Windows performance baseline остаётся отдельной платформенной проверкой и не выводится из macOS-результата.
+
+## Windows hosted runner, 2026-11-03
+
+- Среда: GitHub Actions Windows Server 2025, AMD64, 4 CPU, 16 GiB RAM; установленный NSIS payload, не build-tree executable.
+- Installer, PE unsigned policy, uninstall registry, установленный `printforge.exe`, geometry sidecar, control scene и cleanup пройдены.
+- Process-cold frontend ready: 7 запусков, p50 `899.10 мс`, p95/max `9295.44 мс`; target `<= 8 с` не пройден из-за первого запуска `9295.44 мс`.
+- Native navigation: 3 запуска, minimum/p50/max `28.19/28.19/28.33 FPS`; target `>= 30 FPS` не пройден.
+- Process-tree RSS: maximum `902676480 bytes`; target `< 2 GiB` пройден. Сцена: 20 тел, 100 операций, 40 880 треугольников.
+- Hosted runner не объявлен закреплённой контрольной машиной. Release evidence сохраняет оба performance gate как `failed`; в режиме `record` они не блокируют installer release, но и не закрывают Windows TECH-003 baseline.
+
+Workflow artifact: `windows-release-evidence-41633795798`. Исходный отчёт относится к commit `a681c2bcbe0d360220a18f45dc9d6efcefd6d52c`.

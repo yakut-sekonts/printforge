@@ -42,7 +42,7 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.config/printforge/updater.key
 3. Проверить согласованность: `python3 scripts/check_release_version.py`.
 4. Создать и отправить тег той же версии, например `v0.1.0`.
 5. Workflow `.github/workflows/release.yml` соберёт три native installers, updater artifacts, signatures и `latest.json` в draft GitHub Release.
-6. Windows job установит собранный NSIS в silent mode, проверит установленный binary/sidecar и прогонит native startup/FPS/RSS gates. JSON и логи сохраняются в workflow artifact `windows-release-evidence-*`.
+6. Windows job установит собранный NSIS в silent mode, проверит установленный binary/sidecar и измерит native startup/FPS/RSS. Installer/payload проверки блокируют выпуск; performance сохраняется без изменения результата как отдельная оценка hosted runner. JSON и логи публикуются в workflow artifact `windows-release-evidence-*`.
 7. Проверить assets, Windows evidence и опубликовать draft. Только опубликованный release становится доступен установленным приложениям.
 
 Ручной `workflow_dispatch` также создаёт draft для версии из Tauri config.
@@ -82,7 +82,7 @@ npm run tauri build -- --bundles app,dmg --config src-tauri/tauri.release.conf.j
 Windows release evidence запускается только на Windows x64 после сборки NSIS:
 
 ```powershell
-python scripts/run_windows_release_evidence.py
+python scripts/run_windows_release_evidence.py --performance-policy record
 ```
 
-Runner устанавливает NSIS для текущего пользователя, находит `printforge.exe` через uninstall registry, проверяет наличие geometry sidecar, запускает `scripts/run_native_perf.py` для установленного приложения и затем удаляет тестовую установку. Отсутствие Authenticode является ожидаемой частью open-source release profile, но SHA-256 installer и установленного binary фиксируются в отчёте.
+Runner устанавливает NSIS для текущего пользователя, находит `printforge.exe` через uninstall registry, проверяет наличие geometry sidecar, запускает `scripts/run_native_perf.py` для установленного приложения и затем удаляет тестовую установку. Отсутствие Authenticode проверяется напрямую по PE certificate table; SHA-256 installer и установленного binary фиксируются в отчёте. В режиме `record` performance gate сохраняет `failed`, если target не достигнут, но не подменяет отдельный benchmark на закреплённой контрольной машине.

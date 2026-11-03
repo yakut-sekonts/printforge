@@ -54,7 +54,7 @@ def test_release_workflow_declares_all_supported_desktop_targets():
     assert "x86_64-pc-windows-msvc" in workflow
     assert "TAURI_SIGNING_PRIVATE_KEY" in workflow
     assert 'echo "APPLE_SIGNING_IDENTITY=-"' in workflow
-    assert "python scripts/run_windows_release_evidence.py" in workflow
+    assert "python scripts/run_windows_release_evidence.py --performance-policy record" in workflow
     assert "windows-release-evidence-${{ github.run_id }}" in workflow
     assert "if: always() && runner.os == 'Windows'" in workflow
     assert "publish-release:" in workflow
@@ -111,6 +111,18 @@ def test_windows_authenticode_reads_pe_certificate_table(tmp_path):
         "CertificateTableOffset": 512,
         "CertificateTableSize": 8,
     }
+
+
+def test_windows_release_performance_recording_does_not_rename_failed_gate():
+    gates = {
+        "installer_authenticode_policy": {"status": "passed"},
+        "installed_nsis_payload": {"status": "passed"},
+        "installed_native_performance": {"status": "failed", "blocking": False},
+    }
+    assert run_windows_release_evidence.evidence_status(gates, False) == "passed_with_observations"
+    assert gates["installed_native_performance"]["status"] == "failed"
+    gates["installed_native_performance"]["blocking"] = True
+    assert run_windows_release_evidence.evidence_status(gates, False) == "failed"
 
 
 def test_repository_license_is_apache_2_0():

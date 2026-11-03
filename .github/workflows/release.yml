@@ -113,7 +113,7 @@ jobs:
 
       - name: Validate installed Windows release and native performance
         if: runner.os == 'Windows'
-        run: python scripts/run_windows_release_evidence.py
+        run: python scripts/run_windows_release_evidence.py --performance-policy record
 
       - name: Upload Windows release evidence
         if: always() && runner.os == 'Windows'

@@ -6,8 +6,8 @@
 
 - **M1–M3 / B:** нет browser component/E2E набора для пользовательских состояний, доступности, tooltip/search/«Что это?» и AI panel.
 - **M1–M3 / B:** нет полного WebdriverIO/Tauri native E2E набора. Точечный native harness с настоящим WebView, IPC и sidecar покрывает AI cancellation, но `T-E2E-01…12` не объявлены пройденными.
-- **M2 / B:** локальная macOS `.app` проверялась отдельно. Для Windows добавлен release gate: silent NSIS install, discovery через uninstall registry, installed binary/sidecar smoke, native performance и cleanup; фактический GitHub Windows run ещё не выполнен.
-- **M2 / R:** TECH-003 пройден на свежей macOS arm64 `.app`: cold ready, native WebView FPS и process-tree RSS измерены воспроизводимым runner. Windows x64 runner теперь автоматизирован в release workflow, но baseline ещё не запускался и не должен выводиться из macOS-результата.
+- **M2 / B:** локальная macOS `.app` проверялась отдельно. Windows hosted runner подтвердил silent NSIS install, discovery через uninstall registry, installed binary/sidecar smoke, PE unsigned policy и cleanup. Native performance сохраняется тем же artifact, но является отдельной неблокирующей оценкой.
+- **M2 / R:** TECH-003 пройден на свежей macOS arm64 `.app`. Windows hosted runner измерил cold p95 `9295.44 мс`, minimum navigation `28.19 FPS`, RSS `902676480 bytes` и корректную сцену; первые два targets честно остаются `failed`, поэтому Windows control-machine baseline не закрыт.
 - **M1–M3 / Q/R:** visual baselines, keyboard/focus/a11y matrix и ручная оценка самостоятельности дизайна не выполнены.
 
 ## M0–M2

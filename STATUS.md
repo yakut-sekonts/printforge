@@ -1,6 +1,6 @@
 # STATUS.md — статус PrintForge
 
-Обновлено: 2026-11-03. Этап: M4 в работе. Все группы `EXT-001…EXT-012` имеют рабочий partial slice и automated evidence: BRep-моделирование, constraint solver, persistent mesh repair/decimation и experimental image heightmap workflow. Открытые generic/direct-editing clauses перечислены в `docs/testing/TEST_GAPS.md`; Windows release/performance evidence остаётся `not_run`.
+Обновлено: 2026-11-03. Этап: M4 в работе. Все группы `EXT-001…EXT-012` имеют рабочий partial slice и automated evidence: BRep-моделирование, constraint solver, persistent mesh repair/decimation и experimental image heightmap workflow. Открытые generic/direct-editing clauses перечислены в `docs/testing/TEST_GAPS.md`; Windows installer evidence пройден, hosted-runner performance targets зафиксированы отдельно и не выданы за control-machine pass.
 
 ## Что пользователь уже может сделать
 
@@ -20,13 +20,13 @@
 - `EXT-010`: STL/OBJ/PLY source встраивается в mesh-only document. Реализованы transform, закрытие поддерживаемого boundary hole с before/after diagnostics и topology-aware decimation с component/Euler/bbox/volume gates; shape error явно называется sampled estimate, не Hausdorff guarantee. STEP для mesh-document запрещён, STL и встроенный 3MF exporter работают.
 - `EXT-011`: `heightmap-luminance-v1` строит замкнутый decorative mesh из PNG/JPEG/WebP; preview не меняет документ, Apply связан с SHA-256 исходника, model/seed/settings и mm scale сохраняются. Workflow явно не объявляется инженерно точным.
 - Impact gates: CAD/document/worker `139 passed`; help `2 pytest + 4 search`, 34 статьи/58 команд; UI contracts/build; Rust `13 passed`; traceability `97 requirements / 63 test IDs`; release `6 passed`. Отчёты: `artifacts/test-runs/m4-complete-{cad,help,ui,rust,trace,release}/test-report.json`.
-- Production sidecar пересобран (`125.4 MiB`) и реально выполнил solver (`DOF=0`), mesh repair (`12` triangles, `1000 мм³`), decimation и image relief. Windows runner evidence остаётся `not_run`; direct canvas Sketcher, general self-intersection repair и external generative providers остаются открытыми partial clauses.
+- Production sidecar пересобран (`125.4 MiB`) и реально выполнил solver (`DOF=0`), mesh repair (`12` triangles, `1000 мм³`), decimation и image relief. Windows installer/payload evidence получен; direct canvas Sketcher, general self-intersection repair и external generative providers остаются открытыми partial clauses.
 
 ## Release v0.3.0 (2026-11-03)
 
 - Desktop, UI, Tauri и lockfile версии синхронизированы на `0.3.0`; release notes находятся в `docs/releases/v0.3.0.md`.
 - Release workflow собирает macOS Apple Silicon, macOS Intel и Windows x64 с подписанными Tauri Updater artifacts.
-- Draft публикуется автоматически только после успешного завершения всей installer matrix и Windows installed-artifact gate; частичный release не становится доступен через колокольчик.
+- Draft публикуется автоматически только после успешного завершения всей installer matrix и Windows installed-artifact gate; hosted-runner performance записывается отдельно и не переименовывается в pass.
 - Локальные release и traceability gates прошли: `6 + 3` tests, `97` requirements, `63` test IDs; отчёты находятся в `artifacts/test-runs/v0.3.0-{release,traceability}/`.
 - Browser UI smoke на desktop viewport: constraint preview показал `DOF=0`, Apply создал «Ограниченный эскиз» объёмом `4000 мм³`, один Undo вернул пустой документ. Dev-shim после проверки остановлен.
 
@@ -54,7 +54,7 @@
 
 - Полный AC-12 внутри `.app` ещё не пройден; в WKWebView проверен AI-сценарий M3 и ранее автономность sidecar, остальные команды требуют полного обхода.
 - Уроки 4–8 не прогонялись в UI (движок готов); AC-07/AC-08 повторить на M2-функциях; AC-09 частично (bed_fit проверен worker'ом; импорт сетки с открытым краем — не проверен).
-- Слайсер не установлен (масштаб в слайсере не подтверждён); Developer ID/notarization нет, локальная `.app` подписана ad-hoc; Windows x64 perf baseline ещё не запускался.
+- Слайсер не установлен (масштаб в слайсере не подтверждён); Developer ID/notarization нет, локальная `.app` подписана ad-hoc; Windows hosted-runner performance не принят как control-machine baseline (`9295.44 мс`, `28.19 FPS`).
 
 ## Последний срез (документ v3, 2026-10-22)
 
@@ -107,7 +107,7 @@
 ## Следующие задачи
 
 1. Уроки 1, 3, 4 при случае; AC-12 внутри `.app`.
-2. Запустить Windows x64 release workflow и зафиксировать artifact `windows-release-evidence-*`; gate уже автоматизирует silent NSIS install, installed binary/sidecar smoke и native startup/FPS/RSS.
+2. Повторить Windows x64 performance на закреплённой контрольной машине; hosted runner уже сохраняет отдельный `windows-release-evidence-*` с installer/payload pass и неизменёнными performance outcomes.
 
 ## Последний срез (desktop distribution, 2026-10-30)
 
@@ -123,7 +123,7 @@
 - Deterministic M3 покрывает production validation, loopback provider adapter, schema repair, real-kernel preview/apply/export/Undo, atomic failure, stale/ABA, plan hash, instance guard и idempotent action.
 - Добавлены независимые F-01…F-04 ожидания и hand-authored F-05 STL fixtures.
 - `scripts/run_test_stage.py` формирует JSON/JUnit/log artifacts и поддерживает полный baseline либо impact-based локальный прогон.
-- Native UI E2E, release smoke, Windows run и live LLM eval остаются явно `blocked/not_run`; детали в `docs/testing/TEST_GAPS.md`.
+- Полный native UI E2E остаётся открытым; release smoke и Windows installed-artifact run выполнены, live LLM eval закрыт отдельным срезом. Детали в `docs/testing/TEST_GAPS.md`.
 
 ## Последний срез (direct editing, 2026-10-30)
 
@@ -331,6 +331,6 @@
 
 - Release workflow после Windows NSIS build запускает отдельный installed-artifact gate и всегда выгружает `windows-release-evidence-*` с JSON, native performance report и логами.
 - Runner выполняет silent per-user install, находит установленный `printforge.exe` через Windows uninstall registry, проверяет geometry sidecar, SHA-256 installer/binary и ожидаемое отсутствие Authenticode.
-- Установленный binary проходит тот же native control project: 7 startup runs, 3 WebView camera-orbit runs, process-tree RSS и 20 тел/100 операций; после проверки тестовая установка удаляется.
-- Локальные связующие проверки зелёные: release + perf contracts `11/11`, traceability `3/3`, release version `0.2.0`, YAML и `git diff --check` валидны.
-- Фактический Windows x64 baseline остаётся `not_run`: локально нет Windows runner, а `gh` не авторизован. Статус будет закрыт только успешным workflow artifact, без переноса macOS-метрик.
+- Установленный binary выполняет тот же native control project: 7 startup runs, 3 WebView camera-orbit runs, process-tree RSS и 20 тел/100 операций; после проверки тестовая установка удаляется.
+- Локальные release contracts, traceability, release version `0.3.0`, YAML и `git diff --check` валидны.
+- GitHub Windows Server 2025 runner подтвердил installer/payload/cleanup и измерил cold p95 `9295.44 мс`, minimum navigation `28.19 FPS`, RSS `902676480 bytes`. Performance thresholds остаются `failed`, а не переименованы в pass; это observation, не control-machine baseline.

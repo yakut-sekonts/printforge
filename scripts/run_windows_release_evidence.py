@@ -209,6 +209,19 @@ def uninstall(record: dict[str, str]) -> dict[str, object]:
     }
 
 
+def evidence_status(gates: dict[str, dict[str, object]], has_error: bool) -> str:
+    if has_error or len(gates) != 3:
+        return "failed"
+    if any(
+        gate.get("blocking", True) and gate.get("status") != "passed"
+        for gate in gates.values()
+    ):
+        return "failed"
+    if any(gate.get("status") != "passed" for gate in gates.values()):
+        return "passed_with_observations"
+    return "passed"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--installer", type=Path)
@@ -217,6 +230,12 @@ def main() -> int:
     parser.add_argument("--workload-runs", type=int, default=3)
     parser.add_argument("--duration-ms", type=int, default=3000)
     parser.add_argument("--timeout", type=float, default=45)
+    parser.add_argument(
+        "--performance-policy",
+        choices=("enforce", "record"),
+        default="enforce",
+        help="enforce блокирует выпуск по performance thresholds; record сохраняет их как отдельную оценку",
+    )
     args = parser.parse_args()
     if platform.system() != "Windows" or platform.machine().casefold() not in {"amd64", "x86_64"}:
         parser.error("Windows release evidence требует Windows x64 runner")
@@ -235,6 +254,9 @@ def main() -> int:
             "platform": platform.platform(),
             "machine": platform.machine(),
             "python": platform.python_version(),
+        },
+        "configuration": {
+            "performance_policy": args.performance_policy,
         },
         "gates": {},
     }
@@ -318,6 +340,7 @@ def main() -> int:
             "target": "installed NSIS payload passes native startup, FPS, memory and control-scene gates",
             "actual": native_report.get("gates"),
             "status": "passed" if perf_result.returncode == 0 else "failed",
+            "blocking": args.performance_policy == "enforce",
         }
     except Exception as error:
         report["error"] = {"type": type(error).__name__, "message": str(error)}
@@ -331,17 +354,14 @@ def main() -> int:
                 }
 
     gates = report["gates"]
-    report["overall_status"] = (
-        "passed" if len(gates) == 3 and all(gate["status"] == "passed" for gate in gates.values())
-        else "failed"
-    )
+    report["overall_status"] = evidence_status(gates, bool(report.get("error")))
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"Windows release evidence: {report_path.relative_to(ROOT)}")
     for name, gate in gates.items():
         print(f" - {name}: {gate['status']}")
     if report.get("error"):
         print(f" - error: {report['error']['message']}", file=sys.stderr)
-    return 0 if report["overall_status"] == "passed" else 1
+    return 0 if report["overall_status"] != "failed" else 1
 
 
 if __name__ == "__main__":
