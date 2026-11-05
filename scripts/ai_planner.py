@@ -437,6 +437,9 @@ def system_prompt(doc):
         "Используй только эти операции и точные идентификаторы:\n"
         "1. part.create.from_template: target_id=null, parameters={template, params}. "
         "Допустимые шаблоны и параметры: "
+        "box {length, width, height}; "
+        "cylinder {diameter, height}; "
+        "sphere {diameter}; "
         "washer {outer_diameter, inner_diameter, height}; "
         "plate_with_holes {length, width, height, hole_diameter, hole_offset}; "
         "bracket_l {a_length, a_width, a_thickness, b_height}; "
@@ -475,6 +478,9 @@ def _request_operation_scope(doc, text):
         return set(), False, True
 
     template_markers = {
+        "box": ("параллелеп", "куб", "брусок"),
+        "cylinder": ("цилиндр",),
+        "sphere": ("сфер", "шар"),
         "washer": ("шайб", "втулк"),
         "plate_with_holes": ("пластин",),
         "bracket_l": ("кроншт",),
@@ -493,6 +499,7 @@ def _request_operation_scope(doc, text):
         "length": ("длин",),
         "width": ("ширин",),
         "height": ("толщин", "высот"),
+        "diameter": ("диаметр",),
         "hole_diameter": ("диаметр отверст", "отверсти", "побольш"),
         "hole_offset": ("смещен", "отступ"),
         "outer_diameter": ("наружн",),
@@ -653,8 +660,11 @@ def plan_hash(plan):
 
 
 ALLOWED_COMMANDS = {"part.create.from_template", "parameter.set", "op.fillet"}
-TEMPLATES = {"plate_with_holes", "washer", "bracket_l", "case_with_lid"}
+TEMPLATES = {"box", "cylinder", "sphere", "plate_with_holes", "washer", "bracket_l", "case_with_lid"}
 TEMPLATE_PARAMS = {
+    "box": ("length", "width", "height"),
+    "cylinder": ("diameter", "height"),
+    "sphere": ("diameter",),
     "washer": ("outer_diameter", "inner_diameter", "height"),
     "plate_with_holes": (
         "length", "width", "height", "hole_diameter", "hole_offset"),
@@ -663,7 +673,7 @@ TEMPLATE_PARAMS = {
         "length", "width", "height", "wall", "bottom", "gap",
         "lid_thickness", "lip_height", "lip_wall"),
 }
-SIGNED_PARAMS = {"length", "width", "height", "hole_diameter", "hole_offset",
+SIGNED_PARAMS = {"length", "width", "height", "diameter", "hole_diameter", "hole_offset",
                  "outer_diameter", "inner_diameter", "a_length", "a_width",
                  "a_thickness", "b_height", "wall", "bottom", "gap",
                  "lid_thickness", "lip_height", "lip_wall", "radius"}

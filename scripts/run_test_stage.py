@@ -46,6 +46,8 @@ def groups(run_dir):
                 "backend/test_templates.py",
                 "backend/test_extended_modeling.py",
                 "backend/test_document_integration.py",
+                "backend/test_face_offset.py",
+                "backend/test_split_bodies.py",
             ], run_dir / "pytest-cad.xml"),
             "junit": str(run_dir / "pytest-cad.xml"),
         }],
@@ -86,8 +88,16 @@ def groups(run_dir):
                 ["backend/test_perf_contract.py"], run_dir / "pytest-perf.xml"),
             "junit": str(run_dir / "pytest-perf.xml"),
         }],
+        "ci": [{
+            "name": "ci-routing-contract",
+            "command": pytest_command(
+                ["backend/test_ci_routing.py"], run_dir / "pytest-ci.xml"),
+            "junit": str(run_dir / "pytest-ci.xml"),
+        }],
         "ui": [
+            {"name": "native-ipc-argument-contract", "command": ["npm", "run", "test:ipc", "--prefix", "app/ui"]},
             {"name": "geometry-control-contract", "command": ["npm", "run", "test:geometry", "--prefix", "app/ui"]},
+            {"name": "scene-selection-contract", "command": ["npm", "run", "test:selection", "--prefix", "app/ui"]},
             {"name": "mesh-binary-contract", "command": ["npm", "run", "test:mesh", "--prefix", "app/ui"]},
             {"name": "ui-build", "command": ["npm", "run", "build", "--prefix", "app/ui"]},
         ],
@@ -99,7 +109,7 @@ def groups(run_dir):
 
 
 def changed_paths(explicit_paths):
-    if explicit_paths:
+    if explicit_paths is not None:
         return explicit_paths
     result = subprocess.run(
         ["git", "diff", "--name-only", "HEAD"],
@@ -123,7 +133,7 @@ def impact_groups(paths):
     for path in paths:
         if path.startswith(("scripts/ai_planner.py", "scripts/dev_shim.py", "backend/test_ai", "tests/live_eval/")):
             selected.add("ai")
-        if path.startswith(("backend/worker.py", "backend/test_worker.py", "backend/test_templates.py", "backend/test_extended_modeling.py", "backend/test_document", "tests/fixtures/")):
+        if path.startswith(("scripts/dev_shim.py", "backend/worker.py", "backend/test_worker", "backend/test_templates.py", "backend/test_extended_modeling.py", "backend/test_document", "backend/test_face_offset.py", "backend/test_split_bodies.py", "tests/fixtures/")):
             selected.add("cad")
         if path.startswith(("docs/help/", "app/shared/commands", "app/shared/lessons", "app/ui/public/help", "app/ui/public/lessons", "app/ui/src/helpSearch", "app/ui/test/helpSearch", "backend/test_help")):
             selected.update({"help", "ui"})
@@ -137,6 +147,8 @@ def impact_groups(paths):
             selected.add("ui")
         if path.startswith(("app/src-tauri/tauri", ".github/workflows/release", "scripts/build_sidecar", "scripts/check_release_version", "scripts/run_windows_release_evidence", "backend/test_release", "LICENSE")):
             selected.add("release")
+        if path in {"app/package.json", "app/package-lock.json", "app/ui/package.json", "app/ui/package-lock.json", "app/src-tauri/Cargo.toml", "app/src-tauri/Cargo.lock"}:
+            selected.add("release")
         if path.startswith(("app/src-tauri/", "app/src-tauri/Cargo")):
             selected.add("rust")
         if path.startswith(("docs/testing/", "tests/test_catalog", "scripts/check_test_manifest", "scripts/build_test_manifest", "backend/test_traceability", "REQUIREMENTS.md")):
@@ -145,9 +157,11 @@ def impact_groups(paths):
             selected.add("perf")
         if path.startswith(("scripts/run_native_ai_cancel_e2e", "backend/test_native_e2e_contract")):
             selected.update({"ai", "ui", "rust"})
+        if path.startswith(("scripts/run_ci_test_stage.py", "backend/test_ci_routing.py", ".github/workflows/ci.yml")):
+            selected.add("ci")
         if path.startswith(("pytest.ini", "scripts/run_test_stage.py", ".github/workflows/ci.yml", "backend/requirements.txt")):
-            selected.update({"ai", "cad", "help", "release", "traceability"})
-    return sorted(selected) if selected else ["python-full", "ui", "rust"]
+            selected.update({"ai", "cad", "help", "release", "traceability", "ui", "rust", "ci"})
+    return sorted(selected)
 
 
 def git_commit():

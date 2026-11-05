@@ -40,10 +40,10 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.config/printforge/updater.key
 1. Установить одинаковую SemVer-версию в `app/package.json`, `app/ui/package.json`, `app/src-tauri/Cargo.toml` и `app/src-tauri/tauri.conf.json`.
 2. Обновить lockfiles командами `npm install --package-lock-only` в `app` и `app/ui`, затем выполнить `cargo check` в `app/src-tauri`.
 3. Проверить согласованность: `python3 scripts/check_release_version.py`.
-4. Создать и отправить тег той же версии, например `v0.1.0`.
+4. Подготовить release notes `docs/releases/v<version>.md`, обновить README, создать и отправить тег той же версии, например `v0.4.0`.
 5. Workflow `.github/workflows/release.yml` соберёт три native installers, updater artifacts, signatures и `latest.json` в draft GitHub Release.
 6. Windows job установит собранный NSIS в silent mode, проверит установленный binary/sidecar и измерит native startup/FPS/RSS. Installer/payload проверки блокируют выпуск; performance сохраняется без изменения результата как отдельная оценка hosted runner. JSON и логи публикуются в workflow artifact `windows-release-evidence-*`.
-7. Проверить assets, Windows evidence и опубликовать draft. Только опубликованный release становится доступен установленным приложениям.
+7. После успешного завершения всех трёх native jobs workflow автоматически публикует draft с release notes из `docs/releases/v<version>.md`. Если хотя бы одна сборка или blocking-проверка не прошла, release остаётся draft. Проверить состав assets, Windows evidence и публичный `latest.json`. Только опубликованный release становится доступен установленным приложениям.
 
 Ручной `workflow_dispatch` также создаёт draft для версии из Tauri config.
 
@@ -58,6 +58,10 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.config/printforge/updater.key
 5. На Windows installer закрывает приложение; на macOS приложение перезапускается после установки.
 
 Endpoint обновлений фиксирован: `https://github.com/yakut-sekonts/printforge/releases/latest/download/latest.json`.
+
+## Совместимость проектов
+
+PrintForge v0.4 открывает проекты прежних версий. Документы без новых примитивов и операций сохраняются в schema version 3. Примитивы box/cylinder/sphere, face offset или новое разделение на отдельные части требуют schema version 4; для открытия такого проекта нужен PrintForge v0.4 или новее. Старые версии отклоняют такой документ с явным требованием обновить приложение.
 
 ## Локальная проверка release artifact
 

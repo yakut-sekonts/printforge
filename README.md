@@ -4,11 +4,11 @@
 [![Tests](https://github.com/yakut-sekonts/printforge/actions/workflows/ci.yml/badge.svg)](https://github.com/yakut-sekonts/printforge/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/yakut-sekonts/printforge)](LICENSE)
 
-Опенсорс настольное приложение для точного 3D-моделирования деталей под 3D-печать. PrintForge объединяет параметрическое CAD-ядро, простой русскоязычный интерфейс, встроенное обучение и управляемого AI-помощника.
+Опенсорс настольное CAD-приложение для моделирования деталей под 3D-печать. Начните с простой фигуры, выберите нужную грань или ребро и задайте действие прямо в сцене. PrintForge объединяет точное CAD-ядро, русскоязычные подсказки, встроенное обучение и управляемого AI-помощника.
 
 ## Скачать
 
-Текущий релиз: **[PrintForge v0.3.0](https://github.com/yakut-sekonts/printforge/releases/tag/v0.3.0)** · [что нового](docs/releases/v0.3.0.md).
+Текущий релиз: **[PrintForge v0.4.0](https://github.com/yakut-sekonts/printforge/releases/tag/v0.4.0)** · [что нового](docs/releases/v0.4.0.md).
 
 - macOS Apple Silicon: DMG для Mac на M1/M2/M3/M4 и новее.
 - macOS Intel: DMG для Mac на Intel.
@@ -20,12 +20,17 @@
 
 ## Возможности
 
+- Модель начинается с визуального выбора параллелепипеда, цилиндра или сферы. Новые формы добавляются прямо в сцене через `+ Форма`.
+- Выбор грани и прямого или криволинейного ребра непосредственно в сцене; context bar объясняет, какая область выбрана и какие действия доступны.
+- Ручное перемещение через XYZ-gizmo с живым смещением в миллиметрах и точным вводом. Push/Pull смещает поддерживаемые плоские BRep-грани, в том числе после операций над телом; криволинейные поверхности пока не поддерживаются.
+- Multi-selection тел и явный выбор основного тела и инструмента для объединения/вычитания; разделение плоскостью создаёт отдельные выбираемые части. Скругление и фаска доступны рядом с моделью с точным вводом размеров.
+- Основные действия находятся в сцене; расширенные параметры и заготовки собраны в раскрываемом Inspector. Первые уроки проходят сценарий «примитив → выбранная область → действие».
 - Параметрические детали, профили, выдавливание, отверстия, скругления, булевы операции, массивы, зеркало, выравнивание и разделение тел.
-- M4-контур расширенного моделирования: эскизные тела и constraint solver с residual/DOF, sweep/loft, оболочка, уклон, ребро, посадки, безопасное SVG/DXF, текстовый BRep-рельеф, настоящая резьбовая пара, калибровка зазоров и разделение со штифтами. Отдельный persistent mesh workflow поддерживает transform, repair конкретного отверстия, topology-aware decimation и experimental image heightmap preview/Apply. Direct canvas Sketcher, generic face tools и general self-intersection repair ещё в разработке.
+- M4-контур расширенного моделирования: эскизные тела и constraint solver с residual/DOF, sweep/loft, оболочка, уклон, ребро, посадки, безопасное SVG/DXF, текстовый BRep-рельеф, настоящая резьбовая пара, калибровка зазоров и разделение со штифтами. Отдельный persistent mesh workflow поддерживает transform, repair конкретного отверстия, topology-aware decimation и experimental image heightmap preview/Apply. Direct canvas Sketcher, редактирование криволинейных поверхностей и general self-intersection repair ещё в разработке.
 - Прямое редактирование поддерживаемых граней и рёбер: Push/Pull размеров, локальные бобышки и blind/through отверстия, сферические выпуклости/вмятины, каскад до четырёх параллельных sheet-metal изгибов и перпендикулярный изгиб выбранного фланца после базового изгиба 90°, перенос четырёх through-профилей на прямые участки и через одну перпендикулярную bend-зону, прямоугольного профиля через две параллельные bend-зоны, скругления и фаски с точными параметрами и одним шагом Undo на операцию.
 - Готовые шаблоны пластины, шайбы/втулки, L-кронштейна и корпуса с крышкой.
 - Импорт STEP/STL и экспорт STEP/STL/3MF.
-- Формат проекта `.printforge`, автосохранение, Undo/Redo и транзакционное применение операций.
+- Формат проекта `.printforge`, автосохранение, Undo/Redo и транзакционное применение операций. Старые проекты открываются в v0.4; проекты с новым face offset или разделением на отдельные части требуют v0.4 или новее.
 - Проверка геометрии и размещения на столе принтера без ложного общего статуса «готово» для непроверенных параметров.
 - Офлайн-справка, контекстный режим «Что это?» и интерактивные уроки.
 - AI-помощник с локальным Ollama или OpenAI-compatible endpoint: отменяемый запрос с task ID, JSON-план, точный preview и явное подтверждение до применения; справочные ответы работают offline по встроенному индексу и показывают только зарегистрированные команды.
@@ -39,7 +44,7 @@
 
 - Desktop: Tauri 2 и Rust; интерфейс TypeScript, React и Three.js.
 - Геометрия: отдельный Python-процесс, build123d + OCP (Open CASCADE), упаковывается PyInstaller в sidecar; transport death допускает один bounded restart/retry полного snapshot, длительную операцию можно остановить из status bar.
-- Документ: собственный формат `.printforge` (zip: manifest.json + document.json + assets/).
+- Документ: собственный формат `.printforge` (zip: manifest.json + document.json + assets/). Новые примитивы, смещение граней и разделение на отдельные тела требуют schema version 4 и PrintForge v0.4+; проекты без этих возможностей сохраняются в прежней schema version 3.
 - Viewport mesh: бинарный little-endian ресурс, raw Tauri `ArrayBuffer`, SHA-256 binding и typed arrays без JSON-сериализации positions/indices.
 
 ## Разработка
@@ -79,7 +84,7 @@ backend/.venv/bin/python scripts/run_test_stage.py --scope full
 backend/.venv/bin/python scripts/run_test_stage.py --scope changed
 ```
 
-CI выполняет полный детерминированный stage: Python integration tests, TypeScript/Vite build, Rust tests, help integrity, traceability и release version checks. Стратегия, traceability и известные gaps: [TEST_STRATEGY.md](docs/testing/TEST_STRATEGY.md), [requirements.yaml](docs/testing/requirements.yaml), [TEST_GAPS.md](docs/testing/TEST_GAPS.md).
+Для push и PR CI определяет изменённые файлы относительно предыдущего commit или базы PR и проверяет затронутые компоненты со связанными контрактами. Полный deterministic stage выполняется по nightly-расписанию, при ручном запуске или отсутствии доступной базы сравнения. Стратегия, traceability и известные gaps: [TEST_STRATEGY.md](docs/testing/TEST_STRATEGY.md), [requirements.yaml](docs/testing/requirements.yaml), [TEST_GAPS.md](docs/testing/TEST_GAPS.md).
 
 Воспроизводимый component performance smoke запускается отдельно и сохраняет JSON-отчёт в `artifacts/perf/`:
 

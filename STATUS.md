@@ -1,6 +1,18 @@
 # STATUS.md — статус PrintForge
 
-Обновлено: 2026-11-03. Этап: M4 в работе. Все группы `EXT-001…EXT-012` имеют рабочий partial slice и automated evidence: BRep-моделирование, constraint solver, persistent mesh repair/decimation и experimental image heightmap workflow. Открытые generic/direct-editing clauses перечислены в `docs/testing/TEST_GAPS.md`; Windows installer evidence пройден, hosted-runner performance targets зафиксированы отдельно и не выданы за control-machine pass.
+Обновлено: 2026-11-03. M5 interaction-first CAD реализован для v0.4.0. M4 сохраняет открытые расширенные задачи: все группы `EXT-001…EXT-012` имеют рабочий partial slice, оставшиеся generic/direct-editing clauses перечислены в `docs/testing/TEST_GAPS.md`.
+
+## M5 — ручной CAD v0.4.0
+
+- Старт с BRep-примитива, прямой выбор грани/ребра, XYZ-перемещение и числовой ввод в сцене, Shift multi-selection и явные target/tool для boolean operations.
+- Generic planar face offset поддерживает внутренние, наклонные и изменённые булевыми операциями грани. Curved face offset остаётся неподдерживаемым.
+- Split создаёт отдельно выбираемые и перемещаемые части, сохраняет все solids и объём; координаты плоскостей задаются в мировых X/Y/Z.
+- Inspector свёрнут по группам; первые уроки и 35 статей/62 команды согласованы с новым сценарием. Новый вводный урок пройден до завершения в реальном UI.
+- Примитивы и новые операции сохраняются в schema 4; legacy-проекты остаются schema 3. Ошибки face offset/split не уничтожают Redo или подтверждённую геометрию.
+- Impact stage `artifacts/test-runs/20261103T152525Z/test-report.json`: CAD/document/worker 178 passed, AI 51, CI routing 14, help/release/traceability 15, Rust 16; UI contracts и production build прошли. Последующие проверки координат разделения: 9 passed.
+- Push/PR CI запускает изменённые компоненты и их связи. Полный regression сохранён для nightly и явного manual dispatch.
+- Native smoke выявил и закрыл несовпадение snake_case/camelCase аргументов Tauri IPC: преобразуются только верхнеуровневые имена, вложенные CAD/AI данные сохранены; 4 transport contract tests проходят.
+- Итоговая ad-hoc signed `.app` проходит `codesign --verify --deep --strict`; в реальном WKWebView выполнены box → face offset 5 мм → transform X 10 мм → separate split X=10 → save/reopen schema 4. Проверочный проект сохранён отдельно в `/private/tmp/printforge-040-native-smoke.printforge`.
 
 ## Что пользователь уже может сделать
 
@@ -11,7 +23,7 @@
 - Constraint solver показывает residual/DOF, отличает conflict от compatible redundancy, поддерживает constrained drag и применяет extrusion одной транзакцией.
 - Experimental image relief: PNG/JPEG/WebP preview без commit, hash-bound Apply, фиксированный model/seed/settings и mesh-only export.
 - Проверка перед печатью: валидность, тела, объём, габарит vs профиль принтера; «Не проверено» для нереализованного, без общего зелёного статуса.
-- Справка офлайн (34 статьи, 58 команд), поиск с синонимами, «Что это?», «Показать в интерфейсе», 3 режима подсказок, 13 уроков.
+- Справка офлайн (35 статей, 62 команды), поиск с синонимами, «Что это?», «Показать в интерфейсе», 3 режима подсказок, 13 уроков.
 - AI-помощник: `disabled` по умолчанию, локальный Ollama или OpenAI-совместимый endpoint; UI явно показывает передаваемые данные, проверяет `/models`, хранит API key в системном хранилище и показывает JSON-план с геометрическим preview до применения.
 
 ## Срез M4: оставшиеся EXT-группы (2026-11-03)

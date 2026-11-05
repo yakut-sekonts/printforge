@@ -1,5 +1,5 @@
 import type {
-  FaceAxis, FaceDomeArgs, FaceFeatureArgs, FaceFeatureProfile, MeshData, PartDef, SheetBendArgs,
+  FaceAxis, FaceDomeArgs, FaceFeatureArgs, FaceFeatureProfile, FaceOffsetRef, MeshData, PartDef, SheetBendArgs,
   TemplateDef,
 } from "./types";
 
@@ -17,6 +17,8 @@ export interface FaceAnalysis {
 
 export interface FaceEditTarget extends FaceAnalysis {
   partId: string;
+  mode?: "parameter" | "offset";
+  faceRef?: FaceOffsetRef;
   parameter: string;
   label: string;
   current: number;
@@ -62,24 +64,40 @@ function normalize(vector: [number, number, number]): [number, number, number] {
     : [0, 0, 0];
 }
 
-function meshBounds(mesh: MeshData): {
+function meshBounds(mesh: MeshData, solidIndices?: number[]): {
   min: [number, number, number];
   max: [number, number, number];
-} {
+} | null {
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-  for (let offset = 0; offset < mesh.positions.length; offset += 3) {
+  const selected = solidIndices == null ? null : new Set(solidIndices);
+  const vertices = new Set<number>();
+  if (selected) {
+    for (const range of mesh.face_ranges) {
+      if (range.solid_index == null || !selected.has(range.solid_index)) continue;
+      for (let triangle = range.tri_start; triangle < range.tri_start + range.tri_count; triangle += 1) {
+        for (let corner = 0; corner < 3; corner += 1) vertices.add(mesh.indices[triangle * 3 + corner]);
+      }
+    }
+  } else {
+    for (let vertex = 0; vertex < mesh.positions.length / 3; vertex += 1) vertices.add(vertex);
+  }
+  if (vertices.size === 0) return null;
+  for (const vertex of vertices) {
     for (let axis = 0; axis < 3; axis += 1) {
-      min[axis] = Math.min(min[axis], mesh.positions[offset + axis]);
-      max[axis] = Math.max(max[axis], mesh.positions[offset + axis]);
+      min[axis] = Math.min(min[axis], mesh.positions[vertex * 3 + axis]);
+      max[axis] = Math.max(max[axis], mesh.positions[vertex * 3 + axis]);
     }
   }
   return { min, max };
 }
 
-export function analyzeFace(mesh: MeshData, faceIndex: number): FaceAnalysis | null {
+export function analyzeFace(mesh: MeshData, faceIndex: number, solidIndices?: number[]): FaceAnalysis | null {
   const range = mesh.face_ranges.find((candidate) => candidate.face_index === faceIndex);
   if (!range || range.tri_count === 0) return null;
+  if (solidIndices && (range.solid_index == null || !solidIndices.includes(range.solid_index))) return null;
+  const bounds = meshBounds(mesh, solidIndices);
+  if (!bounds) return null;
 
   let area = 0;
   const weightedCenter: [number, number, number] = [0, 0, 0];
@@ -131,7 +149,6 @@ export function analyzeFace(mesh: MeshData, faceIndex: number): FaceAnalysis | n
     ? (["x", "y", "z"] as const)[dominantIndex]
     : null;
 
-  const bounds = meshBounds(mesh);
   const side: -1 | 1 = axis
     ? (averagedNormal[AXIS_INDEX[axis]] >= 0 ? 1 : -1)
     : 1;
@@ -152,11 +169,13 @@ export function resolveFaceFeatureTarget(
   mesh: MeshData,
   faceIndex: number,
   partId: string,
+  solidIndices?: number[],
 ): FaceFeatureTarget | null {
-  const face = analyzeFace(mesh, faceIndex);
+  const face = analyzeFace(mesh, faceIndex, solidIndices);
   if (!face?.planar || !face.axis || !face.atBoundary) return null;
 
-  const bounds = meshBounds(mesh);
+  const bounds = meshBounds(mesh, solidIndices);
+  if (!bounds) return null;
   const axes: Record<FaceAxis, [FaceAxis, FaceAxis]> = {
     x: ["y", "z"],
     y: ["x", "z"],
@@ -185,12 +204,14 @@ export function resolveSheetBendTarget(
   mesh: MeshData,
   faceIndex: number,
   partId: string,
+  solidIndices?: number[],
 ): FaceFeatureTarget | null {
-  const face = analyzeFace(mesh, faceIndex);
+  const face = analyzeFace(mesh, faceIndex, solidIndices);
   if (!face?.planar || !face.axis || !face.atBoundary) return null;
   if (face.axis === "z" && face.side !== 1) return null;
 
-  const bounds = meshBounds(mesh);
+  const bounds = meshBounds(mesh, solidIndices);
+  if (!bounds) return null;
   const boundsCenter = (axis: 0 | 1 | 2) => (bounds.min[axis] + bounds.max[axis]) / 2;
   const axes: Record<FaceAxis, [FaceAxis, FaceAxis]> = {
     x: ["y", "z"],
@@ -305,8 +326,9 @@ export function resolveFaceEditTarget(
   faceIndex: number,
   part: PartDef,
   template: TemplateDef,
+  solidIndices?: number[],
 ): FaceEditTarget | null {
-  const face = analyzeFace(mesh, faceIndex);
+  const face = analyzeFace(mesh, faceIndex, solidIndices);
   if (!face?.planar || !face.axis || !face.atBoundary) return null;
 
   let parameter: string | null = null;
@@ -314,7 +336,13 @@ export function resolveFaceEditTarget(
   let deltaFactor = 1;
   let symmetric = false;
 
-  if (part.template === "plate_with_holes") {
+  if (part.template === "box") {
+    if (face.axis === "x") [parameter, label, deltaFactor, symmetric] = ["length", "Длина", 2, true];
+    if (face.axis === "y") [parameter, label, deltaFactor, symmetric] = ["width", "Ширина", 2, true];
+    if (face.axis === "z" && face.side > 0) [parameter, label] = ["height", "Высота"];
+  } else if (part.template === "cylinder") {
+    if (face.axis === "z" && face.side > 0) [parameter, label] = ["height", "Высота"];
+  } else if (part.template === "plate_with_holes") {
     if (face.axis === "x") [parameter, label, deltaFactor, symmetric] = ["length", "Длина", 2, true];
     if (face.axis === "y") [parameter, label, deltaFactor, symmetric] = ["width", "Ширина", 2, true];
     if (face.axis === "z" && face.side > 0) [parameter, label] = ["height", "Высота"];
@@ -337,12 +365,41 @@ export function resolveFaceEditTarget(
   return {
     ...face,
     partId: part.part_id,
+    mode: "parameter",
     parameter,
     label: parameterDefinition?.label ?? label,
     current,
     minimum: Math.max(minimumFor(part, parameter), parameterDefinition?.min ?? 0.1),
     deltaFactor,
     symmetric,
+  };
+}
+
+export function resolveGenericFaceEditTarget(
+  mesh: MeshData,
+  faceIndex: number,
+  partId: string,
+  solidIndices?: number[],
+): FaceEditTarget | null {
+  const range = mesh.face_ranges.find((candidate) => candidate.face_index === faceIndex);
+  const faceRef = range?.face_ref;
+  if (!faceRef || faceRef.kind !== "planar") return null;
+  const face = analyzeFace(mesh, faceIndex, solidIndices);
+  if (!face?.planar) return null;
+  return {
+    ...face,
+    partId,
+    mode: "offset",
+    faceRef,
+    center: faceRef.center,
+    normal: normalize(faceRef.normal),
+    area: faceRef.area,
+    parameter: "",
+    label: "Смещение грани",
+    current: 0,
+    minimum: -Infinity,
+    deltaFactor: 1,
+    symmetric: false,
   };
 }
 

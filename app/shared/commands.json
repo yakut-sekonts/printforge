@@ -18,6 +18,30 @@
       "params": []
     },
     {
+      "command_id": "part.create.box",
+      "title": "Создать параллелепипед",
+      "help_id": "primitivy",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "part.create.cylinder",
+      "title": "Создать цилиндр",
+      "help_id": "primitivy",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
+      "command_id": "part.create.sphere",
+      "title": "Создать сферу",
+      "help_id": "primitivy",
+      "shortcut": null,
+      "availability": "always",
+      "params": []
+    },
+    {
       "command_id": "part.create.plate",
       "title": "Создать пластину",
       "help_id": "shablon-plastina",
@@ -371,6 +395,21 @@
       "availability": "requires_body",
       "disabled_reason": "Сначала создайте деталь",
       "params": []
+    },
+    {
+      "command_id": "op.face_offset",
+      "title": "Потянуть плоскую грань",
+      "help_id": "primitivy",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Создайте деталь и выберите плоскую грань",
+      "params": [
+        {
+          "name": "distance",
+          "unit": "mm",
+          "desc": "Смещение вдоль наружной нормали: плюс добавляет, минус убирает материал"
+        }
+      ]
     },
     {
       "command_id": "op.face_dome",

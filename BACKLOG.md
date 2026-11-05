@@ -64,6 +64,24 @@
 - [x] Native E2E cancellation во время HTTP/CAD preview: реальный WebView/Tauri IPC, разрыв provider socket, kill CAD sidecar, отсутствие мутации и восстановление worker
 - [x] Quality gate реальной модели: `qwen3:4b` Q4_K_M, 20 запросов × 3 прогона; simple-valid 83,3%, остальные обязательные gates 100%
 
+## M5 — interaction-first CAD v0.4 (реализован)
+- [x] Новый старт: визуальный выбор BRep-примитива `box`, `cylinder` или `sphere`; готовые заготовки оставлены вторичным путём
+- [x] Context bar над сценой: выбранная область, доступные действия и следующий понятный шаг
+- [x] Выбор тела по `solid_index` кликом по его грани в многодетальном документе
+- [x] XYZ-gizmo перемещения тела: drag, живое смещение в миллиметрах, одна операция `transform` и один Undo
+- [x] Добавление второго примитива прямо из viewport через `+ Форма`
+- [x] Context actions для `union`, `subtract`, `split`, `fillet` и `chamfer`
+- [x] Push/Pull граней примитива `box` и высоты `cylinder`
+- [x] Единый hit-testing тела, грани и прямого/криволинейного ребра без предварительного включения edge mode
+- [x] On-canvas точный ввод для transform, Push/Pull, fillet/chamfer и split plane с preview плоскости
+- [x] Generic planar face offset, включая внутренние и наклонные плоские грани после операций
+- [x] Multi-selection тел в viewport и списке деталей, явный выбор target/tool для boolean operations
+- [x] Перенести длинные parameter/preset формы в вторичный раскрываемый Inspector
+- [x] Переписать первые уроки под сценарий «примитив → выбор области → контекстное действие»
+- [x] Независимые части после split без потери solids; точные мировые координаты XY/XZ/YZ
+- [x] Атомарные face offset и separate split: failed edit после Undo сохраняет Redo и сохранённый документ
+- [x] Schema 4 для примитивов и новых операций; legacy-проекты остаются schema 3
+
 ## M4 — P2 v1.0
 - [ ] EXT-001 — произвольный эскиз
   - [x] Kernel: line/arc/circle-контуры, несколько областей, внутренние отверстия, выдавливание и явные ошибки невалидного контура

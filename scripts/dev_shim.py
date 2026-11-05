@@ -147,6 +147,9 @@ def geo_error(code, message):
 
 
 DEFAULTS = {
+    "box": {"length": 40, "width": 30, "height": 20},
+    "cylinder": {"diameter": 30, "height": 30},
+    "sphere": {"diameter": 30},
     "plate_with_holes": {"length": 80, "width": 40, "height": 6,
                          "hole_diameter": 4, "hole_offset": 10},
     "washer": {"outer_diameter": 20, "inner_diameter": 6, "height": 4},
@@ -213,7 +216,8 @@ class Doc:
     def add_part(self, template, params, name=None):
         self._part_n += 1
         pid = f"part-{self._part_n}"
-        titles = {"plate_with_holes": "Пластина", "washer": "Шайба",
+        titles = {"box": "Параллелепипед", "cylinder": "Цилиндр", "sphere": "Сфера",
+                  "plate_with_holes": "Пластина", "washer": "Шайба",
                   "bracket_l": "Кронштейн", "case_with_lid": "Корпус"}
         self.parts.append({"part_id": pid, "name": name or titles.get(template, template),
                            "template": template,
@@ -326,6 +330,26 @@ def _apply_op(a, op):
     return d.state(ACTIVE[0])
 
 
+def _apply_atomic_op(a, operation):
+    document = doc()
+    base_revision = document.revision
+    candidate = copy.deepcopy(document)
+    candidate.operations.append(operation)
+    candidate.rebuild()
+    if doc() is not document or document.revision != base_revision:
+        raise geo_error("document_changed", "Документ изменился перед применением операции.")
+    if candidate.error:
+        document.error = candidate.error
+        return document.state(ACTIVE[0])
+    document.restore(candidate.snapshot())
+    document.commit()
+    document.revision = candidate.revision
+    document.stats = candidate.stats
+    document.mesh = candidate.mesh
+    document.error = None
+    return document.state(ACTIVE[0])
+
+
 def cmd_doc_add_part(a):
     d = doc()
     if not d.parts:
@@ -358,9 +382,12 @@ def cmd_doc_mirror(a):
 
 
 def cmd_doc_split(a):
-    return _apply_op(a, {"op": "split", "part_id": a["part_id"],
-                         "plane": a.get("plane", "XZ"),
-                         "offset": float(a.get("offset", 0))})
+    operation = {"op": "split", "part_id": a["part_id"],
+                 "plane": a.get("plane", "XZ"), "offset": a.get("offset", 0)}
+    if a.get("separate", False):
+        operation["separate"] = True
+        return _apply_atomic_op(a, operation)
+    return _apply_op(a, operation)
 
 
 def cmd_doc_transform(a):
@@ -586,6 +613,15 @@ def cmd_doc_split_connector_pair(a):
     })
 
 
+def cmd_doc_face_offset(a):
+    return _apply_atomic_op(a, {
+        "op": "face_offset",
+        "target_id": a["target_id"],
+        "face_ref": a["face_ref"],
+        "distance": a["distance"],
+    })
+
+
 def cmd_doc_face_feature(a):
     mode = a.get("mode")
     if mode not in ("add", "cut"):
@@ -732,10 +768,17 @@ def cmd_doc_get_mesh(a):
 
 def save_doc(d, path):
     tmp = path.with_suffix(".printforge.tmp")
-    manifest = {"schema_version": 3, "app": "PrintForge",
+    requires_schema_four = any(
+        part.get("template") in ("box", "cylinder", "sphere") for part in d.parts
+    ) or any(
+        operation.get("op") == "face_offset" or
+        (operation.get("op") == "split" and operation.get("separate", False))
+        for operation in d.operations)
+    schema_version = 4 if requires_schema_four else 3
+    manifest = {"schema_version": schema_version, "app": "PrintForge",
                 "app_version": "0.1.0-m2", "units": "mm",
                 "kernel": "build123d/OCP"}
-    document = {"schema_version": 3, "units": "mm",
+    document = {"schema_version": schema_version, "units": "mm",
                 "document_id": d.doc_id, "template": d.template,
                 "parts": d.parts,
                 "parameters": d.params, "expressions": d.expressions,
@@ -764,7 +807,7 @@ def cmd_doc_open(a):
     except (zipfile.BadZipFile, KeyError, json.JSONDecodeError):
         raise geo_error("bad_file", "Это не файл проекта PrintForge или файл повреждён.")
     schema_version = int(document.get("schema_version", 1))
-    if schema_version > 3:
+    if schema_version > 4:
         raise geo_error(
             "unsupported_project_version",
             f"Проект создан в более новой версии формата ({schema_version}). Обновите PrintForge.")
@@ -1202,6 +1245,7 @@ HANDLERS = {
     "doc_thread_pair": cmd_doc_thread_pair,
     "doc_clearance_calibration": cmd_doc_clearance_calibration,
     "doc_split_connector_pair": cmd_doc_split_connector_pair,
+    "doc_face_offset": cmd_doc_face_offset,
     "doc_face_feature": cmd_doc_face_feature,
     "doc_face_dome": cmd_doc_face_dome,
     "doc_sheet_bend": cmd_doc_sheet_bend,

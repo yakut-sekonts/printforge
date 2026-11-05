@@ -11,16 +11,19 @@ export interface EdgeRef {
   midpoint: [number, number, number];
   p0?: [number, number, number] | null;
   p1?: [number, number, number] | null;
+  points?: Point3[];
 }
 
 export interface Operation {
   op: string;
+  separate?: boolean;
   radius?: number;
   distance?: number;
   edge_ref?: EdgeRef;
   target_id?: string;
+  part_id?: string;
   mode?: "add" | "cut";
-  face_ref?: FaceFeatureRef;
+  face_ref?: FaceFeatureRef | FaceOffsetRef;
   profile?: FaceFeatureProfile | SketchProfile;
   sketch?: ConstrainedSketch;
   drag?: SketchDrag;
@@ -325,6 +328,20 @@ export interface FaceFeatureRef {
   selected_area: number;
 }
 
+export interface FaceOffsetRef {
+  kind: "planar";
+  solid_index: number;
+  center: Point3;
+  normal: Point3;
+  area: number;
+}
+
+export interface FaceOffsetArgs {
+  target_id: string;
+  face_ref: FaceOffsetRef;
+  distance: number;
+}
+
 export type FaceProfileKind = "rectangle" | "circle" | "ring" | "slot";
 
 export interface FaceFeatureProfile {
@@ -434,6 +451,7 @@ export interface FaceRange {
   tri_start: number;
   tri_count: number;
   solid_index?: number;
+  face_ref?: FaceOffsetRef | null;
 }
 
 export interface MeshData {
@@ -471,7 +489,7 @@ export interface MeshResource {
   sha256: string;
   vertex_count: number;
   triangle_count: number;
-  face_ranges: { face_index: number; solid_index?: number; tri_start: number; tri_count: number }[];
+  face_ranges: FaceRange[];
 }
 
 export type MeshResourceMetadata = Omit<MeshResource, "path">;
@@ -606,6 +624,7 @@ export interface TemplateParam {
 
 export interface TemplateDef {
   template_id: string;
+  kind?: "primitive" | "preset";
   title: string;
   command_id: string;
   help_id: string;
@@ -646,6 +665,7 @@ export interface LessonStep {
 }
 
 export interface Lesson {
+  content_version?: number;
   lesson_id: string;
   title: string;
   goal: string;

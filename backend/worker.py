@@ -3,7 +3,10 @@
 Отдельный процесс. Протокол: JSON Lines в stdout, запросы из stdin,
 диагностика — stderr. Сетки — бинарным ресурсом (файл + sha256).
 
-Шаблоны (точная BRep через build123d/OCP):
+Шаблоны и примитивы (точная BRep через build123d/OCP):
+- box: прямоугольный параллелепипед L×W×H.
+- cylinder: цилиндр ØD×H.
+- sphere: сфера ØD, установленная на плоскость Z=0.
 - plate_with_holes: пластина L×W×H, 4 сквозных отверстия ØD, отступ O (AC-01).
 - washer: шайба OD×ID×H (AC-02).
 - bracket_l: L-кронштейн из двух блоков с общим началом координат (AC-04).
@@ -48,6 +51,34 @@ class GeometryError(Exception):
 
 
 # ---------- шаблоны ----------
+
+def _positive_params(params, *names):
+    invalid = [name for name in names if float(params[name]) <= 0]
+    if invalid:
+        raise GeometryError(
+            "bad_params",
+            f"Размеры должны быть больше нуля: {', '.join(invalid)}.")
+
+
+def build_box(p):
+    from build123d import Box, Pos
+    _positive_params(p, "length", "width", "height")
+    length, width, height = p["length"], p["width"], p["height"]
+    return Pos(0, 0, height / 2) * Box(length, width, height), {}
+
+
+def build_cylinder(p):
+    from build123d import Cylinder, Pos
+    _positive_params(p, "diameter", "height")
+    diameter, height = p["diameter"], p["height"]
+    return Pos(0, 0, height / 2) * Cylinder(radius=diameter / 2, height=height), {}
+
+
+def build_sphere(p):
+    from build123d import Pos, Sphere
+    _positive_params(p, "diameter")
+    radius = p["diameter"] / 2
+    return Pos(0, 0, radius) * Sphere(radius=radius), {}
 
 def build_plate(p):
     from build123d import Box, Cylinder, Pos
@@ -122,6 +153,12 @@ def build_case(p):
 
 
 TEMPLATES = {
+    "box": (build_box, {
+        "length": 40.0, "width": 30.0, "height": 20.0}),
+    "cylinder": (build_cylinder, {
+        "diameter": 30.0, "height": 30.0}),
+    "sphere": (build_sphere, {
+        "diameter": 30.0}),
     "plate_with_holes": (build_plate, {
         "length": 80.0, "width": 40.0, "height": 6.0,
         "hole_diameter": 4.0, "hole_offset": 10.0}),
@@ -153,12 +190,21 @@ def edge_signature(edge, solid_index):
         p1 = tuple(round(v, 4) for v in edge.end_point())
     except Exception:  # noqa: BLE001
         p0 = p1 = None
+    point_count = 2 if str(edge.geom_type).split(".")[-1] == "LINE" else 65
+    try:
+        points = [
+            [round(value, 6) for value in edge.position_at(index / (point_count - 1))]
+            for index in range(point_count)
+        ]
+    except Exception:  # noqa: BLE001
+        points = []
     return {
         "solid_index": solid_index,
         "kind": str(edge.geom_type).split(".")[-1],
         "length": round(edge.length, 4),
         "midpoint": [round(c.X, 4), round(c.Y, 4), round(c.Z, 4)],
         "p0": p0, "p1": p1,
+        "points": points,
     }
 
 
@@ -255,6 +301,21 @@ def apply_operations(part, operations):
 
 # ---------- сетка и статистика ----------
 
+def face_offset_reference(face, solid_index):
+    from build123d import CenterOf, GeomType
+    if face.geom_type != GeomType.PLANE:
+        return None
+    center = face.center(CenterOf.MASS)
+    normal = face.normal_at()
+    return {
+        "kind": "planar",
+        "solid_index": solid_index,
+        "center": [round(value, 6) for value in center],
+        "normal": [round(value, 9) for value in normal],
+        "area": round(face.area, 6),
+    }
+
+
 def mesh_resource(part, name, tol=0.1):
     positions, indices, face_ranges = [], [], []
     v_off = 0
@@ -269,7 +330,8 @@ def mesh_resource(part, name, tol=0.1):
                 indices.extend((int(a) + v_off, int(b) + v_off, int(c) + v_off))
             face_ranges.append({"face_index": fi, "solid_index": si,
                                 "tri_start": len(indices) // 3 - len(tris),
-                                "tri_count": len(tris)})
+                                "tri_count": len(tris),
+                                "face_ref": face_offset_reference(face, si)})
             fi += 1
             v_off += len(verts)
     blob = struct.pack("<II", len(positions) // 3, len(indices) // 3)
@@ -851,6 +913,88 @@ def _face_profile_prism(profile, depth):
         )
         return Rotation(0, 0, 90) * slot if profile.get("_quarter_turn") else slot
     raise GeometryError("bad_params", f"Неизвестный профиль: {kind}")
+
+
+def _match_offset_face(target, reference):
+    from build123d import CenterOf, GeomType
+    if not isinstance(reference, dict) or reference.get("kind") != "planar":
+        raise GeometryError(
+            "unsupported_face",
+            "Тянуть можно только плоскую грань. Выберите плоскую область модели.")
+    try:
+        center = [float(value) for value in reference["center"]]
+        normal = [float(value) for value in reference["normal"]]
+        area = float(reference["area"])
+        if (len(center) != 3 or len(normal) != 3 or
+                not all(math.isfinite(value) for value in center + normal + [area]) or
+                area <= 0):
+            raise ValueError
+        normal_length = math.sqrt(sum(value * value for value in normal))
+        if normal_length <= 1e-9:
+            raise ValueError
+        normal = [value / normal_length for value in normal]
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise GeometryError(
+            "bad_ref", "Ссылка на грань повреждена. Выберите грань заново.") from exc
+    candidates = []
+    for solid_index, solid in enumerate(target.solids()):
+        for face in solid.faces():
+            if face.geom_type != GeomType.PLANE:
+                continue
+            if abs(face.area - area) > max(1e-4, area * 1e-6):
+                continue
+            if math.dist(tuple(face.center(CenterOf.MASS)), center) > 1e-4:
+                continue
+            alignment = sum(value * expected for value, expected in zip(face.normal_at(), normal))
+            if alignment > 1 - 1e-7:
+                candidates.append((solid_index, solid, face))
+    if len(candidates) != 1:
+        raise GeometryError(
+            "reselect_required",
+            "Грань изменилась после перестроения или выбор неоднозначен. Выберите грань заново.")
+    return candidates[0]
+
+
+def _apply_face_offset(target, operation):
+    from build123d import Compound, extrude
+    try:
+        distance = float(operation["distance"])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise GeometryError("bad_params", "Введите ненулевое смещение грани в миллиметрах.") from exc
+    if not math.isfinite(distance) or abs(distance) < 1e-6:
+        raise GeometryError("bad_params", "Введите ненулевое смещение грани в миллиметрах.")
+    solid_index, solid, face = _match_offset_face(target, operation.get("face_ref"))
+    direction = [value * (1 if distance > 0 else -1) for value in face.normal_at()]
+    try:
+        prism = extrude(face, amount=abs(distance), dir=direction)
+        result = solid + prism if distance > 0 else solid - prism
+        expected_change = face.area * abs(distance)
+        tolerance = max(1e-4, expected_change * 1e-6)
+        actual_change = (result.volume - solid.volume) * (1 if distance > 0 else -1)
+        if (not result.is_valid or len(result.solids()) != 1 or
+                result.volume <= 1e-8 or abs(actual_change - expected_change) > tolerance):
+            raise GeometryError(
+                "face_offset_failed",
+                "Смещение пересекает другие поверхности, разделяет или удаляет тело. "
+                "Уменьшите расстояние или выберите другую плоскую грань.")
+        solids = list(target.solids())
+        for other_index, other in enumerate(solids):
+            if other_index == solid_index:
+                continue
+            intersection = result & other
+            if intersection is not None and intersection.volume > tolerance:
+                raise GeometryError(
+                    "face_offset_failed",
+                    "Грань упирается в другую часть этой детали. Уменьшите смещение.")
+        solids[solid_index] = result
+        return result if len(solids) == 1 else Compound(children=solids)
+    except GeometryError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise GeometryError(
+            "face_offset_failed",
+            "Не удалось переместить плоскую грань. Уменьшите смещение или выберите другую грань.",
+            detail=str(exc).split("\n")[0]) from exc
 
 
 def _apply_face_feature(target, operation):
@@ -3159,6 +3303,11 @@ def apply_part_operations(parts, operations):
                 new_id = f"part-profile-{len(parts) + 1}"
                 parts[new_id] = {"shape": prism,
                                  "name": f"Профиль ({prof.get('kind')})"}
+        elif kind == "face_offset":
+            target_id = op.get("target_id")
+            if target_id not in parts:
+                raise GeometryError("bad_params", "Деталь для перемещения грани не найдена.")
+            parts[target_id]["shape"] = _apply_face_offset(parts[target_id]["shape"], op)
         elif kind == "face_feature":
             target_id = op.get("target_id")
             if target_id not in parts:
@@ -3239,23 +3388,59 @@ def apply_part_operations(parts, operations):
             parts[pid]["shape"] = _Pos(*t) * base
         elif kind == "split":
             plane = op.get("plane", "XZ")
-            off = float(op.get("offset", 0))
+            try:
+                off = float(op.get("offset", 0))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise GeometryError("bad_params", "Положение плоскости должно быть конечным числом.") from exc
+            if not math.isfinite(off):
+                raise GeometryError("bad_params", "Положение плоскости должно быть конечным числом.")
             pl = {"XY": Plane.XY, "XZ": Plane.XZ, "YZ": Plane.YZ}.get(plane)
             if pl is None:
                 raise GeometryError("bad_params", f"неизвестная плоскость: {plane}")
+            if pid not in parts:
+                raise GeometryError("bad_params", "Деталь для разделения не найдена.")
             base = parts[pid]["shape"]
             from build123d import Keep
-            cut = base.split(pl.offset(off), keep=Keep.BOTH)
-            if isinstance(cut, tuple):
-                halves = [s for part_ in cut if part_ is not None
-                          for s in part_.solids()]
-            else:
-                halves = cut.solids()
+            kernel_offset = -off if op.get("separate", False) and plane == "XZ" else off
+            cut = base.split(pl.offset(kernel_offset), keep=Keep.BOTH)
+            pending = [cut]
+            halves = []
+            while pending:
+                candidate = pending.pop(0)
+                if isinstance(candidate, (list, tuple)):
+                    pending[0:0] = candidate
+                elif candidate is not None:
+                    halves.extend(candidate.solids())
             if len(halves) < 2:
                 raise GeometryError(
                     "split_failed",
                     "Плоскость не разделяет деталь на две части. Сместите плоскость внутрь тела.")
             name = parts[pid]["name"]
+            if op.get("separate", False):
+                if len(halves) <= len(base.solids()):
+                    raise GeometryError(
+                        "split_failed",
+                        "Плоскость не пересекает материал детали. Сместите плоскость внутрь тела.")
+                if any(not solid.is_valid or solid.volume <= 1e-8 for solid in halves):
+                    raise GeometryError("split_failed", "Разделение создаёт некорректную геометрию.")
+                total_volume = sum(solid.volume for solid in halves)
+                if abs(total_volume - base.volume) > max(1e-4, abs(base.volume) * 1e-6):
+                    raise GeometryError("split_failed", "Разделение изменяет объём детали. Выберите другую плоскость.")
+                halves.sort(key=lambda solid: tuple(round(value, 7) for value in solid.center()))
+                generated_ids = [
+                    f"{pid}-split-{operation_index + 1}-part-{half_index + 1}"
+                    for half_index in range(1, len(halves))
+                ]
+                if any(new_id in parts for new_id in generated_ids):
+                    raise GeometryError("split_failed", "Идентификаторы частей конфликтуют. Повторите разделение.")
+                parts[pid]["shape"] = halves[0]
+                parts[pid]["name"] = f"{name} (часть 1)"
+                for half_index, new_id in enumerate(generated_ids, start=1):
+                    parts[new_id] = {
+                        "shape": halves[half_index],
+                        "name": f"{name} (часть {half_index + 1})",
+                    }
+                continue
             parts[pid]["shape"] = halves[0]
             parts[pid]["name"] = f"{name} (часть 1)"
             new_id = f"{pid}-part2"

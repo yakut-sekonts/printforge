@@ -424,9 +424,11 @@ pub fn scripted_plan(
 }
 
 const ALLOWED_COMMANDS: [&str; 3] = ["part.create.from_template", "parameter.set", "op.fillet"];
-const TEMPLATES: [&str; 4] = ["plate_with_holes", "washer", "bracket_l", "case_with_lid"];
-const SIGNED_PARAMS: [&str; 18] = [
-    "length", "width", "height", "hole_diameter", "hole_offset",
+const TEMPLATES: [&str; 7] = [
+    "box", "cylinder", "sphere", "plate_with_holes", "washer", "bracket_l", "case_with_lid",
+];
+const SIGNED_PARAMS: [&str; 19] = [
+    "length", "width", "height", "diameter", "hole_diameter", "hole_offset",
     "outer_diameter", "inner_diameter", "a_length", "a_width",
     "a_thickness", "b_height", "wall", "bottom", "gap",
     "lid_thickness", "lip_height", "lip_wall", "radius",
@@ -789,6 +791,9 @@ pub fn system_prompt(
          Используй только эти операции и точные идентификаторы:\n\
          1. part.create.from_template: target_id=null, parameters={{template, params}}. \
          Допустимые шаблоны и параметры: \
+         box {{length, width, height}}; \
+         cylinder {{diameter, height}}; \
+         sphere {{diameter}}; \
          washer {{outer_diameter, inner_diameter, height}}; \
          plate_with_holes {{length, width, height, hole_diameter, hole_offset}}; \
          bracket_l {{a_length, a_width, a_thickness, b_height}}; \
@@ -850,6 +855,7 @@ fn parameter_markers(name: &str) -> &'static [&'static str] {
         "length" | "a_length" => &["длин"],
         "width" | "a_width" => &["ширин"],
         "height" => &["толщин", "высот"],
+        "diameter" => &["диаметр"],
         "hole_diameter" => &["диаметр отверст", "отверсти", "побольш"],
         "hole_offset" => &["смещен", "отступ"],
         "outer_diameter" => &["наружн"],
@@ -899,6 +905,9 @@ fn request_operation_scope(
 
     let mut requested_templates = Vec::new();
     for (template, markers) in [
+        ("box", &["параллелеп", "куб", "брусок"][..]),
+        ("cylinder", &["цилиндр"][..]),
+        ("sphere", &["сфер", "шар"][..]),
         ("washer", &["шайб", "втулк"][..]),
         ("plate_with_holes", &["пластин"][..]),
         ("bracket_l", &["кроншт"][..]),
@@ -949,6 +958,18 @@ fn plan_json_schema(
     text: Option<&str>,
 ) -> Value {
     let mut available_variants = BTreeMap::new();
+    available_variants.insert(
+        "create:box".to_string(),
+        create_operation_schema("box", &["length", "width", "height"]),
+    );
+    available_variants.insert(
+        "create:cylinder".to_string(),
+        create_operation_schema("cylinder", &["diameter", "height"]),
+    );
+    available_variants.insert(
+        "create:sphere".to_string(),
+        create_operation_schema("sphere", &["diameter"]),
+    );
     available_variants.insert(
         "create:washer".to_string(),
         create_operation_schema("washer", &["outer_diameter", "inner_diameter", "height"]),

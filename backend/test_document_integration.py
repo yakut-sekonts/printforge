@@ -22,6 +22,231 @@ def _stop_worker():
     dev_shim._worker = None
 
 
+def test_primitive_document_can_add_move_union_and_split(monkeypatch):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        created = dev_shim.cmd_doc_create({"template": "box", "params": {}})
+        assert created["parts"][0]["name"] == "Параллелепипед"
+        assert created["stats"]["bbox"] == pytest.approx([-20, -15, 0, 20, 15, 20])
+
+        added = dev_shim.cmd_doc_add_part({
+            "template": "cylinder",
+            "params": {"diameter": 10, "height": 20},
+        })
+        cylinder_id = added["parts"][1]["part_id"]
+        moved = dev_shim.cmd_doc_transform({
+            "part_id": cylinder_id,
+            "translate": [15, 0, 0],
+        })
+        assert moved["operations"][-1] == {
+            "op": "transform", "part_id": cylinder_id, "translate": [15, 0, 0],
+        }
+
+        united = dev_shim.cmd_doc_boolean({
+            "boolean": "union",
+            "target_id": created["parts"][0]["part_id"],
+            "tool_id": cylinder_id,
+            "keep_tool": False,
+        })
+        assert united["stats"]["solid_count"] == 1
+
+        split = dev_shim.cmd_doc_split({
+            "part_id": created["parts"][0]["part_id"],
+            "plane": "YZ",
+            "offset": 0,
+        })
+        assert split["stats"]["solid_count"] == 2
+    finally:
+        _stop_worker()
+
+
+@pytest.mark.parametrize("template", ["box", "cylinder", "sphere"])
+def test_new_primitive_requires_schema_four_and_reopens(monkeypatch, tmp_path, template):
+    _stop_worker()
+    monkeypatch.setitem(dev_shim.DOCS, "main", dev_shim.Doc())
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        created = dev_shim.cmd_doc_create({"template": template, "params": {}})
+        project = tmp_path / f"{template}.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        with zipfile.ZipFile(project) as archive:
+            assert json.loads(archive.read("manifest.json"))["schema_version"] == 4
+            assert json.loads(archive.read("document.json"))["schema_version"] == 4
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["error"] is None
+        assert reopened["template"] == template
+        assert reopened["stats"]["volume"] == pytest.approx(created["stats"]["volume"])
+    finally:
+        _stop_worker()
+
+
+def test_face_offset_second_part_is_one_undo_and_survives_reopen(monkeypatch, tmp_path):
+    _stop_worker()
+    document = dev_shim.Doc()
+    monkeypatch.setitem(dev_shim.DOCS, "main", document)
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        created = dev_shim.cmd_doc_create({"template": "box", "params": {}})
+        added = dev_shim.cmd_doc_add_part({
+            "template": "cylinder", "params": {"diameter": 10, "height": 12},
+        })
+        target_id = added["parts"][1]["part_id"]
+        before = json.loads(json.dumps(dev_shim.cmd_doc_transform({
+            "part_id": target_id, "translate": [50, 0, 0],
+        })))
+        mesh = dev_shim.cmd_doc_get_mesh({})
+        reference = next(face["face_ref"] for face in mesh["face_ranges"]
+                         if face["solid_index"] == 1 and face["face_ref"] is not None
+                         and face["face_ref"]["normal"][2] > 0.99)
+        assert reference["solid_index"] == 1
+        changed = dev_shim.cmd_doc_face_offset({
+            "target_id": target_id, "face_ref": reference, "distance": 3,
+        })
+        assert changed["error"] is None
+        assert changed["history_len"] == before["history_len"] + 1
+        assert changed["stats"]["volume"] == pytest.approx(
+            created["stats"]["volume"] + math.pi * 5 ** 2 * 15)
+        assert changed["operations"][-1]["op"] == "face_offset"
+        restored = dev_shim.cmd_doc_undo({})
+        assert restored["operations"] == before["operations"]
+        assert restored["stats"]["volume"] == pytest.approx(before["stats"]["volume"])
+        redone = dev_shim.cmd_doc_redo({})
+        assert redone["stats"]["volume"] == pytest.approx(changed["stats"]["volume"])
+
+        project = tmp_path / "offset.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        with zipfile.ZipFile(project) as archive:
+            assert json.loads(archive.read("manifest.json"))["schema_version"] == 4
+            assert json.loads(archive.read("document.json"))["schema_version"] == 4
+        reopened = json.loads(json.dumps(dev_shim.cmd_doc_open({"path": str(project)})))
+        assert reopened["error"] is None
+        assert reopened["operations"] == changed["operations"]
+        assert reopened["stats"]["volume"] == pytest.approx(changed["stats"]["volume"])
+
+        failed = dev_shim.cmd_doc_face_offset({
+            "target_id": target_id, "face_ref": reference, "distance": 1,
+        })
+        assert failed["error"]["code"] == "reselect_required"
+        assert failed["operations"] == reopened["operations"]
+        assert failed["history_len"] == reopened["history_len"]
+        assert failed["stats"]["volume"] == pytest.approx(reopened["stats"]["volume"])
+    finally:
+        _stop_worker()
+
+
+def _mesh_solid_bbox(mesh, solid_index):
+    vertex_indices = {
+        mesh["indices"][index]
+        for face in mesh["face_ranges"] if face["solid_index"] == solid_index
+        for index in range(face["tri_start"] * 3, (face["tri_start"] + face["tri_count"]) * 3)
+    }
+    points = [mesh["positions"][index * 3:index * 3 + 3] for index in vertex_indices]
+    return [min(point[axis] for point in points) for axis in range(3)] + [
+        max(point[axis] for point in points) for axis in range(3)]
+
+
+def test_separate_split_parts_can_move_independently_and_reopen(monkeypatch, tmp_path):
+    _stop_worker()
+    monkeypatch.setitem(dev_shim.DOCS, "main", dev_shim.Doc())
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        created = dev_shim.cmd_doc_create({"template": "box", "params": {}})
+        parent_id = created["parts"][0]["part_id"]
+        split = json.loads(json.dumps(dev_shim.cmd_doc_split({
+            "part_id": parent_id, "plane": "YZ", "offset": 0, "separate": True,
+        })))
+        assert split["error"] is None
+        assert split["stats"]["solid_count"] == len(split["stats"]["parts"]) == 2
+        child_id = split["stats"]["parts"][1]["part_id"]
+        assert child_id == f"{parent_id}-split-1-part-2"
+        before_mesh = dev_shim.cmd_doc_get_mesh({})
+        parent_bbox = _mesh_solid_bbox(before_mesh, 0)
+        child_bbox = _mesh_solid_bbox(before_mesh, 1)
+        moved = json.loads(json.dumps(dev_shim.cmd_doc_transform({
+            "part_id": child_id, "translate": [15, 0, 0],
+        })))
+        after_mesh = dev_shim.cmd_doc_get_mesh({})
+        assert _mesh_solid_bbox(after_mesh, 0) == pytest.approx(parent_bbox)
+        moved_bbox = list(child_bbox)
+        moved_bbox[0] += 15
+        moved_bbox[3] += 15
+        assert _mesh_solid_bbox(after_mesh, 1) == pytest.approx(moved_bbox)
+        assert moved["stats"]["volume"] == pytest.approx(created["stats"]["volume"])
+        undone = dev_shim.cmd_doc_undo({})
+        assert undone["operations"] == split["operations"]
+        assert _mesh_solid_bbox(dev_shim.cmd_doc_get_mesh({}), 1) == pytest.approx(child_bbox)
+        redone = dev_shim.cmd_doc_redo({})
+        assert redone["operations"] == moved["operations"]
+
+        project = tmp_path / "separated.printforge"
+        dev_shim.cmd_doc_save({"path": str(project)})
+        with zipfile.ZipFile(project) as archive:
+            assert json.loads(archive.read("manifest.json"))["schema_version"] == 4
+            assert json.loads(archive.read("document.json"))["schema_version"] == 4
+        reopened = dev_shim.cmd_doc_open({"path": str(project)})
+        assert reopened["error"] is None
+        assert reopened["operations"] == moved["operations"]
+        assert reopened["stats"]["volume"] == pytest.approx(created["stats"]["volume"])
+        assert _mesh_solid_bbox(dev_shim.cmd_doc_get_mesh({}), 0) == pytest.approx(parent_bbox)
+        assert _mesh_solid_bbox(dev_shim.cmd_doc_get_mesh({}), 1) == pytest.approx(moved_bbox)
+    finally:
+        _stop_worker()
+
+
+@pytest.mark.parametrize("kind", ["face_offset", "split"])
+def test_failed_direct_edit_after_undo_preserves_redo_and_saved_state(monkeypatch, tmp_path, kind):
+    _stop_worker()
+    monkeypatch.setitem(dev_shim.DOCS, "main", dev_shim.Doc())
+    dev_shim.ACTIVE[0] = "main"
+    try:
+        created = dev_shim.cmd_doc_create({"template": "washer", "params": {}})
+        part_id = created["parts"][0]["part_id"]
+        reference = next(face["face_ref"] for face in dev_shim.cmd_doc_get_mesh({})["face_ranges"]
+                         if face["face_ref"] and face["face_ref"]["normal"][2] > 0.99)
+        if kind == "face_offset":
+            changed = dev_shim.cmd_doc_face_offset({
+                "target_id": part_id, "face_ref": reference, "distance": 2,
+            })
+        else:
+            changed = dev_shim.cmd_doc_split({
+                "part_id": part_id, "plane": "YZ", "offset": 0, "separate": True,
+            })
+        assert changed["error"] is None
+        expected_volume = changed["stats"]["volume"]
+        expected_parts = len(changed["stats"]["parts"])
+        dev_shim.cmd_doc_undo({})
+        project = tmp_path / f"{kind}-saved.printforge"
+        before = json.loads(json.dumps(dev_shim.cmd_doc_save({"path": str(project)})))
+        saved_bytes = project.read_bytes()
+        with zipfile.ZipFile(project) as archive:
+            assert json.loads(archive.read("document.json"))["schema_version"] == 3
+        before_mesh = json.loads(json.dumps(dev_shim.doc().mesh))
+        assert before["can_redo"] is True
+        assert before["dirty"] is False
+        if kind == "face_offset":
+            failed = dev_shim.cmd_doc_face_offset({
+                "target_id": part_id, "face_ref": reference, "distance": -100,
+            })
+        else:
+            failed = dev_shim.cmd_doc_split({
+                "part_id": part_id, "plane": "YZ", "offset": 1000, "separate": True,
+            })
+        assert failed["error"]["code"] == f"{kind}_failed"
+        for key in ["revision", "history_len", "history_index", "can_redo", "dirty", "parts", "operations", "stats"]:
+            assert failed[key] == before[key]
+        assert dev_shim.doc().mesh == before_mesh
+        assert project.read_bytes() == saved_bytes
+        redone = dev_shim.cmd_doc_redo({})
+        assert redone["error"] is None
+        assert redone["stats"]["volume"] == pytest.approx(expected_volume)
+        assert len(redone["stats"]["parts"]) == expected_parts
+    finally:
+        _stop_worker()
+
+
 def test_worker_restarts_once_after_transport_death():
     _stop_worker()
     params = {

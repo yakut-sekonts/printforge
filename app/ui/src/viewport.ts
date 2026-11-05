@@ -2,19 +2,28 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { FaceAxis, FaceRange, FaceFeatureProfile, MeshData, EdgeRef } from "./types";
 import { mapMeshPositionsForViewport } from "./meshBinary";
+import { edgePoints } from "./sceneSelection";
 import type {
   FaceDomePreview, FaceEditTarget, FaceFeaturePreview, SheetBendPreview,
 } from "./faceEditing";
 
 export type ViewName = "top" | "front" | "side" | "iso";
+export type TransformAxis = "x" | "y" | "z";
+
+export interface PartTransformTarget {
+  partId: string;
+  solidIndices: number[];
+}
 
 export interface ViewportEvents {
   onHoverFace: (face: number | null) => void;
-  onSelectFace: (face: number | null) => void;
+  onSelectFace: (face: number | null, additive?: boolean) => void;
   onSelectEdge: (edge: EdgeRef) => void;
   onPushPullStart: () => void;
   onPushPullPreview: (delta: number) => void;
   onPushPullCommit: (delta: number) => void;
+  onPartMovePreview: (axis: TransformAxis, delta: number) => void;
+  onPartMoveCommit: (axis: TransformAxis, delta: number) => void;
   onCameraRotated: () => void;
   onCameraZoomed: () => void;
 }
@@ -450,12 +459,42 @@ function disposeObject(object: THREE.Object3D) {
 }
 
 function subGeometry(geo: THREE.BufferGeometry, range: FaceRange): THREE.BufferGeometry {
-  const g = new THREE.BufferGeometry();
-  g.setAttribute("position", geo.getAttribute("position"));
-  const idx = geo.getIndex()!;
-  const arr = idx.array.slice(range.tri_start * 3, (range.tri_start + range.tri_count) * 3);
-  g.setIndex(new THREE.BufferAttribute(arr, 1));
-  return g;
+  return subGeometryRanges(geo, [range]);
+}
+
+function subGeometryRanges(geo: THREE.BufferGeometry, ranges: FaceRange[]): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  const sourcePositions = geo.getAttribute("position");
+  const source = geo.getIndex()!;
+  const positions = new Float32Array(ranges.reduce((count, range) => count + range.tri_count, 0) * 9);
+  let destination = 0;
+  for (const range of ranges) {
+    for (let offset = range.tri_start * 3; offset < (range.tri_start + range.tri_count) * 3; offset += 1) {
+      const index = source.getX(offset);
+      positions[destination++] = sourcePositions.getX(index);
+      positions[destination++] = sourcePositions.getY(index);
+      positions[destination++] = sourcePositions.getZ(index);
+    }
+  }
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  return geometry;
+}
+
+function rangesBounds(geo: THREE.BufferGeometry, ranges: FaceRange[]): THREE.Box3 | null {
+  const source = geo.getIndex();
+  const position = geo.getAttribute("position") as THREE.BufferAttribute;
+  if (!source || ranges.length === 0) return null;
+  const bounds = new THREE.Box3();
+  const point = new THREE.Vector3();
+  let found = false;
+  for (const range of ranges) {
+    for (let offset = range.tri_start * 3; offset < (range.tri_start + range.tri_count) * 3; offset += 1) {
+      point.fromBufferAttribute(position, Number(source.getX(offset)));
+      bounds.expandByPoint(point);
+      found = true;
+    }
+  }
+  return found ? bounds : null;
 }
 
 export class Viewport {
@@ -474,11 +513,18 @@ export class Viewport {
   private hoverOverlay: THREE.Object3D | null = null;
   private selOverlay: THREE.Object3D | null = null;
   private edgeMarker: THREE.Group | null = null;
+  private hoverEdge: THREE.Line | null = null;
+  private splitPreview: THREE.Mesh | null = null;
+  private editingEnabled = true;
   private edgeSelectionActive = false;
   private selectableEdges: EdgeRef[] = [];
   private pushPullGroup: THREE.Group | null = null;
   private pushPullTarget: FaceEditTarget | null = null;
   private pushPullLabel: THREE.Sprite | null = null;
+  private selectedSolidsOverlay: THREE.Mesh | null = null;
+  private transformGroup: THREE.Group | null = null;
+  private transformTarget: (PartTransformTarget & { center: THREE.Vector3 }) | null = null;
+  private transformLabel: THREE.Sprite | null = null;
   private faceFeatureGroup: THREE.Group | null = null;
   private faceDomeGroup: THREE.Group | null = null;
   private sheetBendGroup: THREE.Group | null = null;
@@ -488,6 +534,15 @@ export class Viewport {
     startY: number;
     screenDirection: THREE.Vector2;
     pixelsPerMm: number;
+    delta: number;
+  } | null = null;
+  private transformDrag: {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    screenDirection: THREE.Vector2;
+    pixelsPerMm: number;
+    axis: TransformAxis;
     delta: number;
   } | null = null;
   private dimGroup: THREE.Group | null = null;
@@ -691,15 +746,25 @@ export class Viewport {
       .some((hit) => hit.object.userData.pushPullHandle === true);
   }
 
+  private pickTransformAxis(e: PointerEvent): TransformAxis | null {
+    if (!this.transformGroup) return null;
+    this.updatePointer(e);
+    const hit = this.raycaster.intersectObject(this.transformGroup, true)
+      .find((candidate) => candidate.object.userData.transformAxis != null);
+    return (hit?.object.userData.transformAxis as TransformAxis | undefined) ?? null;
+  }
+
   private pickEdge(e: PointerEvent): EdgeRef | null {
-    if (!this.edgeSelectionActive) return null;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const pointer = new THREE.Vector2(e.clientX - rect.left, e.clientY - rect.top);
     let best: { edge: EdgeRef; distance: number; depth: number } | null = null;
     for (const edge of this.selectableEdges) {
-      if (edge.kind !== "LINE" || !edge.p0 || !edge.p1) continue;
-      const startProjected = new THREE.Vector3(...docToThree(...edge.p0)).project(this.camera);
-      const endProjected = new THREE.Vector3(...docToThree(...edge.p1)).project(this.camera);
+      const points = edgePoints(edge);
+      for (let index = 1; index < points.length; index += 1) {
+      const worldStart = new THREE.Vector3(...docToThree(...points[index - 1]));
+      const worldEnd = new THREE.Vector3(...docToThree(...points[index]));
+      const startProjected = worldStart.clone().project(this.camera);
+      const endProjected = worldEnd.clone().project(this.camera);
       if (startProjected.z < -1 || startProjected.z > 1 || endProjected.z < -1 || endProjected.z > 1) continue;
       const start = new THREE.Vector2(
         (startProjected.x + 1) * rect.width / 2,
@@ -711,10 +776,20 @@ export class Viewport {
       );
       const distance = pointSegmentDistance(pointer, start, end);
       const depth = (startProjected.z + endProjected.z) / 2;
-      if (distance > 12) continue;
+      if (distance > 8) continue;
+      const segment = end.clone().sub(start);
+      const amount = segment.lengthSq() > 1e-9
+        ? THREE.MathUtils.clamp(pointer.clone().sub(start).dot(segment) / segment.lengthSq(), 0, 1)
+        : 0;
+      const point = worldStart.clone().lerp(worldEnd, amount);
+      const projected = point.clone().project(this.camera);
+      this.raycaster.setFromCamera(new THREE.Vector2(projected.x, projected.y), this.camera);
+      const surface = this.mesh ? this.raycaster.intersectObject(this.mesh, false)[0] : null;
+      if (surface && point.distanceTo(surface.point) > Math.max(0.05, this.halfSize * 0.002)) continue;
       if (!best || distance < best.distance - 1 ||
           (Math.abs(distance - best.distance) <= 1 && depth < best.depth)) {
         best = { edge, distance, depth };
+      }
       }
     }
     return best?.edge ?? null;
@@ -738,9 +813,47 @@ export class Viewport {
     return { direction: screen.normalize(), pixelsPerMm };
   }
 
+  private transformScreenScale(axis: TransformAxis): {
+    direction: THREE.Vector2;
+    pixelsPerMm: number;
+  } {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const center = this.transformTarget?.center ?? new THREE.Vector3();
+    const [dx, dy, dz] = docToThree(...axisVector(axis));
+    const origin = center.clone().project(this.camera);
+    const sample = center.clone().add(new THREE.Vector3(dx, dy, dz).multiplyScalar(10)).project(this.camera);
+    const screen = new THREE.Vector2(
+      (sample.x - origin.x) * rect.width / 2,
+      -(sample.y - origin.y) * rect.height / 2,
+    );
+    const pixelsPerMm = screen.length() / 10;
+    if (pixelsPerMm < 0.15) return { direction: new THREE.Vector2(0, -1), pixelsPerMm: 2 };
+    return { direction: screen.normalize(), pixelsPerMm };
+  }
+
   private onPointerDown(e: PointerEvent) {
     this.downPos = { x: e.clientX, y: e.clientY };
-    if (e.button !== 0 || !this.pushPullTarget || !this.pickPushPullHandle(e)) return;
+    if (e.button !== 0 || !this.editingEnabled) return;
+    const transformAxis = this.pickTransformAxis(e);
+    if (transformAxis && this.transformTarget) {
+      e.preventDefault();
+      e.stopPropagation();
+      const scale = this.transformScreenScale(transformAxis);
+      this.transformDrag = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        screenDirection: scale.direction,
+        pixelsPerMm: scale.pixelsPerMm,
+        axis: transformAxis,
+        delta: 0,
+      };
+      this.controls.enabled = false;
+      this.renderer.domElement.setPointerCapture(e.pointerId);
+      this.renderer.domElement.style.cursor = "grabbing";
+      return;
+    }
+    if (!this.pushPullTarget || !this.pickPushPullHandle(e)) return;
     e.preventDefault();
     e.stopPropagation();
     const scale = this.pushPullScreenScale(this.pushPullTarget);
@@ -759,6 +872,18 @@ export class Viewport {
   }
 
   private onPointerMove(e: PointerEvent) {
+    if (this.transformDrag && e.pointerId === this.transformDrag.pointerId) {
+      e.preventDefault();
+      const movement = new THREE.Vector2(
+        e.clientX - this.transformDrag.startX,
+        e.clientY - this.transformDrag.startY,
+      );
+      const delta = movement.dot(this.transformDrag.screenDirection) / this.transformDrag.pixelsPerMm;
+      this.transformDrag.delta = Math.round(delta * 10) / 10;
+      this.setTransformPreview(this.transformDrag.axis, this.transformDrag.delta);
+      this.events.onPartMovePreview(this.transformDrag.axis, this.transformDrag.delta);
+      return;
+    }
     if (this.pushPullDrag && e.pointerId === this.pushPullDrag.pointerId) {
       e.preventDefault();
       const movement = new THREE.Vector2(
@@ -771,21 +896,29 @@ export class Viewport {
       this.events.onPushPullPreview(this.pushPullDrag.delta);
       return;
     }
-    if (this.edgeSelectionActive) {
-      const edge = this.pickEdge(e);
-      this.renderer.domElement.style.cursor = edge ? "crosshair" : "default";
-      this.setHoverFace(null);
-      this.events.onHoverFace(null);
-      return;
-    }
+    const overTransform = this.pickTransformAxis(e);
     const overHandle = this.pickPushPullHandle(e);
-    this.renderer.domElement.style.cursor = overHandle ? "grab" : "default";
-    const face = this.pickFace(e);
+    const edge = !overTransform && !overHandle && !this.transformTarget && !e.shiftKey ? this.pickEdge(e) : null;
+    this.setHoverEdge(edge);
+    this.renderer.domElement.style.cursor = overTransform || overHandle ? "grab" : edge ? "crosshair" : "default";
+    const face = edge || this.edgeSelectionActive ? null : this.pickFace(e);
     this.setHoverFace(face);
     this.events.onHoverFace(face);
   }
 
   private onPointerUp(e: PointerEvent) {
+    if (this.transformDrag && e.pointerId === this.transformDrag.pointerId) {
+      e.preventDefault();
+      e.stopPropagation();
+      const { axis, delta } = this.transformDrag;
+      this.transformDrag = null;
+      this.controls.enabled = true;
+      this.renderer.domElement.releasePointerCapture(e.pointerId);
+      this.renderer.domElement.style.cursor = "grab";
+      if (Math.abs(delta) >= 0.05) this.events.onPartMoveCommit(axis, delta);
+      else this.cancelTransformPreview();
+      return;
+    }
     if (this.pushPullDrag && e.pointerId === this.pushPullDrag.pointerId) {
       e.preventDefault();
       e.stopPropagation();
@@ -805,6 +938,13 @@ export class Viewport {
   }
 
   private onPointerCancel(e: PointerEvent) {
+    if (this.transformDrag && e.pointerId === this.transformDrag.pointerId) {
+      this.transformDrag = null;
+      this.controls.enabled = true;
+      this.renderer.domElement.style.cursor = "default";
+      this.cancelTransformPreview();
+      return;
+    }
     if (!this.pushPullDrag || e.pointerId !== this.pushPullDrag.pointerId) return;
     this.pushPullDrag = null;
     this.controls.enabled = true;
@@ -813,18 +953,45 @@ export class Viewport {
   }
 
   private onClick(e: PointerEvent) {
-    if (this.edgeSelectionActive) {
-      const edge = this.pickEdge(e);
-      if (edge) this.events.onSelectEdge(edge);
-      return;
-    }
+    if (!this.editingEnabled) return;
+    const edge = !this.transformTarget && !e.shiftKey ? this.pickEdge(e) : null;
+    if (edge) { this.events.onSelectEdge(edge); return; }
+    if (this.edgeSelectionActive) return;
     const face = this.pickFace(e);
-    this.events.onSelectFace(face);
+    this.events.onSelectFace(face, e.shiftKey);
+  }
+
+  private setHoverEdge(edge: EdgeRef | null) {
+    if (this.hoverEdge) {
+      this.scene.remove(this.hoverEdge);
+      disposeObject(this.hoverEdge);
+      this.hoverEdge = null;
+    }
+    if (!edge) return;
+    const points = edgePoints(edge).map((point) => new THREE.Vector3(...docToThree(...point)));
+    if (points.length < 2) return;
+    this.hoverEdge = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineBasicMaterial({ color: COLOR.selEdge, depthTest: false }),
+    );
+    this.hoverEdge.renderOrder = 20;
+    this.scene.add(this.hoverEdge);
+  }
+
+  setEditingEnabled(enabled: boolean) {
+    this.editingEnabled = enabled;
+    if (!enabled) {
+      this.cancelTransformPreview();
+      this.cancelPushPullPreview();
+      this.setHoverEdge(null);
+      this.setHoverFace(null);
+    }
   }
 
   setHoverFace(face: number | null) {
     if (this.hoverOverlay) {
       this.scene.remove(this.hoverOverlay);
+      disposeObject(this.hoverOverlay);
       this.hoverOverlay = null;
     }
     if (face == null || !this.mesh) return;
@@ -832,6 +999,7 @@ export class Viewport {
     if (!range) return;
     const sub = subGeometry(this.mesh.geometry as THREE.BufferGeometry, range);
     const edges = new THREE.EdgesGeometry(sub, 1);
+    sub.dispose();
     this.hoverOverlay = new THREE.LineSegments(
       edges, new THREE.LineBasicMaterial({ color: COLOR.hover })
     );
@@ -840,7 +1008,7 @@ export class Viewport {
 
   setEdgeSelectionMode(active: boolean, edges: EdgeRef[]) {
     this.edgeSelectionActive = active;
-    this.selectableEdges = active ? edges : [];
+    this.selectableEdges = edges;
     if (!active) this.renderer.domElement.style.cursor = "default";
   }
 
@@ -855,7 +1023,12 @@ export class Viewport {
     const [x, y, z] = docToThree(...edge.midpoint);
     const group = new THREE.Group();
     const mat = new THREE.LineBasicMaterial({ color: COLOR.selEdge });
-    if (edge.p0 && edge.p1) {
+    const points = edgePoints(edge);
+    if (points.length > 2) {
+      const geometry = new THREE.BufferGeometry().setFromPoints(points.map((point) => new THREE.Vector3(...docToThree(...point))));
+      group.add(new THREE.Line(geometry, mat));
+    }
+    if (points.length <= 2 && edge.p0 && edge.p1) {
       const [ax, ay, az] = docToThree(...edge.p0);
       const [bx, by, bz] = docToThree(...edge.p1);
       const g = new THREE.BufferGeometry();
@@ -904,6 +1077,7 @@ export class Viewport {
   setSelectedFace(face: number | null) {
     if (this.selOverlay) {
       this.scene.remove(this.selOverlay);
+      disposeObject(this.selOverlay);
       this.selOverlay = null;
     }
     if (face == null || !this.mesh) return;
@@ -918,6 +1092,150 @@ export class Viewport {
     this.selOverlay = new THREE.Mesh(sub, mat);
     this.selOverlay.renderOrder = 5;
     this.scene.add(this.selOverlay);
+  }
+
+  setSelectedSolids(solidIndices: number[]) {
+    if (this.selectedSolidsOverlay) {
+      this.scene.remove(this.selectedSolidsOverlay);
+      disposeObject(this.selectedSolidsOverlay);
+      this.selectedSolidsOverlay = null;
+    }
+    if (!this.mesh || solidIndices.length === 0) return;
+    const selected = new Set(solidIndices);
+    const ranges = this.faceRanges.filter((range) =>
+      range.solid_index != null && selected.has(range.solid_index));
+    if (ranges.length === 0) return;
+    const geometry = subGeometryRanges(this.mesh.geometry as THREE.BufferGeometry, ranges);
+    const material = new THREE.MeshBasicMaterial({
+      color: COLOR.selBody,
+      transparent: true,
+      opacity: 0.28,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      side: THREE.DoubleSide,
+    });
+    this.selectedSolidsOverlay = new THREE.Mesh(geometry, material);
+    this.selectedSolidsOverlay.renderOrder = 4;
+    this.scene.add(this.selectedSolidsOverlay);
+  }
+
+  setTransformHandle(target: PartTransformTarget | null) {
+    if (this.transformGroup) {
+      this.scene.remove(this.transformGroup);
+      disposeObject(this.transformGroup);
+      this.transformGroup = null;
+    }
+    this.transformLabel = null;
+    this.transformTarget = null;
+    if (!target || !this.mesh || target.solidIndices.length === 0) return;
+
+    const selected = new Set(target.solidIndices);
+    const ranges = this.faceRanges.filter((range) =>
+      range.solid_index != null && selected.has(range.solid_index));
+    const bounds = rangesBounds(this.mesh.geometry as THREE.BufferGeometry, ranges);
+    if (!bounds) return;
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const length = Math.max(28, Math.min(48, size.length() * 0.32));
+    const group = new THREE.Group();
+    const colors: Record<TransformAxis, number> = {
+      x: COLOR.axisX,
+      y: COLOR.axisY,
+      z: COLOR.axisZ,
+    };
+    for (const axis of ["x", "y", "z"] as const) {
+      const [dx, dy, dz] = docToThree(...axisVector(axis));
+      const direction = new THREE.Vector3(dx, dy, dz).normalize();
+      const arrow = new THREE.ArrowHelper(direction, center, length, colors[axis], 4.5, 2.5);
+      (arrow.line.material as THREE.LineBasicMaterial).depthTest = false;
+      (arrow.cone.material as THREE.MeshBasicMaterial).depthTest = false;
+      arrow.line.renderOrder = 25;
+      arrow.cone.renderOrder = 26;
+      arrow.cone.userData.transformAxis = axis;
+      group.add(arrow);
+
+      const hit = new THREE.Mesh(
+        new THREE.CylinderGeometry(3.2, 3.2, length, 12),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false }),
+      );
+      hit.position.copy(center.clone().addScaledVector(direction, length / 2));
+      hit.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+      hit.userData.transformAxis = axis;
+      hit.renderOrder = 27;
+      group.add(hit);
+    }
+    this.transformTarget = { ...target, center };
+    this.transformGroup = group;
+    this.scene.add(group);
+    this.render();
+  }
+
+  setSplitPreview(plane: "XY" | "XZ" | "YZ" | null, offset = 0, solidIndices: number[] = []) {
+    if (this.splitPreview) {
+      this.scene.remove(this.splitPreview);
+      disposeObject(this.splitPreview);
+      this.splitPreview = null;
+    }
+    if (!plane || !this.mesh) return;
+    const ranges = this.faceRanges.filter((range) => range.solid_index != null && solidIndices.includes(range.solid_index));
+    const bounds = rangesBounds(this.mesh.geometry as THREE.BufferGeometry, ranges);
+    if (!bounds) return;
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = Math.max(10, bounds.getSize(new THREE.Vector3()).length() * 1.3);
+    const normal = plane === "YZ" ? new THREE.Vector3(1, 0, 0)
+      : plane === "XZ" ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0);
+    if (plane === "YZ") center.x = offset;
+    else if (plane === "XZ") center.z = -offset;
+    else center.y = offset;
+    this.splitPreview = new THREE.Mesh(
+      new THREE.PlaneGeometry(size, size),
+      new THREE.MeshBasicMaterial({ color: 0x2563eb, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide }),
+    );
+    this.splitPreview.position.copy(center);
+    this.splitPreview.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+    this.splitPreview.renderOrder = 8;
+    this.scene.add(this.splitPreview);
+  }
+
+  setTransformPreview(axis: TransformAxis, delta: number) {
+    if (!this.transformTarget || !this.transformGroup) return;
+    const [dx, dy, dz] = docToThree(...axisVector(axis));
+    const offset = new THREE.Vector3(dx, dy, dz).multiplyScalar(delta);
+    this.transformGroup.position.copy(offset);
+    if (this.selectedSolidsOverlay) this.selectedSolidsOverlay.position.copy(offset);
+    if (this.selOverlay) this.selOverlay.position.copy(offset);
+    if (this.transformLabel) {
+      this.transformGroup.remove(this.transformLabel);
+      disposeObject(this.transformLabel);
+      this.transformLabel = null;
+    }
+    if (Math.abs(delta) >= 0.05) {
+      const sign = delta > 0 ? "+" : "";
+      const label = makeTextSprite(`${axis.toUpperCase()} ${sign}${Math.round(delta * 10) / 10} мм`);
+      label.position.copy(this.transformTarget.center.clone().add(new THREE.Vector3(0, 10, 0)));
+      this.transformGroup.add(label);
+      this.transformLabel = label;
+    }
+    this.render();
+  }
+
+  cancelTransformPreview() {
+    if (this.transformDrag) {
+      const pointerId = this.transformDrag.pointerId;
+      this.transformDrag = null;
+      this.controls.enabled = true;
+      if (this.renderer.domElement.hasPointerCapture(pointerId)) this.renderer.domElement.releasePointerCapture(pointerId);
+    }
+    if (this.transformGroup) this.transformGroup.position.set(0, 0, 0);
+    if (this.selectedSolidsOverlay) this.selectedSolidsOverlay.position.set(0, 0, 0);
+    if (this.selOverlay) this.selOverlay.position.set(0, 0, 0);
+    if (this.transformGroup && this.transformLabel) {
+      this.transformGroup.remove(this.transformLabel);
+      disposeObject(this.transformLabel);
+    }
+    this.transformLabel = null;
+    this.render();
   }
 
   setPushPullHandle(target: FaceEditTarget | null) {
@@ -1009,6 +1327,12 @@ export class Viewport {
   }
 
   cancelPushPullPreview() {
+    if (this.pushPullDrag) {
+      const pointerId = this.pushPullDrag.pointerId;
+      this.pushPullDrag = null;
+      this.controls.enabled = true;
+      if (this.renderer.domElement.hasPointerCapture(pointerId)) this.renderer.domElement.releasePointerCapture(pointerId);
+    }
     if (this.pushPullGroup) this.pushPullGroup.position.set(0, 0, 0);
     if (this.selOverlay) this.selOverlay.position.set(0, 0, 0);
     if (this.pushPullGroup && this.pushPullLabel) {
@@ -1189,6 +1513,9 @@ export class Viewport {
   }
 
   setMesh(data: MeshData | null) {
+    this.cancelTransformPreview();
+    this.cancelPushPullPreview();
+    this.setHoverEdge(null);
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -1197,6 +1524,8 @@ export class Viewport {
     this.setHoverFace(null);
     this.setSelectedFace(null);
     this.setEdgeMarker(null);
+    this.setSelectedSolids([]);
+    this.setTransformHandle(null);
     this.setPushPullHandle(null);
     this.setFaceFeaturePreview(null);
     this.setFaceDomePreview(null);
@@ -1339,6 +1668,10 @@ export class Viewport {
   }
 
   dispose() {
+    this.setHoverEdge(null);
+    this.setSplitPreview(null);
+    this.setTransformHandle(null);
+    this.setSelectedSolids([]);
     this.setFaceFeaturePreview(null);
     this.setFaceDomePreview(null);
     this.setSheetBendPreview(null);

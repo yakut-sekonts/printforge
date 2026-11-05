@@ -3,6 +3,7 @@ import type { CommandDef, DocState, TemplateDef, DocStats } from "./types";
 import {
   IconPlate, IconUndo, IconRedo, IconSave, IconOpen, IconExport,
   IconQuestion, IconCursorQuestion, IconBook, IconSparkles,
+  IconCube, IconCylinder, IconSphere,
 } from "./icons";
 import { UpdateBell } from "./UpdateBell";
 import { geometryProgressLabel } from "./geometryControl";
@@ -27,10 +28,9 @@ interface TopBarProps {
 }
 
 const TOPBAR_IDS = [
-  "part.create.plate", "op.undo", "op.redo", "doc.save", "doc.open", "export.stl", "ai.panel.open",
+  "op.undo", "op.redo", "doc.save", "doc.open", "export.stl", "ai.panel.open",
 ];
 const TOPBAR_ICONS: Record<string, React.ReactNode> = {
-  "part.create.plate": <IconPlate />,
   "op.undo": <IconUndo />,
   "op.redo": <IconRedo />,
   "doc.save": <IconSave />,
@@ -97,29 +97,42 @@ interface LeftPanelProps {
   templates: TemplateDef[];
   importedStats: DocStats | null;
   selectedPartId: string | null;
-  onSelectPart: (partId: string) => void;
+  selectedPartIds?: string[];
+  onSelectPart: (partId: string, additive?: boolean) => void;
   onCreateTemplate: (t: TemplateDef) => void;
 }
 
 const TEMPLATE_BLURBS: Record<string, string> = {
+  box: "Корпус, основание или заготовка с прямыми сторонами.",
+  cylinder: "Втулка, стойка, ручка или круглая заготовка.",
+  sphere: "Шар или округлая заготовка для дальнейших операций.",
   plate_with_holes: "Прямоугольная пластина с четырьмя отверстиями по углам.",
   washer: "Кольцевая шайба или втулка по диаметрам и высоте.",
   bracket_l: "Г-образный кронштейн: полка и стойка.",
   case_with_lid: "Корпус со съёмной крышкой и регулируемым зазором.",
 };
 
-export function LeftPanel({ doc, templates, importedStats, selectedPartId, onSelectPart, onCreateTemplate }: LeftPanelProps) {
+function templateIcon(templateId: string): React.ReactNode {
+  if (templateId === "box") return <IconCube />;
+  if (templateId === "cylinder") return <IconCylinder />;
+  if (templateId === "sphere") return <IconSphere />;
+  return <IconPlate />;
+}
+
+export function LeftPanel({ doc, templates, importedStats, selectedPartId, selectedPartIds, onSelectPart, onCreateTemplate }: LeftPanelProps) {
   const p = doc?.params;
   const s = doc?.stats;
   const liveParts = s?.parts;
   const template = templates.find((t) => t.template_id === doc?.template);
   const isCase = doc?.template === "case_with_lid";
+  const primitiveTemplates = templates.filter((candidate) => candidate.kind === "primitive");
+  const presetTemplates = templates.filter((candidate) => candidate.kind !== "primitive");
   return (
     <aside className="left-panel" aria-label="Детали и история">
       <section>
-        <h2 className="panel-section">Создать</h2>
+        <h2 className="panel-section">Добавить форму</h2>
         <ul className="template-list">
-          {templates.map((t) => (
+          {primitiveTemplates.map((t) => (
             <li key={t.template_id}>
               <button
                 className="template-row"
@@ -127,26 +140,44 @@ export function LeftPanel({ doc, templates, importedStats, selectedPartId, onSel
                 aria-label={t.title}
                 onClick={() => onCreateTemplate(t)}
               >
+                <span className="template-icon">{templateIcon(t.template_id)}</span>
                 <span className="template-title">{t.title}</span>
-                <span className="template-blurb">{TEMPLATE_BLURBS[t.template_id] ?? ""}</span>
               </button>
             </li>
           ))}
         </ul>
+        <details className="preset-picker">
+          <summary>Готовые заготовки</summary>
+          <ul className="template-list">
+            {presetTemplates.map((t) => (
+              <li key={t.template_id}>
+                <button
+                  className="template-row"
+                  data-cmd={t.command_id}
+                  aria-label={t.title}
+                  onClick={() => onCreateTemplate(t)}
+                >
+                  <span className="template-title">{t.title}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
       </section>
       <section>
         <h2 className="panel-section">Детали</h2>
         {liveParts && liveParts.length > 0 ? (
           <ul className="part-list">
-            {liveParts.map((part) => (
+            {liveParts.map((part, index) => (
               <li key={part.part_id}>
                 <button
-                  className={`part-row ${selectedPartId === part.part_id ? "part-selected" : ""}`}
+                  className={`part-row ${(selectedPartIds ?? [selectedPartId]).includes(part.part_id) ? "part-selected" : ""}`}
+                  aria-pressed={(selectedPartIds ?? [selectedPartId]).includes(part.part_id)}
                   data-cmd="part.select"
-                  aria-label={`Деталь «${part.name}», объём ${fmt(part.volume)} мм³`}
-                  onClick={() => onSelectPart(part.part_id)}
+                  aria-label={`Деталь ${index + 1} «${part.name}», объём ${fmt(part.volume)} мм³`}
+                  onClick={(event) => onSelectPart(part.part_id, event.shiftKey)}
                 >
-                  <span className="part-row-name">{part.name}</span>
+                  <span className="part-row-name">{index + 1}. {part.name}</span>
                   <span className="part-row-vol">{fmt(part.volume)} мм³</span>
                 </button>
               </li>
@@ -288,27 +319,50 @@ export function EmptyState({ templates, onCreateTemplate, onLesson }: {
   onCreateTemplate: (t: TemplateDef) => void;
   onLesson: () => void;
 }) {
+  const primitiveTemplates = templates.filter((candidate) => candidate.kind === "primitive");
+  const presetTemplates = templates.filter((candidate) => candidate.kind !== "primitive");
   return (
     <div className="empty-state">
-      <IconBook />
-      <h2>Создайте первую деталь</h2>
-      <p>Выберите шаблон — размеры задаются в панели справа.</p>
-      <ul className="empty-templates">
-        {templates.map((t) => (
+      <span className="empty-kicker">Новая модель</span>
+      <h2>Выберите исходную форму</h2>
+      <p>Начните с простого тела. После создания нажмите на его грань, ребро или всё тело.</p>
+      <ul className="primitive-grid">
+        {primitiveTemplates.map((t) => (
           <li key={t.template_id}>
             <button
-              className="template-row"
+              className="primitive-card"
               data-cmd={t.command_id}
               aria-label={t.title}
               onClick={() => onCreateTemplate(t)}
             >
+              <span className="primitive-icon">{templateIcon(t.template_id)}</span>
               <span className="template-title">{t.title}</span>
               <span className="template-blurb">{TEMPLATE_BLURBS[t.template_id] ?? ""}</span>
             </button>
           </li>
         ))}
       </ul>
-      <button className="link-btn" onClick={onLesson}>Пройти урок «Первая деталь»</button>
+      <details className="empty-presets">
+        <summary>Или выбрать готовую заготовку</summary>
+        <ul className="empty-templates">
+          {presetTemplates.map((t) => (
+            <li key={t.template_id}>
+              <button
+                className="template-row"
+                data-cmd={t.command_id}
+                aria-label={t.title}
+                onClick={() => onCreateTemplate(t)}
+              >
+                <span className="template-title">{t.title}</span>
+                <span className="template-blurb">{TEMPLATE_BLURBS[t.template_id] ?? ""}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </details>
+      <button className="link-btn empty-lesson" onClick={onLesson}>
+        <IconBook /> Пройти урок «Первая деталь»
+      </button>
     </div>
   );
 }

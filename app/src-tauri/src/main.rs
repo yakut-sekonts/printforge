@@ -18,7 +18,7 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::{watch, Mutex};
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---------- геометрический worker ----------
@@ -340,6 +340,25 @@ impl Document {
         self.dirty = true;
     }
 
+    fn apply_built_candidate(&mut self, candidate: Document) -> Result<(), String> {
+        if self.doc_id != candidate.doc_id
+            || self.document_instance_id != candidate.document_instance_id
+            || self.revision + 1 != candidate.revision
+        {
+            return Err(geo_err("document_changed", "Документ изменился перед применением операции."));
+        }
+        if candidate.error.is_some() {
+            self.error = candidate.error;
+            return Ok(());
+        }
+        self.commit(candidate.snap);
+        self.revision = candidate.revision;
+        self.stats = candidate.stats;
+        self.mesh = candidate.mesh;
+        self.error = None;
+        Ok(())
+    }
+
     fn build_params(&self) -> Value {
         if self.snap.parts.is_empty() && self.snap.operations.is_empty() {
             return json!({"template": null, "params": {}, "operations": []});
@@ -469,10 +488,15 @@ async fn rebuild_committed_active(app: &tauri::AppHandle) {
 
 // ---------- команды IPC ----------
 
-const TEMPLATES: [&str; 4] = ["plate_with_holes", "washer", "bracket_l", "case_with_lid"];
+const TEMPLATES: [&str; 7] = [
+    "box", "cylinder", "sphere", "plate_with_holes", "washer", "bracket_l", "case_with_lid",
+];
 
 fn make_part(part_n: u64, template: &str, params: BTreeMap<String, f64>) -> Value {
     let title = match template {
+        "box" => "Параллелепипед",
+        "cylinder" => "Цилиндр",
+        "sphere" => "Сфера",
         "plate_with_holes" => "Пластина",
         "washer" => "Шайба",
         "bracket_l" => "Кронштейн",
@@ -548,6 +572,38 @@ async fn apply_op(app: &tauri::AppHandle, op: Value) -> Result<Value, String> {
     Ok(current_state().await)
 }
 
+async fn apply_atomic_op(app: &tauri::AppHandle, op: Value) -> Result<Value, String> {
+    let (slot, mut candidate) = with_store(|store| {
+        let slot = store.active.clone();
+        let doc = active_doc(store);
+        let mut snap = doc.snap.clone();
+        snap.operations.push(op);
+        (slot, Document {
+            doc_id: doc.doc_id,
+            document_instance_id: doc.document_instance_id,
+            snap,
+            history: vec![],
+            index: 0,
+            dirty: false,
+            path: None,
+            revision: doc.revision,
+            stats: None,
+            mesh: None,
+            error: None,
+            applied_actions: HashMap::new(),
+        })
+    }).await;
+    rebuild(app, &mut candidate).await;
+    with_store(|store| {
+        if store.active != slot {
+            return Err(geo_err("document_changed", "Активный документ изменился перед применением операции."));
+        }
+        let doc = active_doc(store);
+        doc.apply_built_candidate(candidate)?;
+        Ok(doc.state(&slot))
+    }).await
+}
+
 #[tauri::command]
 async fn doc_boolean(
     app: tauri::AppHandle,
@@ -574,8 +630,19 @@ async fn doc_mirror(app: tauri::AppHandle, part_id: String, plane: String) -> Re
 }
 
 #[tauri::command]
-async fn doc_split(app: tauri::AppHandle, part_id: String, plane: String, offset: f64) -> Result<Value, String> {
-    apply_op(&app, json!({"op": "split", "part_id": part_id, "plane": plane, "offset": offset})).await
+async fn doc_split(
+    app: tauri::AppHandle,
+    part_id: String,
+    plane: String,
+    offset: f64,
+    separate: Option<bool>,
+) -> Result<Value, String> {
+    let mut operation = json!({"op": "split", "part_id": part_id, "plane": plane, "offset": offset});
+    if separate.unwrap_or(false) {
+        operation["separate"] = json!(true);
+        return apply_atomic_op(&app, operation).await;
+    }
+    apply_op(&app, operation).await
 }
 
 #[tauri::command]
@@ -1062,6 +1129,27 @@ async fn doc_split_connector_pair(
         "print_separation": print_separation,
         "result_id": result_id,
         "name": name,
+    })).await
+}
+
+#[tauri::command]
+async fn doc_face_offset(
+    app: tauri::AppHandle,
+    target_id: String,
+    face_ref: Value,
+    distance: f64,
+) -> Result<Value, String> {
+    if !distance.is_finite() || distance.abs() < 1e-6 {
+        return Err(geo_err(
+            "bad_params",
+            "Введите ненулевое смещение грани в миллиметрах.",
+        ));
+    }
+    apply_atomic_op(&app, json!({
+        "op": "face_offset",
+        "target_id": target_id,
+        "face_ref": face_ref,
+        "distance": distance,
     })).await
 }
 
@@ -1789,14 +1877,29 @@ async fn doc_get_imported_mesh_binary(
     Ok(tauri::ipc::Response::new(data))
 }
 
+fn document_schema_version(doc: &Document) -> u32 {
+    if doc.snap.parts.iter().any(|part| {
+        matches!(part.get("template").and_then(Value::as_str), Some("box" | "cylinder" | "sphere"))
+    }) || doc.snap.operations.iter().any(|operation| {
+        operation.get("op").and_then(Value::as_str) == Some("face_offset")
+            || (operation.get("op").and_then(Value::as_str) == Some("split")
+                && operation.get("separate").and_then(Value::as_bool) == Some(true))
+    }) {
+        4
+    } else {
+        3
+    }
+}
+
 fn save_document(doc: &Document, target: &PathBuf) -> Result<(), String> {
     let tmp = target.with_extension("printforge.tmp");
+    let schema_version = document_schema_version(doc);
     let manifest = json!({
-        "schema_version": SCHEMA_VERSION, "app": "PrintForge",
+        "schema_version": schema_version, "app": "PrintForge",
         "app_version": APP_VERSION, "units": "mm", "kernel": "build123d/OCP",
     });
     let document = json!({
-        "schema_version": SCHEMA_VERSION, "units": "mm",
+        "schema_version": schema_version, "units": "mm",
         "document_id": doc.doc_id,
         "template": doc.snap.parts.first().and_then(|p| p.get("template")),
         "parts": doc.snap.parts,
@@ -1858,7 +1961,9 @@ async fn doc_open(app: tauri::AppHandle, path: String) -> Result<Value, String> 
         ));
     }
     let document_id = doc_json.get("document_id").and_then(Value::as_u64);
-    const TEMPLATES: [&str; 4] = ["plate_with_holes", "washer", "bracket_l", "case_with_lid"];
+    const TEMPLATES: [&str; 7] = [
+        "box", "cylinder", "sphere", "plate_with_holes", "washer", "bracket_l", "case_with_lid",
+    ];
     let template = doc_json.get("template").and_then(Value::as_str).map(String::from);
     if template.as_deref().is_some_and(|value| !TEMPLATES.contains(&value)) {
         return Err(geo_err(
@@ -2340,6 +2445,7 @@ fn main() {
             doc_thread_pair,
             doc_clearance_calibration,
             doc_split_connector_pair,
+            doc_face_offset,
             doc_face_feature,
             doc_face_dome,
             doc_sheet_bend,
@@ -2467,6 +2573,93 @@ mod mesh_tests {
         assert_eq!(document.index, 1);
         assert_eq!(document.history.len(), 2);
         assert_eq!(document.error.as_ref().unwrap()["code"], "geometry_cancelled");
+    }
+
+    #[test]
+    fn direct_edit_projects_require_schema_four_and_legacy_projects_remain_three() {
+        let mut document = Document::new();
+        document.snap.parts.push(json!({"part_id": "part-1", "template": "washer"}));
+        assert_eq!(document_schema_version(&document), 3);
+        document.snap.operations.push(json!({"op": "split"}));
+        assert_eq!(document_schema_version(&document), 3);
+        document.snap.operations[0]["separate"] = json!(false);
+        assert_eq!(document_schema_version(&document), 3);
+        document.snap.operations[0]["separate"] = json!(true);
+        assert_eq!(document_schema_version(&document), 4);
+        document.snap.operations = vec![json!({"op": "face_offset"})];
+        assert_eq!(document_schema_version(&document), 4);
+        document.snap.operations.clear();
+        for template in ["box", "cylinder", "sphere"] {
+            document.snap.parts[0]["template"] = json!(template);
+            assert_eq!(document_schema_version(&document), 4);
+        }
+    }
+
+    #[test]
+    fn failed_face_offset_candidate_preserves_redo_and_saved_document_state() {
+        let mut document = Document::new();
+        let mut first = Snapshot::default();
+        first.parts.push(json!({"part_id": "part-1", "params": {"height": 20}}));
+        first.part_n = 1;
+        document.commit(first);
+        let mut next = document.snap.clone();
+        next.operations.push(json!({"op": "transform", "translate": [5, 0, 0]}));
+        document.commit(next);
+        document.index -= 1;
+        document.snap = document.history[document.index].clone();
+        document.dirty = false;
+        document.revision = 7;
+        document.stats = Some(json!({"volume": 24000}));
+        document.mesh = Some(json!({"path": "confirmed.mesh"}));
+        let before = document.state("main");
+        let redo = document.history[document.index + 1].clone();
+
+        let mut candidate = Document::with_document_id(document.doc_id);
+        candidate.document_instance_id = document.document_instance_id;
+        candidate.snap = document.snap.clone();
+        candidate.snap.operations.push(json!({"op": "face_offset", "distance": -100}));
+        candidate.revision = 8;
+        candidate.error = Some(json!({"code": "face_offset_failed"}));
+        document.apply_built_candidate(candidate).unwrap();
+
+        let mut after = document.state("main");
+        assert_eq!(after["error"]["code"], "face_offset_failed");
+        after["error"] = Value::Null;
+        assert_eq!(after, before);
+        assert_eq!(document.history[document.index + 1].parts, redo.parts);
+        assert_eq!(document.history[document.index + 1].operations, redo.operations);
+        assert_eq!(document.mesh.as_ref().unwrap()["path"], "confirmed.mesh");
+    }
+
+    #[test]
+    fn successful_face_offset_candidate_replaces_redo_once_and_rejects_stale_commit() {
+        let mut document = Document::new();
+        document.commit(Snapshot::default());
+        document.commit(Snapshot::default());
+        document.index -= 1;
+        document.snap = document.history[document.index].clone();
+        document.revision = 7;
+
+        let mut candidate = Document::with_document_id(document.doc_id);
+        candidate.document_instance_id = document.document_instance_id;
+        candidate.snap = document.snap.clone();
+        candidate.snap.operations.push(json!({"op": "face_offset", "distance": 3}));
+        candidate.revision = 8;
+        candidate.stats = Some(json!({"volume": 27600}));
+        document.apply_built_candidate(candidate).unwrap();
+
+        assert_eq!(document.revision, 8);
+        assert_eq!(document.index, 2);
+        assert_eq!(document.history.len(), 3);
+        assert_eq!(document.snap.operations.len(), 1);
+        assert_eq!(document.snap.operations[0]["op"], "face_offset");
+        assert!(document.dirty);
+        assert_eq!(document.stats.as_ref().unwrap()["volume"], 27600);
+
+        let before = document.state("main");
+        let stale = Document::with_document_id(document.doc_id);
+        assert!(document.apply_built_candidate(stale).unwrap_err().contains("document_changed"));
+        assert_eq!(document.state("main"), before);
     }
 
     #[test]

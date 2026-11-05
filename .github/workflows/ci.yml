@@ -14,11 +14,13 @@ concurrency:
 
 jobs:
   deterministic:
-    name: Deterministic M0-M3 regression
+    name: Changed components and connected contracts
     runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
@@ -50,8 +52,8 @@ jobs:
         with:
           workspaces: app/src-tauri -> target
 
-      - name: Run full deterministic stage
-        run: backend/.venv/bin/python scripts/run_test_stage.py --scope ${{ github.event_name == 'schedule' && 'nightly' || 'pr' }}
+      - name: Run affected deterministic stage
+        run: backend/.venv/bin/python scripts/run_ci_test_stage.py
 
       - name: Upload machine reports and failure logs
         if: always()

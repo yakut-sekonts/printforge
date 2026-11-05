@@ -33,6 +33,12 @@ export const IconCursorQuestion = () => (
 export const IconCube = () => (
   <svg {...S}><path d="M8 1.8 14 4.8v6.4L8 14.2 2 11.2V4.8z"/><path d="M2 4.8l6 3 6-3"/><path d="M8 7.8v6.4"/></svg>
 );
+export const IconCylinder = () => (
+  <svg {...S}><ellipse cx="8" cy="4" rx="5" ry="2.2"/><path d="M3 4v8c0 1.2 2.2 2.2 5 2.2s5-1 5-2.2V4"/><path d="M3 12c0 1.2 2.2 2.2 5 2.2s5-1 5-2.2"/></svg>
+);
+export const IconSphere = () => (
+  <svg {...S}><circle cx="8" cy="8" r="6"/><ellipse cx="8" cy="8" rx="2.8" ry="6"/><path d="M2 8h12"/></svg>
+);
 export const IconFit = () => (
   <svg {...S}><path d="M2.5 5.5v-3h3M10.5 2.5h3v3M13.5 10.5v3h-3M5.5 13.5h-3v-3"/><rect x="6" y="6" width="4" height="4" rx=".8"/></svg>
 );

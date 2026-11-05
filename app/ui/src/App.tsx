@@ -13,10 +13,12 @@ import type {
 import { backend, expandTilde, isTauri, parseIpcError } from "./backend";
 import { evalExpression } from "./expr";
 import { Viewport, faceArea, ViewName } from "./viewport";
+import type { TransformAxis } from "./viewport";
 import {
   pushPullDelta, pushPullValue, resolveFaceEditTarget, resolveFaceFeatureTarget,
-  resolveSheetBendTarget,
+  resolveSheetBendTarget, resolveGenericFaceEditTarget,
 } from "./faceEditing";
+import { partIdForSolid, parseMillimeters, selectedBoundsCenter, solidIndicesForParts, togglePartSelection } from "./sceneSelection";
 import type {
   FaceDomePreview, FaceFeaturePreview, FaceFeatureTarget, SheetBendPreview,
 } from "./faceEditing";
@@ -27,13 +29,15 @@ import { HelpPanel, TooltipMode } from "./HelpPanel";
 import { Tooltips } from "./Tooltips";
 import { LessonBar, LessonRun, StepStatus } from "./LessonBar";
 import { AiPanel } from "./AiPanel";
+import { SelectionCoach } from "./SelectionCoach";
+import { PrimitivePicker } from "./PrimitivePicker";
 
 const TOOLTIP_KEY = "pf-tooltip-mode";
-const lessonKey = (id: string) => `pf-lesson-${id}`;
+const lessonKey = (id: string, version = 1) => `pf-lesson-${id}-v${version}`;
 
-function loadLessonProgress(id: string, len: number): StepStatus[] {
+function loadLessonProgress(id: string, len: number, version = 1): StepStatus[] {
   try {
-    const raw = localStorage.getItem(lessonKey(id));
+    const raw = localStorage.getItem(lessonKey(id, version));
     if (raw) {
       const arr = JSON.parse(raw) as StepStatus[];
       if (Array.isArray(arr) && arr.length === len) return arr;
@@ -49,10 +53,14 @@ export default function App() {
   const [doc, setDoc] = useState<DocState | null>(null);
   const [mesh, setMesh] = useState<MeshData | null>(null);
   const [computing, setComputing] = useState(false);
+  const [meshLoading, setMeshLoading] = useState(false);
   const [geometryBusy, setGeometryBusy] = useState(false);
   const [geometryCancelling, setGeometryCancelling] = useState(false);
   const [selectedFace, setSelectedFace] = useState<number | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
+  const [selectedPartIds, setSelectedPartIds] = useState<string[]>([]);
+  const [moveMode, setMoveMode] = useState(false);
+  const [movePreview, setMovePreview] = useState<{ axis: TransformAxis; delta: number } | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [whatIsThis, setWhatIsThis] = useState(false);
@@ -100,9 +108,12 @@ export default function App() {
   const viewportEl = useRef<HTMLDivElement>(null);
   const meshToken = useRef(0);
   const geometryOperationCount = useRef(0);
+  const documentActionPending = useRef(false);
   const docRef = useRef<DocState | null>(null);
+  const meshRef = useRef<MeshData | null>(null);
   const lessonRef = useRef<LessonRun | null>(null);
   const edgeToolRef = useRef(edgeTool);
+  const selectedPartIdsRef = useRef(selectedPartIds);
   const edgeSelectHandlerRef = useRef<(edge: EdgeRef) => void>(() => {});
   const pushPullRef = useRef(pushPull);
   const pushPullHandlersRef = useRef({
@@ -110,11 +121,17 @@ export default function App() {
     preview: (_delta: number) => {},
     commit: (_delta: number) => {},
   });
+  const partMoveHandlersRef = useRef({
+    preview: (_axis: TransformAxis, _delta: number) => {},
+    commit: (_axis: TransformAxis, _delta: number) => {},
+  });
   const performanceReported = useRef(false);
   const nativeE2eStarted = useRef(false);
   docRef.current = doc;
+  meshRef.current = mesh;
   lessonRef.current = lessonRun;
   edgeToolRef.current = edgeTool;
+  selectedPartIdsRef.current = selectedPartIds;
   pushPullRef.current = pushPull;
 
   // ---------- загрузка реестров ----------
@@ -144,15 +161,32 @@ export default function App() {
     if (!viewportEl.current) return;
     const vp = new Viewport(viewportEl.current, {
       onHoverFace: () => {},
-      onSelectFace: (face) => {
+      onSelectFace: (face, additive = false) => {
+        setEdgeTool((current) => ({ ...current, active: false, selected: null, partId: null }));
         setSelectedFace(face);
         vp.setSelectedFace(face);
-        if (face != null) lessonEvent({ type: "face_selected" });
+        if (face != null) {
+          const solidIndex = meshRef.current?.face_ranges
+            .find((candidate) => candidate.face_index === face)?.solid_index;
+          const partId = solidIndex == null ? null : partIdForSolid(docRef.current?.stats?.parts ?? [], solidIndex);
+          if (partId) {
+            const next = togglePartSelection(selectedPartIdsRef.current, partId, additive);
+            setSelectedPartId(next[next.length - 1] ?? null);
+            setSelectedPartIds(next);
+            if (additive) { setSelectedFace(null); vp.setSelectedFace(null); }
+          }
+          lessonEvent({ type: "face_selected" });
+        } else if (!additive) {
+          setSelectedPartId(null);
+          setSelectedPartIds([]);
+        }
       },
       onSelectEdge: (edge) => edgeSelectHandlerRef.current(edge),
       onPushPullStart: () => pushPullHandlersRef.current.start(),
       onPushPullPreview: (delta) => pushPullHandlersRef.current.preview(delta),
       onPushPullCommit: (delta) => pushPullHandlersRef.current.commit(delta),
+      onPartMovePreview: (axis, delta) => partMoveHandlersRef.current.preview(axis, delta),
+      onPartMoveCommit: (axis, delta) => partMoveHandlersRef.current.commit(axis, delta),
       onCameraRotated: () => lessonEvent({ type: "camera_rotated" }),
       onCameraZoomed: () => lessonEvent({ type: "camera_zoomed" }),
     });
@@ -254,13 +288,17 @@ export default function App() {
     const viewport = viewportRef.current;
     if (!viewport) return;
     viewport.setEdgeSelectionMode(edgeTool.active, doc?.stats?.edges ?? []);
-    if (edgeTool.active && edgeTool.selected) {
-      const prefix = edgeTool.kind === "fillet" ? "R" : "C";
-      viewport.setEdgeMarker(edgeTool.selected, `${prefix}${edgeTool.size} мм`);
+    if (edgeTool.selected) {
+      const label = edgeTool.active ? `${edgeTool.kind === "fillet" ? "R" : "C"}${edgeTool.size} мм` : "Ребро";
+      viewport.setEdgeMarker(edgeTool.selected, label);
     } else {
       viewport.setEdgeMarker(null);
     }
   }, [edgeTool.active, edgeTool.kind, edgeTool.selected, edgeTool.size, doc?.stats?.edges, mesh]);
+
+  useEffect(() => {
+    viewportRef.current?.setEditingEnabled(!computing && !geometryBusy && !meshLoading);
+  }, [computing, geometryBusy, meshLoading]);
 
   useEffect(() => {
     document.body.classList.toggle("what-is-this", whatIsThis);
@@ -271,9 +309,16 @@ export default function App() {
     const cur = docRef.current;
     // страж устаревших ответов: та же пара doc_id+slot, но меньшая ревизия
     if (cur && cur.slot === state.slot && cur.doc_id === state.doc_id && state.revision < cur.revision) return;
+    if (cur && (cur.revision !== state.revision || cur.doc_id !== state.doc_id || cur.slot !== state.slot)) {
+      setSelectedFace(null);
+      viewportRef.current?.setSelectedFace(null);
+      setEdgeTool((current) => ({ ...current, active: false, selected: null, partId: null }));
+      viewportRef.current?.setSplitPreview(null);
+    }
     setDoc(state);
+    const token = ++meshToken.current;
     if (state.stats && (state.stats.is_valid || state.stats.mesh_mode)) {
-      const token = ++meshToken.current;
+      setMeshLoading(true);
       setComputing(true);
       backend.docGetMesh()
         .then((m) => {
@@ -283,9 +328,12 @@ export default function App() {
           }
         })
         .catch(() => {})
-        .finally(() => { if (token === meshToken.current) setComputing(false); });
+        .finally(() => {
+          if (token === meshToken.current) { setComputing(false); setMeshLoading(false); }
+        });
     } else {
       setMesh(null);
+      setMeshLoading(false);
     }
   }, []);
 
@@ -303,6 +351,8 @@ export default function App() {
     fn: () => Promise<DocState>,
     cancellable = false,
   ): Promise<DocState | null> => {
+    if (documentActionPending.current || geometryOperationCount.current > 0) return null;
+    documentActionPending.current = true;
     setComputing(true);
     if (cancellable) beginGeometryOperation();
     try {
@@ -314,6 +364,7 @@ export default function App() {
       setStatusMsg(`Ошибка: ${err.message ?? String(e)}`);
       return null;
     } finally {
+      documentActionPending.current = false;
       if (cancellable) endGeometryOperation();
       setComputing(false);
     }
@@ -336,7 +387,7 @@ export default function App() {
 
   // ---------- уроки ----------
   const persistProgress = (run: LessonRun) => {
-    localStorage.setItem(lessonKey(run.lesson.lesson_id), JSON.stringify(run.statuses));
+    localStorage.setItem(lessonKey(run.lesson.lesson_id, run.lesson.content_version), JSON.stringify(run.statuses));
   };
 
   const advanceIfDone = useCallback((run: LessonRun): LessonRun => {
@@ -434,11 +485,11 @@ export default function App() {
       let state = await backend.docNewTutorial();
       applyDoc(state);
       const idx = lessons.indexOf(lesson);
-      if (idx === 0 || idx === 2) {
-        state = await backend.docCreatePlate({ length: 80, width: 40, height: 6, hole_diameter: 4, hole_offset: 10 });
+      if (lessonId === "navigation" || lessonId === "save-export") {
+        state = await backend.docCreate("box", { length: 40, width: 30, height: 20 });
         applyDoc(state);
       }
-      const statuses = loadLessonProgress(lesson.lesson_id, lesson.steps.length).map(() => "pending" as StepStatus);
+      const statuses = loadLessonProgress(lesson.lesson_id, lesson.steps.length, lesson.content_version).map(() => "pending" as StepStatus);
       const run: LessonRun = {
         lesson, lessonIndex: idx, totalLessons: lessons.length,
         stepIndex: 0, statuses, paused: false,
@@ -465,7 +516,7 @@ export default function App() {
   const lessonDone = useCallback((lessonId: string) => {
     const lesson = lessons.find((l) => l.lesson_id === lessonId);
     if (!lesson) return false;
-    const statuses = loadLessonProgress(lessonId, lesson.steps.length);
+    const statuses = loadLessonProgress(lessonId, lesson.steps.length, lesson.content_version);
     return statuses.every((s) => s !== "pending");
   }, [lessons]);
 
@@ -516,15 +567,13 @@ export default function App() {
     viewportRef.current?.cancelPushPullPreview();
     setPushPull((current) => ({ ...current, value: String(value), dragging: false }));
     if (Math.abs(value - target.current) < 1e-9) return;
-    const state = await runBackend(() => backend.docSetParameter(
-      target.parameter,
-      value,
-      String(value),
-      target.partId,
-    ), true);
-    if (state) {
+    const state = await runBackend(() => target.mode === "offset" && target.faceRef
+      ? backend.docFaceOffset({ target_id: target.partId, face_ref: target.faceRef, distance: value })
+      : backend.docSetParameter(target.parameter, value, String(value), target.partId), true);
+    if (state && !state.error) {
       setStatusMsg(`${target.label}: ${value} мм`);
-      lessonEvent({ type: "params", state });
+      if (target.mode === "offset") lessonEvent({ type: "operation", op: "face_offset" });
+      else lessonEvent({ type: "params", state });
     }
   }, [runBackend, lessonEvent]);
 
@@ -545,8 +594,8 @@ export default function App() {
   const updatePushPullValue = useCallback((raw: string) => {
     setPushPull((current) => ({ ...current, value: raw, dragging: false }));
     const target = pushPullRef.current.target;
-    const value = Number(raw.replace(",", "."));
-    if (target && Number.isFinite(value) && value >= target.minimum) {
+    const value = parseMillimeters(raw);
+    if (target && value != null && value >= target.minimum) {
       viewportRef.current?.setPushPullPreview(pushPullDelta(target, value));
     } else {
       viewportRef.current?.cancelPushPullPreview();
@@ -554,8 +603,9 @@ export default function App() {
   }, []);
 
   const applyPushPull = useCallback(() => {
-    const value = Number(pushPullRef.current.value.replace(",", "."));
-    void commitPushPullValue(value);
+    const value = parseMillimeters(pushPullRef.current.value);
+    if (value != null) void commitPushPullValue(value);
+    else setStatusMsg("Введите размер в миллиметрах");
   }, [commitPushPullValue]);
 
   pushPullHandlersRef.current = {
@@ -588,27 +638,51 @@ export default function App() {
     if (importedStats) {
       reason = "Push/Pull для импортированной сетки пока недоступен.";
       featureReason = "Элементы на грани для импортированной сетки пока недоступны.";
-    } else if (parts.length !== 1) {
-      reason = "Push/Pull пока доступен для одного параметрического тела.";
-      featureReason = "Элемент на грани пока доступен для одного параметрического тела.";
     } else {
-      const part = parts[0];
-      featureTarget = resolveFaceFeatureTarget(mesh, selectedFace, part.part_id);
-      bendTarget = resolveSheetBendTarget(mesh, selectedFace, part.part_id);
-      if (!featureTarget) {
-        featureReason = "Выберите внешнюю плоскую грань на границе детали.";
+      const solidIndex = mesh.face_ranges
+        .find((candidate) => candidate.face_index === selectedFace)?.solid_index;
+      const liveParts = doc.stats?.parts ?? [];
+      let selectedId = selectedPartId;
+      if (solidIndex != null) {
+        let firstSolid = 0;
+        for (const livePart of liveParts) {
+          const nextSolid = firstSolid + livePart.solid_count;
+          if (solidIndex >= firstSolid && solidIndex < nextSolid) {
+            selectedId = livePart.part_id;
+            break;
+          }
+          firstSolid = nextSolid;
+        }
       }
-      const template = templates.find((candidate) => candidate.template_id === part.template);
-      if ((doc.operations ?? []).some((operation) =>
-        operation.op !== "fillet" && operation.op !== "chamfer")) {
-        reason = "Push/Pull недоступен после операций, меняющих топологию тела.";
+      const part = parts.find((candidate) => candidate.part_id === selectedId);
+      if (!selectedId) {
+        reason = "Не удалось определить выбранное тело. Выберите его заново.";
+        featureReason = reason;
       } else {
-        if (template) target = resolveFaceEditTarget(mesh, selectedFace, part, template);
-        if (!target) reason = "Эта грань пока не связана с редактируемым размером.";
+        const solidIndices = solidIndicesForParts(liveParts, [selectedId]);
+        featureTarget = resolveFaceFeatureTarget(mesh, selectedFace, selectedId, solidIndices);
+        bendTarget = resolveSheetBendTarget(mesh, selectedFace, selectedId, solidIndices);
+        if (!featureTarget) {
+          featureReason = "Выберите внешнюю плоскую грань на границе детали.";
+        }
+        target = resolveGenericFaceEditTarget(mesh, selectedFace, selectedId, solidIndices);
+        const template = part && templates.find((candidate) => candidate.template_id === part.template);
+        const changesSelectedPartTopology = (doc.operations ?? []).some((operation) => {
+          const operationTarget = operation.target_id ?? operation.part_id;
+          return operationTarget === selectedId && operation.op !== "fillet" && operation.op !== "chamfer";
+        });
+        if (target) {
+          reason = null;
+        } else if (changesSelectedPartTopology) {
+          reason = "Push/Pull недоступен после операций, меняющих топологию выбранного тела.";
+        } else {
+          if (part && template) target = resolveFaceEditTarget(mesh, selectedFace, part, template, solidIndices);
+          if (!target) reason = "Смещение поддерживается для плоских граней. Выберите плоскую поверхность.";
+        }
       }
     }
 
-    viewport?.setPushPullHandle(target);
+    viewport?.setPushPullHandle(moveMode ? null : target);
     setPushPull({
       target,
       value: target ? String(target.current) : "",
@@ -618,14 +692,31 @@ export default function App() {
     setFaceFeatureTarget(featureTarget);
     setSheetBendTarget(bendTarget);
     setFaceFeatureReason(featureReason);
-  }, [selectedFace, mesh, doc, templates, importedStats]);
+  }, [selectedFace, selectedPartId, mesh, doc, templates, importedStats, moveMode]);
 
   // сброс выбора детали, если она исчезла из живых тел
   useEffect(() => {
-    if (!selectedPartId) return;
     const live = doc?.stats?.parts;
-    if (live && !live.some((p) => p.part_id === selectedPartId)) setSelectedPartId(null);
+    if (!live) return;
+    const liveIds = new Set(live.map((part) => part.part_id));
+    setSelectedPartIds((current) => current.every((id) => liveIds.has(id)) ? current : current.filter((id) => liveIds.has(id)));
+    if (selectedPartId && !liveIds.has(selectedPartId)) setSelectedPartId(null);
   }, [doc, selectedPartId]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const liveParts = doc?.stats?.parts ?? [];
+    if (!viewport || !mesh) {
+      viewport?.setSelectedSolids([]);
+      viewport?.setTransformHandle(null);
+      return;
+    }
+    const selectedSolidIndices = solidIndicesForParts(liveParts, selectedPartId ? [selectedPartId] : []);
+    viewport.setSelectedSolids(solidIndicesForParts(liveParts, selectedPartIds));
+    viewport.setTransformHandle(moveMode && selectedPartId && selectedSolidIndices.length > 0
+      ? { partId: selectedPartId, solidIndices: selectedSolidIndices }
+      : null);
+  }, [doc, mesh, selectedPartId, selectedPartIds, moveMode]);
 
   const activePartId = useCallback((): string | undefined => {
     const cur = docRef.current;
@@ -635,15 +726,40 @@ export default function App() {
   }, [selectedPartId]);
 
   const addPart = useCallback(async (t: TemplateDef) => {
-    await runBackend(() => backend.docAddPart(t.template_id), true);
+    const state = await runBackend(() => backend.docAddPart(t.template_id), true);
+    if (state && !state.error) {
+      const parts = state.stats?.parts ?? [];
+      const added = parts[parts.length - 1];
+      if (added) {
+        setSelectedPartId(added.part_id);
+        setSelectedPartIds([added.part_id]);
+        setMoveMode(true);
+        setStatusMsg("Форма добавлена. Потяните цветную стрелку, чтобы поставить её на нужное место");
+      }
+    }
   }, [runBackend]);
 
-  const runBoolean = useCallback(async (kind: "union" | "subtract" | "intersect", keepTool: boolean) => {
+  const runBoolean = useCallback(async (
+    kind: "union" | "subtract" | "intersect",
+    keepTool: boolean,
+    explicitToolId?: string,
+    explicitTargetId?: string,
+  ) => {
     const live = docRef.current?.stats?.parts ?? [];
     if (live.length < 2) return;
-    const target = live.find((p) => p.part_id === selectedPartId) ?? live[0];
-    const tool = live[(live.indexOf(target) + 1) % live.length];
-    await runBackend(() => backend.docBoolean(kind, target.part_id, tool.part_id, keepTool), true);
+    const target = live.find((p) => p.part_id === (explicitTargetId ?? selectedPartId)) ?? live[0];
+    const tool = live.find((part) => part.part_id === explicitToolId) ??
+      live[(live.indexOf(target) + 1) % live.length];
+    if (tool.part_id === target.part_id) return;
+    const state = await runBackend(() => backend.docBoolean(kind, target.part_id, tool.part_id, keepTool), true);
+    if (state && !state.error) {
+      setSelectedFace(null);
+      viewportRef.current?.setSelectedFace(null);
+      setSelectedPartId(target.part_id);
+      setSelectedPartIds([target.part_id]);
+      const labels = { union: "Детали объединены", subtract: "Инструмент вычтен", intersect: "Оставлено пересечение" };
+      setStatusMsg(labels[kind]);
+    }
   }, [runBackend, selectedPartId]);
 
   const runArray = useCallback(async (count: number, step: [number, number, number]) => {
@@ -661,14 +777,36 @@ export default function App() {
   const runSplit = useCallback(async (plane: "XY" | "XZ" | "YZ", offset: number) => {
     const id = activePartId();
     if (!id) return;
-    await runBackend(() => backend.docSplit(id, plane, offset), true);
+    const state = await runBackend(() => backend.docSplit(id, plane, offset), true);
+    if (state && !state.error) {
+      setSelectedFace(null);
+      viewportRef.current?.setSelectedFace(null);
+      setSelectedPartId(id);
+      setStatusMsg(`Деталь разделена плоскостью ${plane} на отметке ${offset} мм`);
+    }
   }, [runBackend, activePartId]);
 
   const runTransform = useCallback(async (translate: [number, number, number]) => {
     const id = activePartId();
     if (!id) return;
-    await runBackend(() => backend.docTransform(id, translate), true);
-  }, [runBackend, activePartId]);
+    const state = await runBackend(() => backend.docTransform(id, translate), true);
+    viewportRef.current?.cancelTransformPreview();
+    setMovePreview(null);
+    if (state && !state.error) {
+      const [x, y, z] = translate;
+      setStatusMsg(`Деталь перемещена: X ${x} мм, Y ${y} мм, Z ${z} мм`);
+      lessonEvent({ type: "operation", op: "transform" });
+    }
+  }, [runBackend, activePartId, lessonEvent]);
+
+  partMoveHandlersRef.current = {
+    preview: (axis, delta) => setMovePreview({ axis, delta }),
+    commit: (axis, delta) => {
+      const translate: [number, number, number] = [0, 0, 0];
+      translate[axis === "x" ? 0 : axis === "y" ? 1 : 2] = delta;
+      void runTransform(translate);
+    },
+  };
 
   const runProfileExtrude = useCallback(async (args: Parameters<typeof backend.docProfileExtrude>[0]) => {
     await runBackend(() => backend.docProfileExtrude(args), true);
@@ -857,30 +995,26 @@ export default function App() {
 
   // ---------- обработка рёбер ----------
   const startEdgeTool = useCallback((kind: EdgeFeatureKind) => {
-    setEdgeTool((current) => ({ ...current, active: true, kind, selected: null, partId: null }));
+    setMoveMode(false);
+    setMovePreview(null);
+    viewportRef.current?.setTransformHandle(null);
+    setEdgeTool((current) => ({ ...current, active: true, kind }));
     setSelectedFace(null);
     viewportRef.current?.setSelectedFace(null);
   }, []);
 
   const cancelEdgeTool = useCallback(() => {
     setEdgeTool((current) => ({ ...current, active: false, selected: null, partId: null }));
-    viewportRef.current?.setEdgeSelectionMode(false, []);
+    viewportRef.current?.setEdgeSelectionMode(false, docRef.current?.stats?.edges ?? []);
     viewportRef.current?.setEdgeMarker(null);
   }, []);
 
   const selectEdge = useCallback((e: EdgeRef) => {
-    if (!edgeToolRef.current.active) return;
     const liveParts = docRef.current?.stats?.parts ?? [];
-    let firstSolid = 0;
-    let edgePartId: string | null = null;
-    for (const part of liveParts) {
-      const nextSolid = firstSolid + part.solid_count;
-      if (e.solid_index >= firstSolid && e.solid_index < nextSolid) {
-        edgePartId = part.part_id;
-        break;
-      }
-      firstSolid = nextSolid;
-    }
+    const edgePartId = partIdForSolid(liveParts, e.solid_index);
+    setSelectedFace(null);
+    viewportRef.current?.setSelectedFace(null);
+    if (edgePartId) { setSelectedPartId(edgePartId); setSelectedPartIds([edgePartId]); }
     setEdgeTool((current) => ({
       ...current,
       selected: e,
@@ -892,8 +1026,8 @@ export default function App() {
   const applyEdgeTool = useCallback(async () => {
     const current = edgeToolRef.current;
     if (!current.selected) return;
-    const size = Number(current.size.replace(",", "."));
-    if (!Number.isFinite(size) || size <= 0) {
+    const size = parseMillimeters(current.size);
+    if (size == null || size <= 0) {
       setStatusMsg(current.kind === "fillet"
         ? "Радиус должен быть положительным числом"
         : "Размер фаски должен быть положительным числом");
@@ -914,7 +1048,7 @@ export default function App() {
   const clearErrorOrUndo = useCallback(() => {
     const code = docRef.current?.error?.code;
     if (code === "fillet_failed" || code === "chamfer_failed" || code === "dome_failed" ||
-        code === "bend_failed" ||
+        code === "bend_failed" || code === "face_offset_failed" || code === "split_failed" || code === "unsupported_face" || code === "bad_ref" ||
         code === "reselect_required") {
       void runBackend(() => backend.docClearError());
     } else {
@@ -1117,7 +1251,10 @@ export default function App() {
     const cmd = commands.find((c) => c.command_id === id);
     if (cmd && !cmdEnabled(cmd, docRef.current)) return;
     const template = templates.find((t) => t.command_id === id);
-    if (template) { void createFromTemplate(template); return; }
+    if (template) {
+      void (docRef.current?.stats?.parts?.length ? addPart(template) : createFromTemplate(template));
+      return;
+    }
     switch (id) {
       case "op.undo": void undoDocument(); break;
       case "op.redo": void redoDocument(); break;
@@ -1128,11 +1265,17 @@ export default function App() {
       case "export.3mf": void doExport("3mf"); break;
       case "op.fillet": startEdgeTool("fillet"); break;
       case "op.chamfer": startEdgeTool("chamfer"); break;
+      case "op.face_offset":
+        setMoveMode(false);
+        cancelEdgeTool();
+        setStatusMsg("Выберите плоскую грань и задайте смещение прямо под сценой");
+        document.querySelector<HTMLInputElement>('[aria-label="Смещение грани, мм"]')?.focus();
+        break;
       case "ai.panel.open": setHelpOpen(false); setAiOpen((v) => !v); break;
       case "app.help.open": setAiOpen(false); setHelpOpen((v) => !v); break;
       case "app.help.what_is_this": setWhatIsThis((v) => !v); break;
     }
-  }, [commands, templates, createFromTemplate, undoDocument, redoDocument, doSave, doOpen, doExport, startEdgeTool]);
+  }, [commands, templates, createFromTemplate, addPart, undoDocument, redoDocument, doSave, doOpen, doExport, startEdgeTool, cancelEdgeTool]);
 
   // ---------- режим «Что это?» ----------
   useEffect(() => {
@@ -1189,6 +1332,10 @@ export default function App() {
         );
         if (pushPullPending) cancelPushPull();
         else if (edgeToolRef.current.active) cancelEdgeTool();
+        else if (moveMode) {
+          viewportRef.current?.cancelTransformPreview();
+          setMoveMode(false); setMovePreview(null);
+        }
         else if (whatIsThis) setWhatIsThis(false);
         else if (aiOpen) setAiOpen(false);
         else if (helpOpen) setHelpOpen(false);
@@ -1196,11 +1343,23 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [whatIsThis, helpOpen, aiOpen, undoDocument, redoDocument, doSave, doOpen, cancelEdgeTool, cancelPushPull]);
+  }, [whatIsThis, helpOpen, aiOpen, moveMode, undoDocument, redoDocument, doSave, doOpen, cancelEdgeTool, cancelPushPull]);
 
   const faceAreaValue = mesh && selectedFace != null ? faceArea(mesh, selectedFace) : null;
   const docName = doc?.path ? doc.path.split("/").pop()! : "Без названия";
   const hasBody = (!!doc?.stats?.is_valid || !!doc?.stats?.mesh_mode || !!importedStats) && !!mesh;
+  const sceneParts = (doc?.stats?.parts ?? [])
+    .map((part, index) => ({ part_id: part.part_id, name: `${index + 1}. ${part.name}` }));
+  const selectedPartName = sceneParts.find((part) => part.part_id === selectedPartId)?.name ?? null;
+  const splitCenter = React.useMemo(() => selectedBoundsCenter(mesh,
+    solidIndicesForParts(doc?.stats?.parts ?? [], selectedPartId ? [selectedPartId] : [])), [mesh, doc, selectedPartId]);
+  const splitDefaults = { YZ: splitCenter[0], XZ: splitCenter[1], XY: splitCenter[2] };
+  const showFaceActions = () => {
+    const panel = document.querySelector<HTMLElement>(".face-info");
+    panel?.scrollIntoView({ behavior: "smooth", block: "start" });
+    panel?.classList.add("context-highlight");
+    window.setTimeout(() => panel?.classList.remove("context-highlight"), 1200);
+  };
 
   return (
     <div className="app-shell">
@@ -1211,8 +1370,15 @@ export default function App() {
           templates={templates}
           importedStats={importedStats}
           selectedPartId={selectedPartId}
-          onSelectPart={setSelectedPartId}
-          onCreateTemplate={(t) => void createFromTemplate(t)}
+          selectedPartIds={selectedPartIds}
+          onSelectPart={(partId, additive = false) => {
+            cancelEdgeTool(); cancelPushPull();
+            setSelectedFace(null);
+            const next = togglePartSelection(selectedPartIdsRef.current, partId, additive);
+            setSelectedPartId(next[next.length - 1] ?? null);
+            setSelectedPartIds(next);
+          }}
+          onCreateTemplate={(t) => void (hasBody ? addPart(t) : createFromTemplate(t))}
         />
         <main className="scene-area">
           <div className="viewport" ref={viewportEl} aria-label="Сцена 3D" />
@@ -1226,6 +1392,9 @@ export default function App() {
               Перспектива/Орто
             </button>
           </div>
+          {hasBody && (
+            <PrimitivePicker templates={templates} onCreate={(template) => void addPart(template)} />
+          )}
           {!hasBody && !computing && (
             <EmptyState
               templates={templates}
@@ -1233,6 +1402,54 @@ export default function App() {
               onLesson={() => void startLesson("first-part")}
             />
           )}
+          <div className="scene-dock">
+          <SelectionCoach
+            key={`${doc?.doc_id}:${doc?.slot}:${doc?.revision}:${selectedPartId}`}
+            hasBody={hasBody}
+            busy={computing || geometryBusy || meshLoading}
+            selectedFace={selectedFace}
+            faceArea={faceAreaValue}
+            canAddFaceFeature={faceFeatureTarget != null}
+            selectedPartName={selectedPartName}
+            selectedPartId={selectedPartId}
+            selectedPartIds={selectedPartIds}
+            pushPull={pushPull}
+            edgeTool={edgeTool}
+            moveMode={moveMode}
+            movePreview={movePreview}
+            parts={sceneParts}
+            splitDefaults={splitDefaults}
+            onStartEdgeTool={startEdgeTool}
+            onStartMove={() => {
+              cancelEdgeTool();
+              cancelPushPull();
+              setSelectedPartIds(selectedPartId ? [selectedPartId] : []);
+              setMoveMode(true);
+              setMovePreview(null);
+            }}
+            onCancelMove={() => {
+              viewportRef.current?.cancelTransformPreview();
+              viewportRef.current?.setTransformHandle(null);
+              setMoveMode(false);
+              setMovePreview(null);
+            }}
+            onMoveExact={(axis, delta) => partMoveHandlersRef.current.commit(axis, delta)}
+            onMovePreview={(axis, delta) => {
+              viewportRef.current?.setTransformPreview(axis, delta);
+              setMovePreview({ axis, delta });
+            }}
+            onBoolean={(kind, targetId, toolId, keepTool) => void runBoolean(kind, keepTool, toolId, targetId)}
+            onSplit={(plane, offset) => void runSplit(plane, offset)}
+            onSplitPreview={(plane, offset) => viewportRef.current?.setSplitPreview(plane, offset,
+              solidIndicesForParts(docRef.current?.stats?.parts ?? [], selectedPartId ? [selectedPartId] : []))}
+            onPushPullValue={updatePushPullValue}
+            onApplyPushPull={applyPushPull}
+            onCancelPushPull={cancelPushPull}
+            onEdgeToolSize={(size) => setEdgeTool((current) => ({ ...current, size }))}
+            onApplyEdgeTool={() => void applyEdgeTool()}
+            onCancelEdgeTool={cancelEdgeTool}
+            onShowFaceActions={showFaceActions}
+          />
           {lessonRun && (
             <LessonBar
               run={lessonRun}
@@ -1246,6 +1463,7 @@ export default function App() {
               onRestart={() => void startLesson(lessonRun.lesson.lesson_id)}
             />
           )}
+          </div>
         </main>
         <ParamsPanel
           doc={doc}

@@ -2,7 +2,41 @@
   "schema_version": 1,
   "templates": [
     {
+      "template_id": "box",
+      "kind": "primitive",
+      "title": "Параллелепипед",
+      "command_id": "part.create.box",
+      "help_id": "primitivy",
+      "params": [
+        {"name": "length", "label": "Длина", "unit": "мм", "min": 0.1, "default": 40},
+        {"name": "width", "label": "Ширина", "unit": "мм", "min": 0.1, "default": 30},
+        {"name": "height", "label": "Высота", "unit": "мм", "min": 0.1, "default": 20}
+      ]
+    },
+    {
+      "template_id": "cylinder",
+      "kind": "primitive",
+      "title": "Цилиндр",
+      "command_id": "part.create.cylinder",
+      "help_id": "primitivy",
+      "params": [
+        {"name": "diameter", "label": "Диаметр", "unit": "мм", "min": 0.1, "default": 30},
+        {"name": "height", "label": "Высота", "unit": "мм", "min": 0.1, "default": 30}
+      ]
+    },
+    {
+      "template_id": "sphere",
+      "kind": "primitive",
+      "title": "Сфера",
+      "command_id": "part.create.sphere",
+      "help_id": "primitivy",
+      "params": [
+        {"name": "diameter", "label": "Диаметр", "unit": "мм", "min": 0.1, "default": 30}
+      ]
+    },
+    {
       "template_id": "plate_with_holes",
+      "kind": "preset",
       "title": "Пластина с отверстиями",
       "command_id": "part.create.plate",
       "help_id": "shablon-plastina",
@@ -16,6 +50,7 @@
     },
     {
       "template_id": "washer",
+      "kind": "preset",
       "title": "Шайба / втулка",
       "command_id": "part.create.washer",
       "help_id": "shablon-shayba",
@@ -27,6 +62,7 @@
     },
     {
       "template_id": "bracket_l",
+      "kind": "preset",
       "title": "L-кронштейн",
       "command_id": "part.create.bracket",
       "help_id": "shablon-kronshteyn",
@@ -39,6 +75,7 @@
     },
     {
       "template_id": "case_with_lid",
+      "kind": "preset",
       "title": "Корпус с крышкой",
       "command_id": "part.create.case",
       "help_id": "shablon-korpus",

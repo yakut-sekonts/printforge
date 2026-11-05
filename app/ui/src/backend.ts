@@ -2,12 +2,13 @@ import type {
   AiConnectionTest, AiOperation, AiPlanResponse, AiProviderConfig, AiProviderInfo, ClearanceCalibrationArgs,
   ConstrainedSketch, ConstrainedSketchExtrudeArgs, SketchDrag, SketchSolveResult,
   DraftPrismArgs, LoftArgs, RevolveArgs, RibArgs, ShellArgs, SketchExtrudeArgs, SweepArgs,
-  DocState, EdgeRef, ExportResult, FaceDomeArgs, FaceFeatureArgs, FitPocketArgs, GeoError, ImportResult, MeshData,
+  DocState, EdgeRef, ExportResult, FaceDomeArgs, FaceFeatureArgs, FaceOffsetArgs, FitPocketArgs, GeoError, ImportResult, MeshData,
   ImageReliefPreview, ImageReliefSettings, MeshResource, MeshResourceMetadata,
   NativeE2eConfig, PerformanceConfig, PrintCheckResult,
   SheetBendArgs, SplitConnectorPairArgs, TextReliefArgs, ThreadPairArgs, VectorExtrudeArgs,
 } from "./types";
 import { decodeMeshBinary } from "./meshBinary";
+import { nativeIpcArgs } from "./ipcArgs";
 
 const HOME = "/Users/semenkontsevoy";
 
@@ -34,7 +35,7 @@ async function call<T>(command: string, args?: Record<string, unknown>, signal?:
     const { invoke } = await import("@tauri-apps/api/core");
     try {
       throwIfAborted(signal);
-      const result = (await invoke<T>(command, args)) as T;
+      const result = (await invoke<T>(command, nativeIpcArgs(args))) as T;
       throwIfAborted(signal);
       return result;
     } catch (e) {
@@ -108,7 +109,7 @@ export const backend = {
   docMirror: (partId: string, plane: "XY" | "XZ" | "YZ") =>
     call<DocState>("doc_mirror", { part_id: partId, plane }),
   docSplit: (partId: string, plane: "XY" | "XZ" | "YZ", offset: number) =>
-    call<DocState>("doc_split", { part_id: partId, plane, offset }),
+    call<DocState>("doc_split", { part_id: partId, plane, offset, separate: true }),
   docTransform: (partId: string, translate: [number, number, number]) =>
     call<DocState>("doc_transform", { part_id: partId, translate }),
   docProfileExtrude: (args: {
@@ -148,6 +149,8 @@ export const backend = {
     call<DocState>("doc_clearance_calibration", args as unknown as Record<string, unknown>),
   docSplitConnectorPair: (args: SplitConnectorPairArgs) =>
     call<DocState>("doc_split_connector_pair", args as unknown as Record<string, unknown>),
+  docFaceOffset: (args: FaceOffsetArgs) =>
+    call<DocState>("doc_face_offset", args as unknown as Record<string, unknown>),
   docFaceFeature: (args: FaceFeatureArgs) =>
     call<DocState>("doc_face_feature", args as unknown as Record<string, unknown>),
   docFaceDome: (args: FaceDomeArgs) =>

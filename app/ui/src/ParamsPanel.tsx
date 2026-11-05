@@ -128,6 +128,30 @@ interface Props {
 
 const PRINTER_KEY = "pf-printer";
 
+function InspectorSection({ title, children, reveal = false, className = "" }: {
+  title: string;
+  children: React.ReactNode;
+  reveal?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(reveal);
+
+  useEffect(() => {
+    if (reveal) setOpen(true);
+  }, [reveal]);
+
+  return (
+    <details
+      className={`inspector-section ${className}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>{title}</summary>
+      <div className="inspector-section-content">{children}</div>
+    </details>
+  );
+}
+
 function loadPrinter(): { x: string; y: string; z: string } {
   try {
     const raw = localStorage.getItem(PRINTER_KEY);
@@ -214,7 +238,7 @@ function flatCutBendSpan(
   bendAxis: "x" | "y",
 ): { center: number; extent: number } | null {
   const profile = operation.profile;
-  const anchor = operation.face_ref?.anchor;
+  const anchor = operation.face_ref?.kind === "outer_planar" ? operation.face_ref.anchor : null;
   if (!isFaceFeatureProfile(profile) || !anchor) return null;
   const axisIndex = bendAxis === "x" ? 0 : 1;
   const center = Number(anchor[axisIndex]) + Number(profile.center?.[axisIndex]);
@@ -238,9 +262,12 @@ function flatCutBendSpan(
 export function ParamsPanel(props: Props) {
   const { doc, templates, selectedPartId } = props;
   // активная деталь: выбранная или первая
-  const activePart = doc?.parts?.find((p) => p.part_id === selectedPartId) ?? doc?.parts?.[0] ?? null;
+  const activePart = selectedPartId
+    ? doc?.parts?.find((part) => part.part_id === selectedPartId) ?? null
+    : doc?.parts?.[0] ?? null;
   const isFirstPart = !activePart || doc?.parts?.[0]?.part_id === activePart.part_id;
-  const template = templates.find((t) => t.template_id === (activePart?.template ?? doc?.template)) ?? null;
+  const template = templates.find((candidate) => candidate.template_id ===
+    (selectedPartId ? activePart?.template : activePart?.template ?? doc?.template)) ?? null;
   const paramSource: Record<string, number> = activePart?.params ?? doc?.params ?? {};
   const exprFor = (name: string, def: number): string => {
     if (isFirstPart && doc?.expressions?.[name]) return doc.expressions[name];
@@ -740,7 +767,8 @@ export function ParamsPanel(props: Props) {
 
   const err: GeoError | null = doc?.error ?? null;
   const isEdgeError = err?.code === "fillet_failed" || err?.code === "chamfer_failed" ||
-    err?.code === "dome_failed" || err?.code === "bend_failed" || err?.code === "reselect_required";
+    err?.code === "dome_failed" || err?.code === "bend_failed" || err?.code === "reselect_required" ||
+    err?.code === "face_offset_failed" || err?.code === "split_failed" || err?.code === "unsupported_face" || err?.code === "bad_ref";
   const edges = doc?.stats?.edges ?? [];
   const edgeOperations = (doc?.operations ?? [])
     .filter((operation) => (operation.op === "fillet" || operation.op === "chamfer") && operation.edge_ref);
@@ -759,10 +787,13 @@ export function ParamsPanel(props: Props) {
     new Set(calibrationValues).size === calibrationValues.length;
 
   return (
-    <aside className="right-panel" aria-label="Параметры и инструменты">
-      <h2 className="panel-section">
-        Параметры{template ? ` — ${template.title}` : ""}{activePart && liveParts.length > 1 ? ` (${activePart.name})` : ""}
-      </h2>
+    <aside className="right-panel" aria-label="Выбранная область и инструменты">
+      <h2 className="panel-section">Инструменты модели</h2>
+      <p className="inspector-intro">
+        {doc?.stats?.is_valid
+          ? "Выберите грань или ребро на сцене. Действия появятся рядом с моделью. Здесь — точные настройки и дополнительные инструменты."
+          : "Начните с простой формы в центре сцены. Дополнительные способы создания и импорт доступны ниже."}
+      </p>
 
       {err && (
         <div className="error-box" role="alert">
@@ -789,6 +820,7 @@ export function ParamsPanel(props: Props) {
       )}
 
       {doc && template ? (
+        <InspectorSection title={`Размеры исходной формы — ${activePart?.name ?? template.title}`}>
         <div className="params-form">
           {template.params.map((p) => (
             <div className="param-field" key={p.name}>
@@ -821,12 +853,10 @@ export function ParamsPanel(props: Props) {
             Применить
           </button>
         </div>
-      ) : (
-        <p className="panel-empty">Выберите шаблон слева, чтобы создать деталь.</p>
-      )}
+        </InspectorSection>
+      ) : null}
 
-      <section className="param-section extended-tools">
-        <h3>Расширенные тела</h3>
+      <InspectorSection title="Другие способы создания" className="extended-tools">
         <p className="hint">Точные эскизные тела, траекторные операции, оболочка, уклон и ребро. Каждое применение добавляет одну операцию в историю.</p>
         <div className="op-row">
           <select value={extendedTool} aria-label="Расширенная операция" onChange={(event) => setExtendedTool(event.target.value as typeof extendedTool)}>
@@ -1201,7 +1231,7 @@ export function ParamsPanel(props: Props) {
             })}
           >Создать две части</button>
         </>}
-      </section>
+      </InspectorSection>
 
       {props.selectedFace != null && props.faceArea != null && (
         <section className="face-info">
@@ -1585,8 +1615,7 @@ export function ParamsPanel(props: Props) {
         </section>
       )}
 
-      <section className="tool-section">
-        <h3 className="panel-section">Обработка рёбер</h3>
+      <InspectorSection title="Скругление и фаска — точные настройки">
         {!props.edgeTool.active ? (
           <div className="fillet-actions">
             <button
@@ -1615,7 +1644,7 @@ export function ParamsPanel(props: Props) {
               <option value="chamfer">Фаска</option>
             </select>
             <p className="edge-pick-hint">
-              Щёлкните прямое ребро на модели или выберите любое доступное ребро в списке.
+              Щёлкните прямое или криволинейное ребро на модели. Список ниже помогает выбрать и проверить нужное ребро.
             </p>
             {edges.length === 0 && <p className="panel-empty">Рёбра не найдены.</p>}
             <ul className="edge-list">
@@ -1672,10 +1701,9 @@ export function ParamsPanel(props: Props) {
             </div>
           </div>
         )}
-      </section>
+      </InspectorSection>
 
-      <section className="tool-section">
-        <h3 className="panel-section">Операции</h3>
+      <InspectorSection title="Тела, массивы и выравнивание">
         <details className="add-part">
           <summary className="btn" data-cmd="part.add" aria-label="Добавить деталь">Добавить деталь</summary>
           <ul className="template-list add-part-menu">
@@ -1913,10 +1941,9 @@ export function ParamsPanel(props: Props) {
             </button>
           </div>
         </div>
-      </section>
+      </InspectorSection>
 
-      <section className="tool-section">
-        <h3 className="panel-section">Измерения</h3>
+      <InspectorSection title="Измерения">
         <button
           className="btn" data-cmd="measure.run" aria-label="Обновить измерения"
           disabled={!doc?.stats?.is_valid || props.measureBusy}
@@ -1981,10 +2008,9 @@ export function ParamsPanel(props: Props) {
             <p className="measure-result">Расстояние: {fmtNum(props.measureResult.distance)} мм</p>
           )}
         </div>
-      </section>
+      </InspectorSection>
 
-      <section className="tool-section">
-        <h3 className="panel-section">Проверка перед печатью</h3>
+      <InspectorSection title="Проверка перед печатью">
         <div className="printer-row">
           {(["x", "y", "z"] as const).map((axis) => (
             <div className="param-input printer-field" key={axis}>
@@ -2024,10 +2050,9 @@ export function ParamsPanel(props: Props) {
             <p className="check-note">«Проверки пройдены» означает только перечисленные проверки.</p>
           </>
         )}
-      </section>
+      </InspectorSection>
 
-      <section className="tool-section">
-        <h3 className="panel-section">Импорт</h3>
+      <InspectorSection title="Импорт модели" reveal={props.importPreview != null}>
         <div className="io-row">
           <input value={importPath} aria-label="Путь к импортируемой модели" onChange={(e) => setImportPath(e.target.value)} />
           <select
@@ -2071,10 +2096,9 @@ export function ParamsPanel(props: Props) {
             )}
           </div>
         )}
-      </section>
+      </InspectorSection>
 
-      {doc?.stats?.mesh_mode && <section className="tool-section">
-        <h3 className="panel-section">Mesh workflow</h3>
+      {doc?.stats?.mesh_mode && <InspectorSection title="Работа с сеткой" reveal>
         <p className="hint">Исходник встроен в проект. Операции остаются mesh-операциями и не создают фиктивную параметрическую BRep-историю.</p>
         {doc.stats.mesh_diagnostics && <div className="param-hint" role="status">
           Треугольников: {doc.stats.triangle_count}; компонент: {doc.stats.mesh_diagnostics.components}; открытых рёбер: {doc.stats.mesh_diagnostics.boundary_edges}; self-intersection: не проверено.
@@ -2096,10 +2120,9 @@ export function ParamsPanel(props: Props) {
           <div className="param-input op-field"><input inputMode="decimal" value={meshTargetRatio} aria-label="Целевая доля треугольников" onChange={(event) => setMeshTargetRatio(event.target.value)} /><span className="param-unit">ratio</span></div>
           <button className="btn" data-cmd="op.mesh.decimate" disabled={num(meshTargetRatio) <= 0 || num(meshTargetRatio) >= 1} onClick={() => props.onMeshDecimate(num(meshTargetRatio))}>Упростить mesh</button>
         </div>
-      </section>}
+      </InspectorSection>}
 
-      <section className="tool-section">
-        <h3 className="panel-section">Декоративный relief по изображению</h3>
+      <InspectorSection title="Рельеф по изображению" reveal={props.imageReliefPreview != null}>
         <p className="hint">Experimental mesh-only workflow. Результат не считается точной инженерной деталью.</p>
         <div className="io-row"><input value={imagePath} aria-label="Путь к изображению relief" onChange={(event) => setImagePath(event.target.value)} /></div>
         <div className="op-row">
@@ -2138,10 +2161,9 @@ export function ParamsPanel(props: Props) {
           >Apply</button>}
           {props.imageReliefPreview && <button className="btn" onClick={props.onCancelImageReliefPreview}>Отмена</button>}
         </div>
-      </section>
+      </InspectorSection>
 
-      <section className="io-forms">
-        <h3 className="panel-section">Файл проекта</h3>
+      <InspectorSection title="Файл проекта и экспорт" className="io-forms">
         <div className="io-row">
           <input value={props.savePath} aria-label="Путь сохранения проекта" onChange={(e) => props.setSavePath(e.target.value)} />
           <button className="btn" data-cmd="doc.save" aria-label="Сохранить проект" disabled={!doc} onClick={props.onSave}>Сохранить</button>
@@ -2166,7 +2188,7 @@ export function ParamsPanel(props: Props) {
             </button>
           ))}
         </div>
-      </section>
+      </InspectorSection>
     </aside>
   );
 }

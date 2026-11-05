@@ -63,6 +63,33 @@ def build(w, template, params=None, operations=None):
     return resp["result"]
 
 
+def test_basic_primitives_are_exact_brep_and_rest_on_build_plane(worker):
+    box = build(worker, "box", {"length": 40, "width": 30, "height": 20})
+    assert box["stats"]["volume"] == pytest.approx(24000)
+    assert box["stats"]["bbox"] == pytest.approx([-20, -15, 0, 20, 15, 20])
+
+    cylinder = build(worker, "cylinder", {"diameter": 20, "height": 12})
+    assert cylinder["stats"]["volume"] == pytest.approx(math.pi * 10 ** 2 * 12, rel=1e-6)
+    assert cylinder["stats"]["bbox"][2] == pytest.approx(0, abs=1e-7)
+    assert cylinder["stats"]["bbox"][5] == pytest.approx(12, abs=1e-7)
+
+    sphere = build(worker, "sphere", {"diameter": 18})
+    assert sphere["stats"]["volume"] == pytest.approx(4 / 3 * math.pi * 9 ** 3, rel=1e-6)
+    assert sphere["stats"]["bbox"][2] == pytest.approx(0, abs=1e-7)
+    assert sphere["stats"]["bbox"][5] == pytest.approx(18, abs=1e-7)
+
+
+@pytest.mark.parametrize("template, params", [
+    ("box", {"length": 0}),
+    ("cylinder", {"diameter": -1}),
+    ("sphere", {"diameter": 0}),
+])
+def test_basic_primitives_reject_non_positive_sizes(worker, template, params):
+    response = worker.call("build", {"template": template, "params": params})
+    assert response["ok"] is False
+    assert response["error"]["code"] == "bad_params"
+
+
 # --- AC-01 (регрессия через новый API) ---
 
 def test_ac01_plate(worker):
