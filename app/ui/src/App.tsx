@@ -1627,7 +1627,7 @@ export default function App() {
           <div className="viewport" ref={viewportEl} aria-label="Сцена 3D" />
           {doc && mesh && <DesignerWorkbench key={`${doc.document_instance_id}:${doc.slot}:${doc.revision}:${selectedPartId}`}
             doc={doc} mesh={mesh} viewport={viewportRef.current} partId={selectedPartId} face={faceFeatureTarget}
-            edge={edgeTool} busy={computing || geometryBusy || meshLoading || whatIsThis || !!unsavedRequest}
+            edge={edgeTool} busy={computing || geometryBusy || meshLoading || !!unsavedRequest} inspectMode={whatIsThis}
             sceneToolActive={bodyResizeMode || moveMode || edgeTool.active}
             historyIndex={historyEdit} onHistoryClose={() => setHistoryEdit(null)}
             onHistoryPick={setHistoryEdit} onPartSelect={(id) => { setSelectedPartId(id); setSelectedPartIds([id]); setSelectedFace(null); }}

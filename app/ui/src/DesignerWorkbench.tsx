@@ -56,7 +56,7 @@ function ParameterFields({ value, onChange, prefix = "" }: {
 }
 
 export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, busy, historyIndex, onHistoryClose,
-  preview, clearPreview, commit, prepare, onResizePolicy, onEdgeSize, onEdgeKind, onEdgeCancel, onStartResize, onStartMove, onFaceActions, onHistoryPick, onPartSelect, sceneToolActive,
+  preview, clearPreview, commit, prepare, onResizePolicy, onEdgeSize, onEdgeKind, onEdgeCancel, onStartResize, onStartMove, onFaceActions, onHistoryPick, onPartSelect, sceneToolActive, inspectMode,
 }: {
   doc: DocState; mesh: MeshData; viewport: Viewport | null; partId: string | null; face: FaceFeatureTarget | null;
   edge: EdgeToolUi; busy: boolean; historyIndex: number | null; onHistoryClose: () => void;
@@ -66,6 +66,7 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   onStartResize: () => void; onStartMove: () => void; onFaceActions: () => void;
   onHistoryPick: (index: number) => void; onPartSelect: (id: string) => void;
   sceneToolActive: boolean;
+  inspectMode: boolean;
 }) {
   const part = doc.stats?.parts?.find((candidate) => candidate.part_id === partId) ?? doc.stats?.parts?.[0];
   const bounds = part?.bbox ?? doc.stats?.bbox ?? [0, 0, 0, 1, 1, 1];
@@ -143,16 +144,16 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   const actionKey = JSON.stringify(action);
   useEffect(() => {
     setPreviewReady(false); setError(null);
-    if (!action || busy) { clearPreview(); return; }
+    if (!action || busy || inspectMode) { clearPreview(); return; }
     let cancel = () => {};
     const timer = window.setTimeout(() => {
       cancel = preview(action!, (cause) => { setError(cause); setPreviewReady(!cause); });
     }, 180);
     return () => { window.clearTimeout(timer); cancel(); };
-  }, [actionKey, busy]);
+  }, [actionKey, busy, inspectMode]);
 
   useEffect(() => {
-    if (!viewport || busy) { viewport?.setDesignerTool(null); return; }
+    if (!viewport || busy || inspectMode) { viewport?.setDesignerTool(null); return; }
     if (mode === "sketch" && face && drawing) {
       viewport.setPushPullHandle(null);
       viewport.setDesignerTool({ kind: "sketch", origin: face.center, normal: face.normal,
@@ -200,7 +201,7 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
       });
     } else viewport.setDesignerTool(null);
     return () => { viewport.setDesignerTool(null); viewport.setDesignerPull(null, null); };
-  }, [mode, drawing, shape, face, isMesh, viewport, mesh, radius, busy, edgeActive, edge.selected]);
+  }, [mode, drawing, shape, face, isMesh, viewport, mesh, radius, busy, inspectMode, edgeActive, edge.selected]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") { close(); if (edgeActive) onEdgeCancel(); } };
@@ -211,7 +212,7 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   useEffect(() => () => { clearPreview(); viewport?.setDesignerTool(null); viewport?.setFaceFeaturePreview(null); }, []);
 
   const apply = async () => {
-    if (!action || !previewReady || busy) return;
+    if (!action || !previewReady || busy || inspectMode) return;
     if (await commit(action)) { if (edgeActive) onEdgeCancel(); close(); }
   };
   const policy = <label className="designer-field">Как менять габариты<select value={preserve && part?.parametric_resize ? "preserve" : "scale"} onChange={(event) => setPreserve(event.target.value === "preserve")}>

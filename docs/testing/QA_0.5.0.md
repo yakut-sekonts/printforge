@@ -30,6 +30,7 @@ macOS ARM `.app` собрана с финальным sidecar; `codesign --verif
 - Реальный canvas: выбор прямого ребра → ручка радиуса → точный Preview → Apply.
 - Модель с отверстием и скруглением → явный mesh из 165888 треугольников без открытых рёбер → реальный drag поверхности → точный Preview → Apply. Это browser-жест, не native Windows evidence.
 - История дополнительно доступна кнопкой над сценой, включая стандартное окно, где боковой список скрыт responsive layout.
+- What-mode на новой кнопке «Размеры» открыл статью «Ручное проектирование», не открыл editor и не изменил revision 11 или модель.
 
 Дополнительные native/manual результаты фиксируются отдельно; browser smoke не выдаётся за Windows UI или полный native E2E.
 
@@ -45,6 +46,7 @@ macOS ARM `.app` собрана с финальным sidecar; `codesign --verif
 - У сферы tessellation давала два degenerate pole triangles. Они удаляются до uniform subdivision; адаптивное независимое уплотнение заменено сохраняющим связность. Конвертация, не дающая замкнутую сетку, отклоняется без потери BRep.
 - Сохранность transient mesh, подписей transform gizmo и отмена второго pointer проверяются отдельно.
 - Native manual выявил зависимость Escape от порядка window listeners: сброс выбранного тела мог перемонтировать инструмент до очистки history index. Root keyboard handler теперь очищает index и Preview до сброса выбора; отмена не должна открывать редактор повторно.
+- What-mode отдельно блокирует Preview/жесты, но не отключает новые help-target buttons: disabled-кнопка не посылала click для открытия статьи. Контекстная справка не должна выполнять изменение.
 - Первые запуски нового smoke-harness выявили несоответствие shutdown response без `result`; исправлен harness. Неуспешные промежуточные запуски не объявляются PASS.
 
 ## BLOCKED / не проверено

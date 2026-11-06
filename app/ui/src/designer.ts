@@ -26,6 +26,11 @@ const NAMES: Record<string, string> = {
   array_linear: "Линейный массив", array_circular: "Круговой массив", mirror: "Отражение",
   sketch_extrude: "Выдавливание эскиза", profile_extrude: "Выдавливание профиля",
   sheet_bend: "Изгиб", revolve: "Вращение профиля", sweep: "По траектории", loft: "По сечениям",
+  mesh_transform: "Положение сетки", mesh_repair: "Исправление сетки", mesh_decimate: "Упрощение сетки",
+  constrained_sketch_extrude: "Выдавливание эскиза с ограничениями", shell: "Оболочка",
+  draft_prism: "Уклон", rib: "Ребро жёсткости", fit_pocket: "Посадочный карман",
+  vector_extrude: "Выдавливание SVG/DXF", text_relief: "Текстовый рельеф",
+  thread_pair: "Резьбовая пара", clearance_calibration: "Калибровка зазоров", split_connector_pair: "Разделение со штифтами",
 };
 
 export function operationName(operation: Operation): string {
