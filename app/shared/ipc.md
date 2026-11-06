@@ -4,6 +4,18 @@
 
 ## DocState
 
+### Interaction-first 0.6.0
+
+Schema 7 добавляет `face_feature.dimension_bindings`: `u`/`v` с `{edge: "min"|"max", offset}` в мм до центра профиля и `equal_diameter` с индексом более раннего circle feature. Зависимость разрешается при rebuild; будущие/выключенные/циклические ссылки отклоняются. Параметрический resize переигрывает зависимости, affine resize их не обещает.
+
+`mesh.face_ranges[]` дополнительно содержит `surface_ref` для плоскости/цилиндра и `feature_index` для однозначно сопоставленной поддерживаемой операции. Это provenance текущей revision, не стабильный глобальный Face ID. Произвольный импорт не получает выдуманной истории.
+
+Designer append поддерживает `mate` с `part_id`, `fixed_id`, `kind: "plane"|"axis"`, двумя `surface_ref` и конечным `gap`. Worker заменяет выбранные refs проверяемыми bindings до сохранения; rebuild применяет ациклические направленные связи после геометрической истории. Тела остаются отдельными. Изменённая/неоднозначная топология требует повторного выбора.
+
+`constrained_sketch_extrude` принимает `frame: {origin,x_dir,normal}`, `mode: "new"|"add"|"cut"`, `target_id`, sketch и положительную depth. Solver дополнительно поддерживает трёхточечную arc entity и point ref `mid`. Ошибка конфликта содержит JSON detail с `conflicting_constraints` (нулевые индексы), невязкой и DOF.
+
+Native `recovery_status()` возвращает `{available: string[], error: string|null}`. `recovery_restore({name})` требует чистого main-слота без вычисления, строит candidate до замены и возвращает грязный безымянный DocState. `recovery_discard({name})` удаляет только проверенный recovery-файл другой сессии; произвольные пути, symlinks и текущая копия запрещены. Период snapshot — 30 секунд; учебный слот исключён. Browser shim эти native-команды не эмулирует.
+
 ### Designer Preview и commit (0.5.0)
 
 `doc_designer_action({action, expected_revision, expected_instance, preview})` принимает `append` с operation, `edit` с index/changes или явный `convert_mesh`. Native outer keys преобразуются в camelCase SDK; вложенные CAD identifiers сохраняются. Обе проверки identity обязательны; смена slot/instance/revision до commit отклоняет candidate. Preview возвращает `{stats, mesh, base_revision, document_instance_id}` без изменения подтверждённого документа, error, history или Redo. Ошибка Preview отклоняет запрос. Обычный commit возвращает DocState и выполняется одним атомарным действием. Конвертация заменяет исходник embedded STL; Undo возвращает BRep.

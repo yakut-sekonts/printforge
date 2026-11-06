@@ -39,6 +39,7 @@ function fixture() {
       releasePointerCapture: (pointerId: number) => captured.delete(pointerId),
     } },
     controls: { enabled: true }, editingEnabled: true,
+    hiddenSolids: new Set(), selectionCycle: null, faceRanges: [],
     bodyResizeTarget: { partId: "one", solidIndices: [0], minimum: [0, 0, 0], maximum: [10, 20, 30], size: [10, 20, 30] },
     bodyResizeGroup: new THREE.Group(), bodyResizeVertices: new Set([0, 1, 2]),
     bodyResizeOriginal: null, bodyResizePreview: null, bodyResizeLabel: null, bodyResizeDrag: null,
@@ -63,6 +64,34 @@ test("resize Preview uses a copy, keeps other body vertices, and cancellation re
   viewport.cancelBodyResizePreview();
   assert.equal(viewport.mesh.geometry, original);
   assert.equal(viewport.bodyResizeLabel, null);
+});
+
+test("overlap selection cycles without choosing hidden solids or duplicate triangle hits", () => {
+  const { viewport } = fixture();
+  viewport.faceRanges = [
+    { face_index: 10, solid_index: 0, tri_start: 0, tri_count: 2 },
+    { face_index: 20, solid_index: 1, tri_start: 2, tri_count: 1 },
+    { face_index: 30, solid_index: 2, tri_start: 3, tri_count: 1 },
+  ];
+  viewport.raycaster = { setFromCamera() {}, intersectObject: () => [{ faceIndex: 0 }, { faceIndex: 1 }, { faceIndex: 2 }, { faceIndex: 3 }] };
+  viewport.pointer = new THREE.Vector2();
+  viewport.hiddenSolids = new Set([1]);
+  const select = (altKey: boolean) => Viewport.prototype.pickFace.call(viewport, pointer({ altKey }));
+  assert.equal(select(false), 10);
+  assert.equal(select(true), 10);
+  assert.equal(select(true), 30);
+  assert.equal(select(true), 10);
+});
+
+test("hiding bodies changes draw groups without deleting mesh vertices or document indices", () => {
+  const { viewport, original } = fixture();
+  viewport.faceRanges = [{ face_index: 1, solid_index: 0, tri_start: 0, tri_count: 1 }];
+  const indices = Array.from(original.index!.array);
+  viewport.setHiddenSolids([0]);
+  assert.deepEqual(original.groups, [{ start: 0, count: 3, materialIndex: 1 }]);
+  viewport.setHiddenSolids([]);
+  assert.deepEqual(original.groups, [{ start: 0, count: 3, materialIndex: 0 }]);
+  assert.deepEqual(Array.from(original.index!.array), indices);
 });
 
 test("dragging sends no document edits before pointerup and commits exactly once", () => {

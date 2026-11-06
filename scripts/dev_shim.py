@@ -851,7 +851,8 @@ def save_doc(d, path):
         (operation.get("op") == "transform" and ("rotate_deg" in operation or "pivot" in operation)) or
         (operation.get("op") == "mesh_transform" and "pivot" in operation)
         for operation in d.operations)
-    schema_version = 6 if requires_schema_six else 5 if any(operation.get("op") == "step_source" for operation in d.operations) else 4 if requires_schema_four else 3
+    requires_schema_seven = any(operation.get("op") == "mate" or "dimension_bindings" in operation or "frame" in operation or any(entity.get("type") == "arc" for entity in operation.get("sketch", {}).get("entities", [])) for operation in d.operations)
+    schema_version = 7 if requires_schema_seven else 6 if requires_schema_six else 5 if any(operation.get("op") == "step_source" for operation in d.operations) else 4 if requires_schema_four else 3
     manifest = {"schema_version": schema_version, "app": "PrintForge",
                 "app_version": "0.1.0-m2", "units": "mm",
                 "kernel": "build123d/OCP"}
@@ -883,7 +884,7 @@ def cmd_doc_open(a):
     except (zipfile.BadZipFile, KeyError, json.JSONDecodeError):
         raise geo_error("bad_file", "Это не файл проекта PrintForge или файл повреждён.")
     schema_version = int(document.get("schema_version", 1))
-    if schema_version > 6:
+    if schema_version > 7:
         raise geo_error(
             "unsupported_project_version",
             f"Проект создан в более новой версии формата ({schema_version}). Обновите PrintForge.")

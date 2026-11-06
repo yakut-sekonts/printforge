@@ -1,7 +1,7 @@
 {
   "name": "printforge-ui",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,7 @@
     "build": "npm run typecheck && vite build",
     "test:help": "node --experimental-strip-types --test test/helpSearch.test.ts test/lessonEngine.test.ts test/revealCommand.test.ts test/tooltipController.test.ts",
     "test:geometry": "node --experimental-strip-types --test test/geometryControl.test.ts test/documentState.test.ts",
-    "test:selection": "node --experimental-strip-types --test test/faceEditing.test.ts test/sceneSelection.test.ts test/bodyResizing.test.ts test/viewportResizing.test.ts test/designer.test.ts",
+    "test:selection": "node --experimental-strip-types --test test/faceEditing.test.ts test/sceneSelection.test.ts test/bodyResizing.test.ts test/viewportResizing.test.ts test/designer.test.ts test/interactionRelease.test.ts",
     "test:ipc": "node --experimental-strip-types --test test/ipcArgs.test.ts",
     "test:mesh": "node --experimental-strip-types --test test/meshBinary.test.ts"
   },

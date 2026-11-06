@@ -20,6 +20,7 @@ export function edgeDesignerAction(kind: "fillet" | "chamfer", edge: EdgeRef, si
 const NAMES: Record<string, string> = {
   fillet: "Скругление", chamfer: "Фаска", face_offset: "Смещение грани",
   face_feature: "Элемент на грани", face_dome: "Купол", resize_body: "Масштабирование",
+  mate: "Сборочная связь",
   resize_parametric: "Габариты с сохранением элементов", transform: "Положение",
   mesh_source: "Исходная сетка", step_source: "Исходный STEP", image_relief_source: "Рельеф",
   mesh_deform: "Мягкая деформация", boolean: "Булева операция", split: "Разделение",
@@ -40,7 +41,8 @@ export function operationName(operation: Operation): string {
 
 export const EDIT_FIELDS: Record<string, string[]> = {
   fillet: ["radius"], chamfer: ["distance"], face_offset: ["distance"],
-  face_feature: ["profile", "depth", "mode"], face_dome: ["diameter", "height", "mode"],
+  face_feature: ["profile", "depth", "mode", "dimension_bindings"], face_dome: ["diameter", "height", "mode"],
+  mate: ["gap"], constrained_sketch_extrude: ["sketch", "depth", "mode"],
   resize_body: ["size", "anchor"], resize_parametric: ["size", "anchor"],
   transform: ["translate", "rotate_deg", "pivot"], mesh_deform: ["center", "delta", "radius"],
   mesh_transform: ["translate", "rotate_deg", "pivot", "scale"],

@@ -47,12 +47,11 @@ def respond(request_id, ok, **payload):
     sys.stdout.flush()
 
 
-class GeometryError(Exception):
-    """Понятная пользователю ошибка операции."""
-
-    def __init__(self, code, message, detail=""):
-        super().__init__(message)
-        self.code, self.message, self.detail = code, message, detail
+from geometry_errors import GeometryError
+from interaction_geometry import (
+    bind_surface, feature_index_for_face, mate_shape, new_feature_faces, print_placement_checks,
+    resolve_feature, sampled_wall_check, surface_reference,
+)
 
 
 # ---------- шаблоны ----------
@@ -169,10 +168,18 @@ def _resize_parametric(part, operation, part_id):
     original, _ = TEMPLATES[template][0](design["params"])
     resized, _ = TEMPLATES[template][0](params)
     rebound = []
+    resized_features = []
     for previous in design["operations"]:
         updated = _rebind_design_reference(original, resized, previous)
-        original = apply_part_operations({part_id: {"shape": original}}, [previous])[part_id]["shape"]
-        resized = apply_part_operations({part_id: {"shape": resized}}, [updated])[part_id]["shape"]
+        old_candidate, new_candidate = copy.deepcopy(previous), copy.deepcopy(updated)
+        if previous["op"] == "face_feature":
+            old_candidate = resolve_feature(previous, original, design["operations"], previous.get("_history_index", 0))
+            new_candidate = resolve_feature(updated, resized, design["operations"], previous.get("_history_index", 0))
+            old_candidate.pop("dimension_bindings", None)
+            new_candidate.pop("dimension_bindings", None)
+        original = apply_part_operations({part_id: {"shape": original}}, [old_candidate])[part_id]["shape"]
+        rebuilt = apply_part_operations({part_id: {"shape": resized, "_feature_faces": resized_features}}, [new_candidate])[part_id]
+        resized, resized_features = rebuilt["shape"], rebuilt.get("_feature_faces", [])
         rebound.append(updated)
     from build123d import Pos
     new_bounds = resized.bounding_box()
@@ -186,6 +193,7 @@ def _resize_parametric(part, operation, part_id):
         raise GeometryError("preserve_unsupported", "Эта история не позволяет сохранить элементы при заданных габаритах. Исходная модель сохранена.")
     rebound.append({"op": "transform", "part_id": part_id, "translate": shift})
     part["_design"] = {"template": template, "params": params, "operations": rebound}
+    part["_feature_faces"] = [(Pos(*shift) * face, index) for face, index in resized_features]
     return resized
 
 
@@ -419,8 +427,9 @@ def _apply_edge_feature(part, operation):
         feature = "Радиус" if kind == "fillet" else "Размер фаски"
         raise GeometryError(
             error_code,
-            f"{feature} {value:g} мм слишком велик для выбранного ребра. "
-            "Уменьшите значение или выберите другое ребро.",
+            f"Не удалось построить обработку ребра: {feature.lower()} {value:g} мм. "
+            "Возможны пересечение соседних поверхностей или неподходящая геометрия ребра. "
+            "Проверьте меньший размер или выберите другое ребро.",
             detail=str(exc).split("\n")[0]) from exc
     if not result.is_valid or not result.solids():
         raise GeometryError(error_code, "Операция создаёт некорректную геометрию.")
@@ -487,7 +496,7 @@ def _binary_mesh_resource(blob, name):
     return {"path": str(path), "bytes": len(blob), "sha256": digest}
 
 
-def mesh_resource(part, name, tol=0.1):
+def mesh_resource(part, name, tol=0.1, feature_faces=None):
     positions, indices, face_ranges = [], [], []
     v_off = 0
     fi = 0
@@ -502,7 +511,9 @@ def mesh_resource(part, name, tol=0.1):
             face_ranges.append({"face_index": fi, "solid_index": si,
                                 "tri_start": len(indices) // 3 - len(tris),
                                 "tri_count": len(tris),
-                                "face_ref": face_offset_reference(face, si)})
+                                "face_ref": face_offset_reference(face, si),
+                                "surface_ref": surface_reference(face),
+                                "feature_index": feature_index_for_face(face, feature_faces)})
             fi += 1
             v_off += len(verts)
     blob = struct.pack("<II", len(positions) // 3, len(indices) // 3)
@@ -1035,7 +1046,7 @@ def stats_of(part, extra=None, with_edges=True):
     if with_edges:
         st["edges"] = list_edges(part)
     if extra:
-        st.update(extra)
+        st.update({key: value for key, value in extra.items() if not key.startswith("_")})
     return st
 
 
@@ -2346,6 +2357,8 @@ def _solve_constrained_sketch(sketch, drag=None, tolerance=1e-7):
     constraints = sketch.get("constraints") or []
     if not entities:
         raise GeometryError("bad_params", "Эскиз не содержит геометрических элементов.")
+    if len(entities) > 160 or len(constraints) > 400:
+        raise GeometryError("sketch_too_large", "Эскиз поддерживает до 160 элементов и 400 ограничений. Разделите его на несколько операций.")
     entity_by_id = {}
     spans = {}
     values = []
@@ -2355,8 +2368,10 @@ def _solve_constrained_sketch(sketch, drag=None, tolerance=1e-7):
         if not entity_id or entity_id in entity_by_id:
             raise GeometryError("bad_params", "Каждый элемент эскиза должен иметь уникальный id.")
         start = len(values)
-        if kind == "line":
+        if kind in ("line", "arc"):
             points = [entity.get("start"), entity.get("end")]
+            if kind == "arc":
+                points.append(entity.get("mid"))
             if any(not isinstance(point, list) or len(point) != 2 for point in points):
                 raise GeometryError("bad_params", f"Линия {entity_id} должна иметь start/end [x, y].")
             values.extend(float(value) for point_value in points for value in point_value)
@@ -2382,7 +2397,7 @@ def _solve_constrained_sketch(sketch, drag=None, tolerance=1e-7):
         if entity_id not in spans:
             raise GeometryError("bad_params", f"Элемент эскиза не найден: {entity_id}.")
         start, _, kind = spans[entity_id]
-        offsets = {"start": 0, "end": 2} if kind == "line" else {"center": 0}
+        offsets = {"start": 0, "end": 2, **({"mid": 4} if kind == "arc" else {})} if kind in ("line", "arc") else {"center": 0}
         if point_name not in offsets:
             raise GeometryError("bad_params", f"У элемента {entity_id} нет точки {point_name}.")
         offset = start + offsets[point_name]
@@ -2408,9 +2423,13 @@ def _solve_constrained_sketch(sketch, drag=None, tolerance=1e-7):
             raise GeometryError("sketch_degenerate", f"Окружность {entity_id} имеет нулевой радиус.")
         return vector[start:start + 2], radius
 
+    constraint_ranges = []
+
     def constraint_residuals(vector):
         residuals = []
+        ranges = []
         for constraint in constraints:
+            first_residual = len(residuals)
             kind = constraint.get("type")
             if kind == "coincident":
                 residuals.extend(point(vector, constraint.get("a")) - point(vector, constraint.get("b")))
@@ -2482,6 +2501,8 @@ def _solve_constrained_sketch(sketch, drag=None, tolerance=1e-7):
                     residuals.extend(vector[start:end] - target)
             else:
                 raise GeometryError("bad_params", f"Неизвестное ограничение: {kind}.")
+            ranges.append((first_residual, len(residuals)))
+        constraint_ranges[:] = ranges
         if drag:
             actual = point(vector, drag.get("point"))
             target = np.asarray(drag.get("value"), dtype=float)
@@ -2527,18 +2548,20 @@ def _solve_constrained_sketch(sketch, drag=None, tolerance=1e-7):
     rank = int(np.linalg.matrix_rank(matrix, tol=1e-7)) if matrix.size else 0
     degrees_of_freedom = max(0, len(solved) - rank)
     if max_residual > tolerance * 10:
+        conflicts = [index for index, (start, end) in enumerate(constraint_ranges) if end > start and float(np.max(np.abs(residual[start:end]))) > tolerance * 10]
         raise GeometryError(
             "constraint_conflict",
             f"Ограничения противоречат друг другу; максимальная невязка {max_residual:.6g}.",
-            detail={"max_residual": max_residual, "degrees_of_freedom": degrees_of_freedom})
+            detail=json.dumps({"max_residual": max_residual, "degrees_of_freedom": degrees_of_freedom, "conflicting_constraints": conflicts}))
 
     solved_entities = []
     for entity in entities:
         start, _, kind = spans[entity["id"]]
-        if kind == "line":
+        if kind in ("line", "arc"):
             solved_entities.append({**entity,
                                     "start": solved[start:start + 2].tolist(),
-                                    "end": solved[start + 2:start + 4].tolist()})
+                                    "end": solved[start + 2:start + 4].tolist(),
+                                    **({"mid": solved[start + 4:start + 6].tolist()} if kind == "arc" else {})})
         else:
             solved_entities.append({**entity,
                                     "center": solved[start:start + 2].tolist(),
@@ -2559,7 +2582,7 @@ def _solved_sketch_profile(sketch, solution):
     entity_by_id = {entity["id"]: entity for entity in solution["entities"]}
     regions = sketch.get("regions") or []
     if not regions:
-        line_ids = [entity["id"] for entity in solution["entities"] if entity["type"] == "line"]
+        line_ids = [entity["id"] for entity in solution["entities"] if entity["type"] in ("line", "arc")]
         circle_ids = [entity["id"] for entity in solution["entities"] if entity["type"] == "circle"]
         if line_ids:
             regions = [{"outer": line_ids, "holes": []}]
@@ -2579,9 +2602,10 @@ def _solved_sketch_profile(sketch, solution):
         segments = []
         for entity_id in entity_ids:
             entity = entity_by_id.get(entity_id)
-            if not entity or entity["type"] != "line":
+            if not entity or entity["type"] not in ("line", "arc"):
                 raise GeometryError("bad_params", f"Линия контура не найдена: {entity_id}.")
-            segments.append({"type": "line", "start": entity["start"], "end": entity["end"]})
+            segments.append({"type": entity["type"], "start": entity["start"], "end": entity["end"],
+                             **({"mid": entity["mid"]} if entity["type"] == "arc" else {})})
         return {"kind": "segments", "segments": segments}
 
     return {"regions": [{
@@ -2760,14 +2784,35 @@ def _apply_sketch_extrude(parts, operation, operation_index):
 
 
 def _apply_constrained_sketch_extrude(parts, operation, operation_index):
-    from build123d import Compound, extrude
+    from build123d import Compound, Plane, extrude
+    from interaction_geometry import point3
     depth = _positive_profile_value(operation, "depth", "Глубина выдавливания")
     solution = _solve_constrained_sketch(
         operation.get("sketch") or {}, operation.get("drag"))
     profile = _solved_sketch_profile(operation.get("sketch") or {}, solution)
     faces = _sketch_faces(profile, operation.get("plane", "XY"))
-    solids = [extrude(face, amount=depth) for face in faces]
+    frame = operation.get("frame")
+    if frame is not None:
+        location = Plane(origin=point3(frame.get("origin"), "Начало эскиза"),
+                         x_dir=point3(frame.get("x_dir"), "Ось эскиза"),
+                         z_dir=point3(frame.get("normal"), "Нормаль эскиза")).location
+        faces = [location * face for face in faces]
+    mode = operation.get("mode", "new")
+    if mode not in ("new", "add", "cut"):
+        raise GeometryError("bad_params", "Выберите новое тело, добавление или вырез.")
+    solids = [extrude(face, amount=-depth if mode == "cut" else depth) for face in faces]
     shape = solids[0] if len(solids) == 1 else Compound(children=solids)
+    if mode != "new":
+        target_id = operation.get("target_id")
+        if target_id not in parts:
+            raise GeometryError("bad_params", "Деталь для эскиза не найдена.")
+        original = parts[target_id]["shape"]
+        result = original + shape if mode == "add" else original - shape
+        _validated_generated_shape(result, "Эскиз на грани")
+        if len(result.solids()) != len(original.solids()) or abs(shape_volume(result) - shape_volume(original)) < 1e-7:
+            raise GeometryError("sketch_invalid", "Контур не пересекает выбранное тело или разделяет его. Измените положение и глубину.")
+        parts[target_id]["shape"] = result
+        return
     metadata = {
         "solver_status": solution["status"],
         "degrees_of_freedom": solution["degrees_of_freedom"],
@@ -3477,11 +3522,14 @@ def apply_part_operations(parts, operations):
     "name": str}}. Возвращает изменённый словарь."""
     from build123d import Compound, Pos
     from build123d import Plane
+    mates = {}
     for operation_index, op in enumerate(operations or []):
         kind = op.get("op")
         if op.get("enabled") is False:
             continue
         pid = op.get("part_id")
+        changed_id = op.get("target_id", pid)
+        before_feature = parts[changed_id]["shape"] if changed_id in parts and kind in ("face_feature", "fillet", "chamfer") else None
         if kind == "step_source":
             _apply_step_source(parts, op, operation_index)
         elif kind == "sketch_extrude":
@@ -3549,7 +3597,13 @@ def apply_part_operations(parts, operations):
                    any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in vector)
                    for vector in (t, rotation, pivot)):
                 raise GeometryError("bad_params", "Перемещение, поворот и центр должны содержать три конечных числа.")
-            parts[pid]["shape"] = Pos(*t) * Pos(*pivot) * Rotation(*rotation) * Pos(*[-value for value in pivot]) * parts[pid]["shape"]
+            location = Pos(*t) * Pos(*pivot) * Rotation(*rotation) * Pos(*[-value for value in pivot])
+            parts[pid]["shape"] = location * parts[pid]["shape"]
+            parts[pid]["_feature_faces"] = [(location * face, index) for face, index in parts[pid].get("_feature_faces", [])]
+        elif kind == "mate":
+            if pid in mates:
+                raise GeometryError("dependency_conflict", "У тела уже есть активная сборочная связь. Измените или выключите её.")
+            mates[pid] = op
         elif kind == "array_linear":
             n = int(op["count"])
             step = op.get("step") or [0, 0, 0]
@@ -3600,7 +3654,8 @@ def apply_part_operations(parts, operations):
             target_id = op.get("target_id")
             if target_id not in parts:
                 raise GeometryError("bad_params", "Деталь для элемента на грани не найдена.")
-            parts[target_id]["shape"] = _apply_face_feature(parts[target_id]["shape"], op)
+            resolved = resolve_feature(op, parts[target_id]["shape"], operations, op.get("_history_index", operation_index))
+            parts[target_id]["shape"] = _apply_face_feature(parts[target_id]["shape"], resolved)
         elif kind == "face_dome":
             target_id = op.get("target_id")
             if target_id not in parts:
@@ -3739,16 +3794,37 @@ def apply_part_operations(parts, operations):
         else:
             raise GeometryError("unknown_op", f"Неизвестная операция: {kind}")
         changed_id = op.get("target_id", pid)
+        if before_feature is not None:
+            created = new_feature_faces(before_feature, parts[changed_id]["shape"], op)
+            parts[changed_id].setdefault("_feature_faces", []).extend((face, op.get("_history_index", operation_index)) for face in created)
         if changed_id in parts and kind != "resize_parametric":
             design = parts[changed_id].get("_design")
             if design and kind in ("fillet", "chamfer", "face_offset", "face_feature", "face_dome", "transform") and not any(op.get("rotate_deg") or []):
-                design["operations"].append(copy.deepcopy(op))
+                design["operations"].append({**copy.deepcopy(op), "_history_index": op.get("_history_index", operation_index)})
             else:
                 parts[changed_id].pop("_design", None)
         if kind == "split":
             for result_id, part in parts.items():
                 if result_id.startswith(f"{pid}-split-"):
                     part.pop("_design", None)
+    applied, visiting = set(), set()
+
+    def apply_mate(part_id):
+        if part_id in applied or part_id not in mates:
+            return
+        if part_id in visiting:
+            raise GeometryError("dependency_conflict", "Сборочные связи образуют цикл. Освободите одну из деталей.")
+        visiting.add(part_id)
+        operation = mates[part_id]
+        apply_mate(operation.get("fixed_id"))
+        shape, location = mate_shape(parts, operation)
+        parts[part_id]["shape"] = shape
+        parts[part_id]["_feature_faces"] = [(location * face, index) for face, index in parts[part_id].get("_feature_faces", [])]
+        visiting.remove(part_id)
+        applied.add(part_id)
+
+    for part_id in mates:
+        apply_mate(part_id)
     return parts
 
 
@@ -3771,7 +3847,7 @@ def handle_build_v3(params):
         }
     parts = apply_part_operations(parts, params.get("operations"))
     compound = Compound(children=[p["shape"] for p in parts.values()])
-    extra = {"parts": [{
+    extra = {"_feature_faces": [feature for part in parts.values() for feature in part.get("_feature_faces", [])], "parts": [{
         "part_id": pid, "name": p["name"],
         "volume": shape_volume(p["shape"]),
         "bbox": shape_bounds(p["shape"]),
@@ -3808,7 +3884,19 @@ def handle_designer_action(params):
         operation = action.get("operation")
         if not isinstance(operation, dict) or operation.get("op") not in APPEND_OPERATIONS:
             raise GeometryError("bad_params", "Операция не поддерживается ручным инструментом.")
-        document["operations"] = operations + [copy.deepcopy(operation)]
+        operation = copy.deepcopy(operation)
+        if operation["op"] == "mate":
+            current = {}
+            for item in document.get("parts") or []:
+                shape, _ = TEMPLATES[item["template"]][0](merged_params(item["template"], item.get("params")))
+                current[item["part_id"]] = {"shape": shape, "name": item.get("name", "Деталь")}
+            current = apply_part_operations(current, operations)
+            moving_id, fixed_id = operation.get("part_id"), operation.get("fixed_id")
+            if moving_id not in current or fixed_id not in current or moving_id == fixed_id:
+                raise GeometryError("bad_params", "Выберите поверхности двух разных деталей.")
+            operation["moving_surface"] = bind_surface(current[moving_id]["shape"], operation.get("moving_surface"), current[moving_id].get("_feature_faces"))
+            operation["fixed_surface"] = bind_surface(current[fixed_id]["shape"], operation.get("fixed_surface"), current[fixed_id].get("_feature_faces"))
+        document["operations"] = operations + [operation]
     elif kind == "edit":
         try:
             document["operations"] = edit_operations(operations, action.get("index"), action.get("changes"))
@@ -3864,8 +3952,9 @@ def handle_build(params):
                            "volume": shape_volume(part),
                            "bbox": shape_bounds(part),
                            "solid_count": len(part.solids())}]
+    feature_faces = extra.pop("_feature_faces", [])
     return {"stats": stats_of(part, extra),
-            "mesh": mesh_resource(part, "model")}
+            "mesh": mesh_resource(part, "model", feature_faces=feature_faces)}
 
 
 def handle_solve_sketch(params):
@@ -4003,6 +4092,8 @@ def handle_print_check(params):
              "detail": f"{diagnostics['boundary_edges']} рёбер"},
             {"id": "mesh_self_intersection", "title": "Самопересечения",
              "status": "unknown", "detail": diagnostics["self_intersection_detail"]},
+        ] + print_placement_checks(mesh.bounds.reshape(-1).tolist(), params.get("printer") or {}) + [
+            {"id": "wall_thickness", "title": "Оценка тонких участков", "status": "unknown", "detail": "Выборочный анализ толщины доступен только для точного BRep; сетка не проверена."}
         ]}
     part, _ = build_any(params)
     checks = []
@@ -4028,9 +4119,8 @@ def handle_print_check(params):
     else:
         checks.append({"id": "bed_fit", "title": "Габарит в рабочей области",
                        "status": "unknown", "detail": "профиль принтера не задан"})
-    checks.append({"id": "wall_thickness", "title": "Минимальная стенка",
-                   "status": "unknown",
-                   "detail": "универсальный анализ не реализован (P2)"})
+    checks.extend(print_placement_checks(shape_bounds(part), profile))
+    checks.append(sampled_wall_check(part, profile.get("minimum_wall", 0.8)))
     return {"checks": checks}
 
 

@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import math
 import queue
 import subprocess
 import threading
@@ -79,6 +80,44 @@ def main():
         export_error = call("export", {**deformed, "format": "step", "path": str(args.output.parent / "forbidden.step")}, ok=False)
         assert "STEP" in export_error["message"]
         passed("mesh STEP rejection")
+        hole = {"op": "face_feature", "target_id": "one", "mode": "cut", "face_ref": {"kind": "outer_planar", "axis": "z", "side": 1, "anchor": [0, 0]},
+                "profile": {"kind": "circle", "diameter": 4, "center": [0, 0]}, "depth": "through", "dimension_bindings": {"u": {"edge": "min", "offset": 8}}}
+        bound = {**source, "operations": [hole, {"op": "resize_parametric", "target_id": "one", "size": [60, 30, 20], "anchor": [-1, -1, -1]}]}
+        bound_result = call("build", bound)
+        hole_face = next(face for face in bound_result["mesh"]["face_ranges"] if face["feature_index"] == 0 and face["surface_ref"]["kind"] == "cylinder")
+        assert abs(hole_face["surface_ref"]["radius"] - 2) < 1e-5
+        assert abs(hole_face["surface_ref"]["origin"][0] + 12) < 1e-5
+        passed("persistent edge offset and local feature provenance through resize")
+        first_hole = {**hole, "profile": {"kind": "circle", "diameter": 6, "center": [-8, 0]}, "dimension_bindings": {}}
+        second_hole = {**hole, "profile": {"kind": "circle", "diameter": 4, "center": [8, 0]}, "dimension_bindings": {"equal_diameter": 0}}
+        equal = call("build", {**source, "operations": [first_hole, second_hole]})
+        assert abs(equal["stats"]["volume"] - (24000 - 2 * math.pi * 9 * 20)) < 0.01
+        passed("persistent equal hole diameter")
+        invalid_binding = call("build", {**source, "operations": [{**hole, "dimension_bindings": {"equal_diameter": 0}}]}, ok=False)
+        assert invalid_binding["code"] == "dependency_conflict"
+        passed("forward and cyclic dimension reference rejection")
+        sketch = {"entities": [{"id": "arc", "type": "arc", "start": [-5, 0], "mid": [0, 5], "end": [5, 0]},
+                               {"id": "base", "type": "line", "start": [5, 0], "end": [-5, 0]}], "constraints": [], "regions": [{"outer": ["arc", "base"], "holes": []}]}
+        assert call("solve_sketch", {"sketch": sketch})["degrees_of_freedom"] == 10
+        arc = call("build", {"parts": [], "operations": [{"op": "constrained_sketch_extrude", "sketch": sketch, "depth": 3}]})
+        assert abs(arc["stats"]["volume"] - math.pi * 25 / 2 * 3) < 0.01
+        passed("packaged arc solver and exact sketch extrusion")
+        top = next(face["surface_ref"] for face in initial["mesh"]["face_ranges"] if face["surface_ref"] and face["surface_ref"]["kind"] == "plane" and face["surface_ref"]["direction"][2] > 0.99)
+        bottom = next(face["surface_ref"] for face in initial["mesh"]["face_ranges"] if face["surface_ref"] and face["surface_ref"]["kind"] == "plane" and face["surface_ref"]["direction"][2] < -0.99)
+        assembly = {"parts": source["parts"] + [{"part_id": "two", "template": "box", "params": {}}], "operations": []}
+        mated = call("designer_action", {"document": assembly, "action": {"type": "append", "operation": {"op": "mate", "kind": "plane", "part_id": "two", "fixed_id": "one", "moving_surface": bottom, "fixed_surface": top, "gap": 2}}})
+        mated["operations"].append({"op": "transform", "part_id": "one", "translate": [0, 0, 10]})
+        assembly_result = call("build", mated)
+        assert assembly_result["stats"]["solid_count"] == 2
+        assert abs(next(part for part in assembly_result["stats"]["parts"] if part["part_id"] == "two")["bbox"][2] - 32) < 1e-5
+        passed("packaged separate-part mate follows support translation")
+        duplicate = call("build", {**mated, "operations": mated["operations"] + [mated["operations"][0]]}, ok=False)
+        assert duplicate["code"] == "dependency_conflict"
+        passed("overconstrained assembly rejection")
+        thin = {"parts": [{"part_id": "one", "template": "box", "params": {"length": 20, "width": 20, "height": 0.5}}], "operations": [], "printer": {"x": 220, "y": 220, "z": 250, "minimum_wall": 0.8}}
+        checks = {check["id"]: check for check in call("print_check", thin)["checks"]}
+        assert checks["bed_position"]["status"] == "pass" and checks["wall_thickness"]["status"] == "fail" and checks["wall_thickness"]["issues"]
+        passed("packaged absolute placement and sampled thin wall markers")
         call("shutdown")
         process.wait(timeout=10)
     finally:

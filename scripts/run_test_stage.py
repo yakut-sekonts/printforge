@@ -51,6 +51,7 @@ def groups(run_dir):
                 "backend/test_full_regressions.py",
                 "backend/test_body_resize.py",
                 "backend/test_designer.py",
+                "backend/test_interaction_release.py",
                 "backend/test_parameter_expressions.py",
             ], run_dir / "pytest-cad.xml"),
             "junit": str(run_dir / "pytest-cad.xml"),
@@ -141,6 +142,8 @@ def impact_groups(paths):
             selected.add("cad")
         if path in {"backend/test_body_resize.py", "backend/test_designer.py", "backend/designer_actions.py", "scripts/run_designer_sidecar_smoke.py"}:
             selected.add("cad")
+        if path in {"backend/interaction_geometry.py", "backend/geometry_errors.py", "backend/test_interaction_release.py"}:
+            selected.update({"cad", "ai", "ui"})
         if path == "scripts/run_designer_sidecar_smoke.py":
             selected.add("release")
         if path in {"backend/worker.py", "backend/parameter_expressions.py", "backend/test_parameter_expressions.py", "backend/test_full_regressions.py"}:

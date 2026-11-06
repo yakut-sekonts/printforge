@@ -2,6 +2,7 @@
 // Документ (шаблон, параметры, операции, история) — authoritative в этом
 // процессе; геометрия — отдельный worker-процесс (JSON Lines stdio).
 mod ai;
+mod recovery;
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
@@ -18,7 +19,7 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::{watch, Mutex};
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const QUIT_MENU_ID: &str = "printforge.quit";
 
@@ -2026,6 +2027,10 @@ async fn doc_get_imported_mesh_binary(
 }
 
 fn document_schema_version(doc: &Document) -> u32 {
+    if doc.snap.operations.iter().any(|operation| operation["op"] == "mate" || operation.get("dimension_bindings").is_some()
+        || operation.get("frame").is_some() || operation["sketch"]["entities"].as_array().is_some_and(|entities| entities.iter().any(|entity| entity["type"] == "arc"))) {
+        return 7;
+    }
     if doc.snap.operations.iter().any(|operation| {
         matches!(operation["op"].as_str(), Some("resize_body" | "resize_parametric" | "mesh_deform"))
             || operation.get("enabled").is_some()
@@ -2058,6 +2063,7 @@ fn save_document(doc: &Document, target: &PathBuf) -> Result<(), String> {
     let document = json!({
         "schema_version": schema_version, "units": "mm",
         "document_id": doc.doc_id,
+        "recovery_original_path": doc.path,
         "template": doc.snap.parts.first().and_then(|p| p.get("template")),
         "parts": doc.snap.parts,
         "parameters": doc.snap.parts.first().and_then(|p| p.get("params")).cloned().unwrap_or(json!({})),
@@ -2146,6 +2152,7 @@ async fn doc_confirm_close(
         CLOSE_CONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok::<(), String>(())
     }).await?;
+    recovery::clear_current();
     app.exit(0);
     Ok(())
 }
@@ -2171,7 +2178,7 @@ fn request_application_close(app: tauri::AppHandle) {
         }).await;
         match pending {
             Ok(Some(document)) => { let _ = app.emit("printforge-close-requested", document); }
-            Ok(None) => app.exit(0),
+            Ok(None) => { recovery::clear_current(); app.exit(0); },
             Err(error) => {
                 let detail: Value = serde_json::from_str(&error).unwrap_or_else(|_| json!({"message": error}));
                 let _ = app.emit("printforge-close-blocked", json!({"message": detail["message"]}));
@@ -2728,12 +2735,56 @@ fn native_e2e_report(payload: Value) -> Result<bool, String> {
 
 // ---------- автосохранение (DOC-007) ----------
 
+#[tauri::command]
+fn recovery_status() -> Value { recovery::status() }
+
+#[tauri::command]
+fn recovery_discard(name: String) -> Result<Value, String> {
+    let path = recovery::resolve(&name).map_err(|error| geo_err("recovery_unavailable", error))?;
+    std::fs::remove_file(path).map_err(|error| geo_err("recovery_unavailable", error.to_string()))?;
+    Ok(recovery::status())
+}
+
+#[tauri::command]
+async fn recovery_restore(app: tauri::AppHandle, name: String) -> Result<Value, String> {
+    with_store(|store| {
+        if store.active != "main" || store.main.dirty || document_is_busy() {
+            return Err(geo_err("document_busy", "Сначала сохраните текущий проект и выйдите из урока."));
+        }
+        Ok::<(), String>(())
+    }).await?;
+    let path = recovery::resolve(&name).map_err(|error| geo_err("recovery_unavailable", error))?;
+    let restored = doc_open(app, path.to_string_lossy().into_owned()).await?;
+    with_store(|store| {
+        let document = &mut store.main;
+        if json!(document.document_instance_id) != restored["document_instance_id"] || json!(document.revision) != restored["revision"] {
+            return Err(geo_err("document_changed", "Документ изменился после восстановления."));
+        }
+        document.path = None;
+        document.dirty = true;
+        if let Some(current) = recovery::current() {
+            match save_document(document, current) {
+                Ok(()) => { let _ = std::fs::remove_file(&path); recovery::record_error(None); },
+                Err(error) => recovery::record_error(Some(error)),
+            }
+        }
+        Ok(document.state("main"))
+    }).await
+}
+
 fn spawn_autosave() {
     tauri::async_runtime::spawn(async {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
             let _ = with_store(|s| {
+                if !document_is_busy() {
+                    if s.main.dirty {
+                        if let Some(path) = recovery::current() {
+                            recovery::record_error(save_document(&s.main, path).err());
+                        }
+                    } else { recovery::clear_current(); }
+                }
                 for doc in [&mut s.main] {
                     if doc.dirty {
                         if let Some(path) = doc.path.clone() {
@@ -2773,10 +2824,17 @@ fn main() {
             if let Ok(config_dir) = app.path().app_config_dir() {
                 ai::initialize(&config_dir);
             }
+            match app.path().app_data_dir() {
+                Ok(directory) => { if let Err(error) = recovery::initialize(directory) { recovery::record_error(Some(error)); } },
+                Err(error) => recovery::record_error(Some(error.to_string())),
+            }
             spawn_autosave();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            recovery_status,
+            recovery_discard,
+            recovery_restore,
             doc_create,
             doc_create_plate,
             doc_add_part,
@@ -3056,6 +3114,33 @@ mod mesh_tests {
             document.snap.operations = vec![operation];
             assert_eq!(document_schema_version(&document), 6);
         }
+    }
+
+    #[test]
+    fn interaction_projects_require_schema_seven_and_recovery_keeps_unsaved_path() {
+        let mut document = Document::new();
+        for operation in [json!({"op": "mate"}), json!({"op": "face_feature", "dimension_bindings": {}}),
+            json!({"op": "constrained_sketch_extrude", "frame": {}}),
+            json!({"op": "constrained_sketch_extrude", "sketch": {"entities": [{"type": "arc"}]}})] {
+            document.snap.operations = vec![operation];
+            assert_eq!(document_schema_version(&document), 7);
+        }
+        let root = std::env::temp_dir().join(format!("printforge-recovery-test-{}", document.document_instance_id));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("unnamed.printforge");
+        let before = document.state("main");
+        save_document(&document, &path).unwrap();
+        assert_eq!(document.state("main"), before);
+        assert!(document.path.is_none());
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut content = String::new();
+        archive.by_name("document.json").unwrap().read_to_string(&mut content).unwrap();
+        let saved: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(saved["schema_version"], 7);
+        assert!(saved["recovery_original_path"].is_null());
+        drop(archive);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

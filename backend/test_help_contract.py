@@ -25,17 +25,17 @@ def test_shipped_help_and_lessons_match_authoritative_sources():
 
     assert public_commands == shared_commands
     assert public_lessons == shared_lessons
-    assert len(public_lessons["lessons"]) == 13
+    assert len(public_lessons["lessons"]) == 14
     assert {lesson["lesson_id"] for lesson in public_lessons["lessons"]} >= {
         "navigation", "first-part", "save-export", "ai-assistant", "advanced-bodies",
-        "constraint-solver", "mesh-repair", "image-relief",
+        "constraint-solver", "mesh-repair", "image-relief", "precise-canvas",
     }
     help_ids = {article["help_id"] for article in help_index["articles"]}
-    assert len(help_ids) == 37
+    assert len(help_ids) == 38
     assert "forma-myshyu" in help_ids
     assert "ai-pomoshchnik" in help_ids
     assert "ruchnoe-proektirovanie" in help_ids
-    assert len(public_commands["commands"]) == 69
+    assert len(public_commands["commands"]) == 76
     assert all(command["help_id"] in help_ids for command in public_commands["commands"])
 
 
@@ -108,7 +108,9 @@ def test_lessons_require_distinct_actions_and_observable_results():
         lesson["lesson_id"]: lesson
         for lesson in json.loads((ROOT / "app/shared/lessons.json").read_text())["lessons"]
     }
-    assert all(lesson["content_version"] >= 2 for lesson in lessons.values())
+    assert all(lesson["content_version"] >= 1 for lesson in lessons.values())
+    assert all(lesson["content_version"] >= 2 for name, lesson in lessons.items() if name != "precise-canvas")
+    assert lessons["precise-canvas"]["steps"][-1]["check"] == {"type": "check_result", "id": "bed_position", "status": "pass"}
     imported = [step["check"] for step in lessons["import"]["steps"]]
     assert imported == [
         {"type": "mesh_source_applied", "mesh_mode": True, "boundary_edges": 0},

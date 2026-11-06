@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { DocState, MeshData, Point3, FaceFeatureProfile, FaceAxis } from "./types";
+import type { DocState, MeshData, Point3, FaceFeatureProfile, FaceAxis, ConstrainedSketch, DimensionBindings, FaceRange, Operation } from "./types";
+import { backend, parseIpcError } from "./backend";
+import { SketchCanvas } from "./SketchCanvas";
+import { changeLocalFeature, findSmallerFeature, localFeatureValue, localHandleEnabled } from "./localFeatures";
 import type { Viewport } from "./viewport";
 import type { EdgeToolUi } from "./ParamsPanel";
 import type { FaceFeatureTarget } from "./faceEditing";
@@ -7,7 +10,7 @@ import { faceFeatureArgs } from "./faceEditing";
 import { constrainedSize, deformPositions, editableParameters, edgeDesignerAction, EDIT_FIELDS, operationName } from "./designer";
 import type { DesignerAction } from "./designer";
 
-type Mode = "dimensions" | "placement" | "sketch" | "sculpt" | "convert" | "history" | "history-list" | null;
+type Mode = "dimensions" | "placement" | "sketch" | "advanced-sketch" | "sculpt" | "convert" | "history" | "history-list" | null;
 type Preview = (action: DesignerAction, done: (error: string | null) => void) => () => void;
 
 export function OperationHistory({ doc, onEdit, onSelect }: {
@@ -40,6 +43,7 @@ function ParameterFields({ value, onChange, prefix = "" }: {
     anchor: "Неподвижный угол", translate: "Перемещение, мм", rotate_deg: "Поворот, °", pivot: "Центр поворота, мм",
     depth: "Глубина, мм", diameter: "Диаметр, мм", width: "Ширина, мм", height: "Высота, мм", center: "Центр, мм", delta: "Смещение, мм" };
   return <>{Object.entries(value).map(([key, current]) => {
+    if (key === "dimension_bindings" || key === "sketch") return null;
     const label = `${prefix}${labels[key] ?? key}`;
     const update = (next: unknown) => onChange({ ...value, [key]: next });
     if (typeof current === "number") return <NumberField key={key} label={label} value={current} onChange={update} />;
@@ -55,8 +59,27 @@ function ParameterFields({ value, onChange, prefix = "" }: {
   })}</>;
 }
 
+function BindingFields({ value, onChange, operations, index, circle }: {
+  value: DimensionBindings; onChange: (value: DimensionBindings) => void; operations: Operation[]; index: number; circle: boolean;
+}) {
+  return <fieldset><legend>Сохраняемые размеры</legend>
+    {(["u", "v"] as const).map((axis) => <div key={axis}><label className="designer-field">Центр {axis.toUpperCase()}<select value={value[axis]?.edge ?? "free"} onChange={(event) => {
+      const next = { ...value };
+      if (event.target.value === "free") delete next[axis]; else next[axis] = { edge: event.target.value as "min" | "max", offset: value[axis]?.offset ?? 10 };
+      onChange(next);
+    }}><option value="free">Свободная координата</option><option value="min">От минимального края</option><option value="max">От максимального края</option></select></label>
+      {value[axis] && <NumberField label="Отступ центра, мм" value={value[axis]!.offset} min={0} onChange={(offset) => onChange({ ...value, [axis]: { ...value[axis]!, offset } })} />}</div>)}
+    {circle && <label className="designer-field">Диаметр круга<select value={value.equal_diameter ?? "free"} onChange={(event) => {
+      const next = { ...value };
+      if (event.target.value === "free") delete next.equal_diameter; else next.equal_diameter = Number(event.target.value);
+      onChange(next);
+    }}><option value="free">Собственный размер</option>{operations.map((operation, position) => position < index && operation.op === "face_feature" && (operation.profile as FaceFeatureProfile)?.kind === "circle" && operation.enabled !== false ? <option key={position} value={position}>Как элемент {position + 1}</option> : null)}</select></label>}
+    <p>Отступ — от края габарита грани до центра профиля. Источник диаметра должен быть раньше в истории.</p>
+  </fieldset>;
+}
+
 export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, busy, historyIndex, onHistoryClose,
-  preview, clearPreview, commit, prepare, onResizePolicy, onEdgeSize, onEdgeKind, onEdgeCancel, onStartResize, onStartMove, onFaceActions, onHistoryPick, onPartSelect, sceneToolActive, inspectMode,
+  preview, clearPreview, commit, prepare, onResizePolicy, onEdgeSize, onEdgeKind, onEdgeCancel, onStartResize, onStartMove, onFaceActions, onHistoryPick, onPartSelect, sceneToolActive, inspectMode, selectedRange, externalToolActive, onActiveChange,
 }: {
   doc: DocState; mesh: MeshData; viewport: Viewport | null; partId: string | null; face: FaceFeatureTarget | null;
   edge: EdgeToolUi; busy: boolean; historyIndex: number | null; onHistoryClose: () => void;
@@ -67,6 +90,8 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   onHistoryPick: (index: number) => void; onPartSelect: (id: string) => void;
   sceneToolActive: boolean;
   inspectMode: boolean;
+  selectedRange?: FaceRange; externalToolActive: boolean;
+  onActiveChange: (active: boolean) => void;
 }) {
   const part = doc.stats?.parts?.find((candidate) => candidate.part_id === partId) ?? doc.stats?.parts?.[0];
   const bounds = part?.bbox ?? doc.stats?.bbox ?? [0, 0, 0, 1, 1, 1];
@@ -84,6 +109,15 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   const [depth, setDepth] = useState<number | "through">(5);
   const [featureMode, setFeatureMode] = useState<"add" | "cut">("cut");
   const [drawing, setDrawing] = useState(true);
+  const [canvasOpen, setCanvasOpen] = useState(false);
+  const [canvasReady, setCanvasReady] = useState(true);
+  const [advancedSketch, setAdvancedSketch] = useState<ConstrainedSketch | null>(null);
+  const [canvasDraft, setCanvasDraft] = useState<ConstrainedSketch | undefined>();
+  const [bindings, setBindings] = useState<DimensionBindings>({});
+  const [localHandle, setLocalHandle] = useState("diameter");
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestion, setSuggestion] = useState<number | null>(null);
+  const suggestionToken = useRef(0);
   const [radius, setRadius] = useState(Math.max(0.1, Math.round(Math.max(...originalSize) / 3 * 10) / 10));
   const [sculpt, setSculpt] = useState<{ center: Point3; delta: Point3 } | null>(null);
   const [changes, setChanges] = useState<Record<string, unknown>>({});
@@ -92,17 +126,20 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   const [previewReady, setPreviewReady] = useState(false);
   const gesture = useRef<{ point: Point3; delta: Point3 } | null>(null);
   const sketchDepthStart = useRef(5);
-  const current = useRef({ edge, depth });
-  current.current = { edge, depth };
+  const current = useRef({ edge, depth, changes });
+  current.current = { edge, depth, changes };
   const isMesh = !!doc.stats?.mesh_mode;
   const operation = historyIndex == null ? null : doc.operations?.[historyIndex];
   const edgeActive = mode == null && edge.active && !!edge.selected;
+  useEffect(() => { onActiveChange(!!mode || edgeActive); return () => onActiveChange(false); }, [mode, edgeActive]);
 
-  const close = () => { clearPreview(); viewport?.setDesignerTool(null); setMode(null); setProfile(null); setSculpt(null); setContext(null); setError(null); onHistoryClose(); };
+  const close = () => { suggestionToken.current += 1; clearPreview(); viewport?.setDesignerTool(null); setMode(null); setProfile(null); setSculpt(null); setContext(null); setError(null); setCanvasOpen(false); onHistoryClose(); };
   const open = (next: Mode) => {
     clearPreview(); prepare(); onHistoryClose(); setContext(null); setMode(next); setError(null); setPreviewReady(false);
     setSize(originalSize); setTranslation([0, 0, 0]); setRotation([0, 0, 0]);
     setProfile(null); setSculpt(null); setDrawing(true);
+    setBindings({}); setAdvancedSketch(null); setCanvasOpen(next === "advanced-sketch");
+    setCanvasDraft(undefined); setCanvasReady(true);
   };
 
   useEffect(() => {
@@ -115,6 +152,9 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
     if (!sceneToolActive) return;
     clearPreview(); setMode(null); onHistoryClose();
   }, [sceneToolActive]);
+
+  useEffect(() => { if (externalToolActive) close(); }, [externalToolActive]);
+  useEffect(() => () => { suggestionToken.current += 1; }, []);
 
   useEffect(() => {
     if (!viewport) return;
@@ -137,13 +177,17 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   if (mode === "dimensions" && part) action = { type: "append", operation: { op: preserve && part.parametric_resize ? "resize_parametric" : "resize_body", target_id: part.part_id, size, anchor: [-1, -1, -1] } };
   if (mode === "placement" && part) action = { type: "append", operation: { op: isMesh ? "mesh_transform" : "transform", part_id: part.part_id, translate: translation, rotate_deg: rotation,
     pivot: bounds.slice(0, 3).map((value, axis) => (value + bounds[axis + 3]) / 2) } };
-  if (mode === "sketch" && face && profile && !drawing) action = { type: "append", operation: { op: "face_feature", ...faceFeatureArgs(face, featureMode, profile, depth) } };
+  if (mode === "sketch" && face && profile && !drawing) action = { type: "append", operation: { op: "face_feature", ...faceFeatureArgs(face, featureMode, profile, depth), ...(Object.keys(bindings).length ? { dimension_bindings: bindings } : {}) } };
+  if (mode === "advanced-sketch" && face && advancedSketch) action = { type: "append", operation: { op: "constrained_sketch_extrude", target_id: face.partId, sketch: advancedSketch,
+    plane: "XY", frame: { origin: face.center, normal: face.normal, x_dir: [face.uAxis === "x" ? 1 : 0, face.uAxis === "y" ? 1 : 0, face.uAxis === "z" ? 1 : 0] },
+    mode: featureMode, depth: typeof depth === "number" ? depth : Math.max(...originalSize) * 2 + 1 } };
   if (mode === "sculpt" && sculpt) action = { type: "append", operation: { op: "mesh_deform", ...sculpt, radius } };
   if (mode === "history" && operation && EDIT_FIELDS[operation.op]) action = { type: "edit", index: historyIndex!, changes: { ...changes, enabled } };
   if (edgeActive && part && edge.selected) action = edgeDesignerAction(edge.kind, edge.selected, Number(edge.size), edge.partId ?? part.part_id);
+  if ((mode === "advanced-sketch" || mode === "history" && operation?.op === "constrained_sketch_extrude") && !canvasReady) action = null;
   const actionKey = JSON.stringify(action);
   useEffect(() => {
-    setPreviewReady(false); setError(null);
+    setPreviewReady(false); setError(null); setSuggestion(null); suggestionToken.current += 1; setSuggesting(false);
     if (!action || busy || inspectMode) { clearPreview(); return; }
     let cancel = () => {};
     const timer = window.setTimeout(() => {
@@ -154,7 +198,19 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
 
   useEffect(() => {
     if (!viewport || busy || inspectMode) { viewport?.setDesignerTool(null); return; }
-    if (mode === "sketch" && face && drawing) {
+    if (mode === "history" && operation && selectedRange?.feature_index === historyIndex && selectedRange.surface_ref && ["face_feature", "fillet", "chamfer"].includes(operation.op)) {
+      if (operation.op === "face_feature" && !["circle", "rectangle"].includes((changes.profile as FaceFeatureProfile)?.kind)) { viewport.setDesignerTool(null); return; }
+      const circle = (changes.profile as FaceFeatureProfile)?.kind === "circle";
+      const field = operation.op === "fillet" ? "radius" : operation.op === "chamfer" ? "distance" : !circle && localHandle === "diameter" ? "width" : localHandle;
+      if (!localHandleEnabled(changes, field)) { viewport.setDesignerTool(null); return; }
+      const write = (value: number) => setChanges((previous) => changeLocalFeature(previous, field, value));
+      viewport.setPushPullHandle(null);
+      viewport.setDesignerTool({ kind: "edge", origin: selectedRange.surface_ref.center, numeric: write,
+        start: (point) => { gesture.current = { point, delta: [localFeatureValue(current.current.changes, field), 0, 0] }; },
+        move: (_point, delta) => write(Math.round(((gesture.current?.delta[0] ?? 1) + delta[0] + delta[1]) * 100) / 100),
+        finish: (cancelled) => { if (cancelled && gesture.current) write(gesture.current.delta[0]); },
+      });
+    } else if (mode === "sketch" && face && drawing) {
       viewport.setPushPullHandle(null);
       viewport.setDesignerTool({ kind: "sketch", origin: face.center, normal: face.normal,
         start: (point) => { gesture.current = { point, delta: [0, 0, 0] }; },
@@ -201,7 +257,7 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
       });
     } else viewport.setDesignerTool(null);
     return () => { viewport.setDesignerTool(null); viewport.setDesignerPull(null, null); };
-  }, [mode, drawing, shape, face, isMesh, viewport, mesh, radius, busy, inspectMode, edgeActive, edge.selected]);
+  }, [mode, drawing, shape, face, isMesh, viewport, mesh, radius, busy, inspectMode, edgeActive, edge.selected, localHandle, historyIndex, selectedRange, JSON.stringify(changes.dimension_bindings)]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") { close(); if (edgeActive) onEdgeCancel(); } };
@@ -215,9 +271,21 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
     if (!action || !previewReady || busy || inspectMode) return;
     if (await commit(action)) { if (edgeActive) onEdgeCancel(); close(); }
   };
+  const findSuggestion = async () => {
+    if (!action || suggesting) return;
+    const token = ++suggestionToken.current;
+    setSuggesting(true); setSuggestion(null);
+    const field = (edgeActive ? edge.kind : operation?.op) === "fillet" ? "radius" : "distance";
+    try {
+      const value = await findSmallerFeature(action, field, Number(edgeActive ? edge.size : changes[field]),
+        async (candidate) => { await backend.docDesignerPreview(candidate, doc); }, () => token !== suggestionToken.current);
+      if (token === suggestionToken.current) setSuggestion(value);
+    } catch (cause) { if (token === suggestionToken.current) setError(parseIpcError(cause).message); }
+    finally { if (token === suggestionToken.current) setSuggesting(false); }
+  };
   const policy = <label className="designer-field">Как менять габариты<select value={preserve && part?.parametric_resize ? "preserve" : "scale"} onChange={(event) => setPreserve(event.target.value === "preserve")}>
     <option value="preserve" disabled={!part?.parametric_resize}>Сохранять отверстия и радиусы</option><option value="scale">Масштабировать всё, включая отверстия</option></select></label>;
-  const title = mode === "dimensions" ? "Размеры детали" : mode === "placement" ? "Положение детали" : mode === "sketch" ? "Эскиз на грани" : mode === "sculpt" ? "Мягкая форма · mesh" : mode === "history" ? operation ? operationName(operation) : "История" : mode === "history-list" ? "История операций" : mode === "convert" ? "Перейти в mesh?" : "Скругление / фаска";
+  const title = mode === "dimensions" ? "Размеры детали" : mode === "placement" ? "Положение детали" : mode === "sketch" || mode === "advanced-sketch" ? "Эскиз на грани" : mode === "sculpt" ? "Мягкая форма · mesh" : mode === "history" ? operation ? operationName(operation) : "История" : mode === "history-list" ? "История операций" : mode === "convert" ? "Перейти в mesh?" : "Скругление / фаска";
   const otherParts = (doc.stats?.parts ?? []).filter((candidate) => candidate.part_id !== part?.part_id && candidate.bbox);
   const snappingControls = <div className="designer-snapping"><label><input type="checkbox" checked={snap} onChange={(event) => setSnap(event.target.checked)} />Привязки</label><label>Шаг<input aria-label="Шаг сетки, мм" className="designer-grid" type="number" min="0.1" step="0.1" value={grid} onChange={(event) => setGrid(Number(event.target.value))} />мм</label></div>;
   return <>
@@ -225,6 +293,7 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
       {!isMesh && <button className="btn" data-cmd="op.dimensions" disabled={busy} onClick={() => open("dimensions")}>Размеры</button>}
       <button className="btn" data-cmd="op.placement" disabled={busy} onClick={() => open("placement")}>Положение</button>
       {!isMesh && <button className="btn" data-cmd="op.face_sketch" disabled={busy || !face} title={face ? "Нарисуйте на выбранной грани" : "Выберите внешнюю плоскую грань"} onClick={() => open("sketch")}>Рисовать на грани</button>}
+      {!isMesh && <button className="btn" data-cmd="op.canvas_sketch" disabled={busy || !face || inspectMode} onClick={() => open("advanced-sketch")}>Эскиз с ограничениями</button>}
       <button className="btn" data-cmd="op.mesh_deform" disabled={busy} onClick={() => open(isMesh ? "sculpt" : "convert")}>Мягкая форма</button>
       <button className="btn" data-cmd="op.history_edit" disabled={busy} onClick={() => open("history-list")}>История</button>
     </div>
@@ -255,13 +324,30 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
         <label>Действие<select value={featureMode} onChange={(event) => { setFeatureMode(event.target.value as "add" | "cut"); if (event.target.value === "add" && depth === "through") setDepth(5); }}><option value="cut">Вырезать</option><option value="add">Выдавить</option></select></label>
         <label><input type="checkbox" disabled={featureMode === "add"} checked={depth === "through"} onChange={(event) => setDepth(event.target.checked ? "through" : 5)} />Насквозь</label>
         {depth !== "through" && <NumberField label="Глубина, мм" min={0.1} value={depth} onChange={setDepth} />}</>}
+      {mode === "sketch" && profile && !drawing && <BindingFields value={bindings} onChange={setBindings} operations={doc.operations ?? []} index={doc.operations?.length ?? 0} circle={profile.kind === "circle"} />}
+      {mode === "advanced-sketch" && <><button className="btn" onClick={() => setCanvasOpen(true)}>Открыть эскиз</button><label className="designer-field">Действие<select value={featureMode} onChange={(event) => setFeatureMode(event.target.value as "add" | "cut")}><option value="cut">Вырезать</option><option value="add">Выдавить</option></select></label><NumberField label="Глубина, мм" value={typeof depth === "number" ? depth : 5} min={0.1} onChange={setDepth} /></>}
+      {mode === "history" && operation?.op === "face_feature" && ["circle", "rectangle"].includes((changes.profile as FaceFeatureProfile)?.kind) && <><BindingFields value={(changes.dimension_bindings as DimensionBindings) ?? {}} onChange={(value) => setChanges((current) => ({ ...current, dimension_bindings: value }))} operations={doc.operations ?? []} index={historyIndex ?? 0} circle={(changes.profile as FaceFeatureProfile)?.kind === "circle"} />
+        {selectedRange?.feature_index === historyIndex && <label className="designer-field">Ручка в сцене<select value={(changes.profile as FaceFeatureProfile)?.kind !== "circle" && localHandle === "diameter" ? "width" : localHandle} onChange={(event) => setLocalHandle(event.target.value)}>
+          {((changes.profile as FaceFeatureProfile)?.kind === "circle" ? [["diameter", "Диаметр круга"]] : [["width", "Ширина"], ["height", "Высота"]]).concat([["depth", "Глубина"], ["u", "Положение U"], ["v", "Положение V"]]).map(([field, label]) => <option key={field} value={field} disabled={!localHandleEnabled(changes, field)}>{label}</option>)}
+        </select></label>}<p>Потяните синюю ручку выбранного элемента. Привязанный размер изменяйте через его зависимость; для ручки глубины сначала задайте числовую глубину вместо «Насквозь».</p></>}
+      {mode === "history" && operation?.op === "constrained_sketch_extrude" && <button className="btn" onClick={() => setCanvasOpen(true)}>Редактировать эскиз мышью</button>}
       {mode === "sculpt" && <><NumberField label="Радиус кисти, мм" value={radius} min={0.1} onChange={setRadius} /><p>Зажмите поверхность и потяните. Изменение мягко затухает внутри радиуса. После Preview нажмите «Применить».</p><p>Сетка, не точный CAD. STEP недоступен. Инверсия треугольников проверяется; общий self-intersection solver отсутствует.</p></>}
       {mode === "convert" && <><p>Точная модель будет заменена плотной треугольной сеткой. Отверстия и радиусы больше не параметрические; экспорт STEP недоступен. Cmd/Ctrl+Z вернёт исходный BRep.</p><button className="btn btn-primary" disabled={busy} onClick={async () => { if (await commit({ type: "convert_mesh" })) close(); }}>Преобразовать в mesh</button></>}
       {mode === "history" && operation && <>{EDIT_FIELDS[operation.op] ? <><ParameterFields value={changes} onChange={setChanges} /><label><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />Операция включена</label><p>Preview перестраивает последующие операции. Ошибка не меняет модель и историю Undo/Redo.</p></> : <p>Этот тип операции пока доступен только для просмотра. Исходник нельзя отключать.</p>}</>}
       {mode === "history-list" && <OperationHistory doc={doc} onEdit={onHistoryPick} onSelect={onPartSelect} />}
       {edgeActive && <><div className="designer-buttons"><button className="btn" aria-pressed={edge.kind === "fillet"} onClick={() => onEdgeKind("fillet")}>Скругление</button><button className="btn" aria-pressed={edge.kind === "chamfer"} onClick={() => onEdgeKind("chamfer")}>Фаска</button></div><NumberField label={edge.kind === "fillet" ? "Радиус, мм" : "Фаска, мм"} value={Number(edge.size)} min={0.1} onChange={(value) => onEdgeSize(String(value))} /><p>Потяните синюю ручку на ребре. Точный Preview после отпускания; модель меняется только по «Применить».</p></>}
+      {error && (edgeActive || mode === "history" && ["fillet", "chamfer"].includes(operation?.op ?? "")) && <><p>Проблемная область выделена в сцене. Можно проверить до шести меньших значений на всей истории модели; это не поиск глобального максимума.</p><button className="btn" data-cmd="op.suggest_feature_size" disabled={busy || suggesting || inspectMode} onClick={() => void findSuggestion()}>{suggesting ? "Проверка вариантов…" : "Проверить меньший размер"}</button>{suggestion != null && <button className="btn" onClick={() => {
+        if (edgeActive) onEdgeSize(String(suggestion)); else setChanges((current) => ({ ...current, [operation?.op === "fillet" ? "radius" : "distance"]: suggestion }));
+      }}>Использовать проверенные {suggestion} мм</button>}</>}
       {mode !== "convert" && mode !== "history-list" && <><p className={error ? "designer-error" : "designer-preview"} role="status">{error ?? (previewReady ? "Точный Preview готов · модель ещё не изменена" : action ? "Подготовка Preview…" : "Выберите область и задайте изменение")}</p><button className="btn btn-primary" disabled={busy || !previewReady || !action} onClick={() => void apply()}>Применить</button><button className="btn" onClick={() => { close(); if (edgeActive) onEdgeCancel(); }}>Отмена</button></>}
     </section>}
+    {canvasOpen && <SketchCanvas width={originalSize["xyz".indexOf(face?.uAxis ?? "x")]} height={originalSize["xyz".indexOf(face?.vAxis ?? "y")]}
+      initial={canvasDraft ?? (mode === "history" ? changes.sketch as ConstrainedSketch : advancedSketch ?? undefined)} onDraft={setCanvasDraft}
+      onChange={(sketch) => {
+        setCanvasReady(!!sketch);
+        if (mode === "history") { if (sketch) setChanges((current) => ({ ...current, sketch })); else setPreviewReady(false); }
+        else setAdvancedSketch(sketch);
+      }} onClose={() => setCanvasOpen(false)} />}
     {!mode && !edgeActive && <div className="designer-policy">{!isMesh && policy}{snappingControls}</div>}
   </>;
 }

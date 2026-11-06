@@ -43,7 +43,8 @@ async function call<T>(command: string, args?: Record<string, unknown>, signal?:
       throw parseIpcError(e);
     }
   }
-  const resp = await fetch(`http://localhost:8787/api/${command}`, {
+  const origin = (import.meta as ImportMeta & { env?: { VITE_DEV_SHIM_URL?: string } }).env?.VITE_DEV_SHIM_URL ?? "http://localhost:8787";
+  const resp = await fetch(`${origin}/api/${command}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(args ?? {}),
@@ -96,6 +97,10 @@ export function parseIpcError(e: unknown): GeoError {
 }
 
 export const backend = {
+  dialogSavePath: (defaultName: string) => call<string | null>("dialog_save_path", { default_name: defaultName, filter_name: "Проект PrintForge", extensions: ["printforge"] }),
+  recoveryStatus: () => call<{ available: string[]; error: string | null }>("recovery_status"),
+  recoveryRestore: (name: string) => call<DocState>("recovery_restore", { name }),
+  recoveryDiscard: (name: string) => call<{ available: string[]; error: string | null }>("recovery_discard", { name }),
   docDesignerAction: (action: import("./designer").DesignerAction, state: DocState) =>
     call<DocState>("doc_designer_action", { action, expected_revision: state.revision, expected_instance: state.document_instance_id, preview: false }),
   docDesignerPreview: (action: import("./designer").DesignerAction, state: DocState) =>
@@ -265,7 +270,7 @@ export const backend = {
     call<DocState>("doc_image_relief_apply", {
       ...settings, expected_sha256: expectedSha256, expected_settings_sha256: expectedSettingsSha256,
     } as unknown as Record<string, unknown>),
-  printCheck: (printer: { x: number; y: number; z: number }) =>
+  printCheck: (printer: { x: number; y: number; z: number; minimum_wall?: number }) =>
     call<PrintCheckResult>("print_check", { printer }),
   // совместимость M1
   docCreatePlate: (p: { length: number; width: number; height: number; hole_diameter: number; hole_offset: number }) =>

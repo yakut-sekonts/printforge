@@ -110,7 +110,7 @@ interface Props {
   // проверка печати
   printChecks: PrintCheck[] | null;
   printBusy: boolean;
-  onPrintCheck: (printer: { x: number; y: number; z: number }) => void;
+  onPrintCheck: (printer: { x: number; y: number; z: number; minimum_wall?: number }) => void;
   onInvalidatePrintChecks: () => void;
   // импорт
   importPreview: ImportResult | null;
@@ -289,6 +289,7 @@ export function ParamsPanel(props: Props) {
   const [multiHint, setMultiHint] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [printer, setPrinter] = useState(loadPrinter);
+  const [minimumWall, setMinimumWall] = useState("0.8");
   const [importPath, setImportPath] = useState("~/model.step");
   const [importFormat, setImportFormat] = useState<"step" | "stl">("step");
   const [meshTranslate, setMeshTranslate] = useState({ x: "0", y: "0", z: "0" });
@@ -796,7 +797,8 @@ export function ParamsPanel(props: Props) {
   const pointCoordinates = [...Object.values(distP0), ...Object.values(distP1)].map(parseMillimeters);
   const coordinatesValid = pointCoordinates.every((value) => value != null);
   const printerDimensions = { x: parseMillimeters(printer.x), y: parseMillimeters(printer.y), z: parseMillimeters(printer.z) };
-  const printerValid = Object.values(printerDimensions).every((value) => value != null && value > 0);
+  const wallValue = parseMillimeters(minimumWall);
+  const printerValid = Object.values(printerDimensions).every((value) => value != null && value > 0) && wallValue != null && wallValue > 0;
   const imageNumbers = [imageWidth, imageReliefHeight, imageBaseThickness, imageSamples, imageSeed, imageNoise].map(parseMillimeters);
   const imageValid = imageNumbers.every((value) => value != null) &&
     imageNumbers.slice(0, 3).every((value) => value! > 0) &&
@@ -2051,17 +2053,19 @@ export function ParamsPanel(props: Props) {
             </div>
           ))}
         </div>
+        <label className="designer-field">Порог тонкого участка, мм<input inputMode="decimal" value={minimumWall} onChange={(event) => { setMinimumWall(event.target.value); props.onInvalidatePrintChecks(); }} /></label>
         <button
           className="btn" data-cmd="check.print" aria-label="Проверить перед печатью"
           disabled={!doc?.stats?.is_valid || props.printBusy || !printerValid}
           onClick={() => props.onPrintCheck({
             x: printerDimensions.x!, y: printerDimensions.y!, z: printerDimensions.z!,
+            minimum_wall: wallValue!,
           })}
         >
           {props.printBusy ? "Проверка…" : "Проверить"}
         </button>
         {!printerValid && <p className="error-inline" role="alert">Габариты принтера должны быть положительными конечными числами.</p>}
-        <p className="check-note">Проверяется размер детали, а не её положение на столе или высота над Z=0.</p>
+        <p className="check-note">Проверяются габариты, абсолютное положение и Z=0. XY=0 — центр стола. Тонкие участки оцениваются выборочно; красные маркеры показывают найденные места, но отсутствие маркеров не гарантирует минимальную толщину.</p>
         {props.printChecks && (
           <>
             <ul className="check-list">

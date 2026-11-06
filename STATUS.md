@@ -1,5 +1,13 @@
 # STATUS.md — статус PrintForge
 
+## Кандидат v0.6.0 — предсказуемое моделирование
+
+Единый scope из семи групп реализован: выбор/скрытие, локальные элементы, сохраняемые размеры, интерактивный Sketcher, направленные mates, объяснимые отказы/диагностика и native recovery. Ограничения и критерии — [INTERACTION_RELEASE_PLAN.md](docs/INTERACTION_RELEASE_PLAN.md); фактические проверки и BLOCKED — [QA_0.6.0.md](docs/testing/QA_0.6.0.md). Публикация допускается только после итогового связанного stage и полной desktop matrix.
+
+Формат читает schema 7; предыдущие схемы поддерживаются. Offline-справка: 38 статей, 76 команд, 14 уроков. Packaged smoke расширен с 10 до 17 blocking geometry gates. Настоящий crash/relaunch/restore безымянного main-проекта проверен на macOS ARM; физическая печать и интерактивный Windows/Intel walkthrough недоступны в текущей среде.
+
+Итоговый connected stage: 540 уникальных PASS (429 Python + 87 Node + 24 Rust), все команды stage успешны. Финальная macOS `.app` собрана, deep/strict codesign verification проходит; первое Save/Cancel и выбранный системным диалогом путь проверены отдельно. Ожидается hosted matrix и публикация updater assets.
+
 Обновлено: 2026-11-06. Опубликован [v0.5.0](https://github.com/yakut-sekonts/printforge/releases/tag/v0.5.0) — единый релиз ручного проектирования. Согласованный scope и границы: [DESIGNER_RELEASE_PLAN.md](docs/DESIGNER_RELEASE_PLAN.md). M4 сохраняет открытые расширенные задачи: все группы `EXT-001…EXT-012` имеют рабочий partial slice, оставшиеся generic/direct-editing clauses перечислены в `docs/testing/TEST_GAPS.md`.
 
 ## Release v0.5.0 — ручное проектирование

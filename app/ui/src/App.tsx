@@ -40,6 +40,8 @@ import { SelectionCoach } from "./SelectionCoach";
 import { PrimitivePicker } from "./PrimitivePicker";
 import { UnsavedChangesDialog } from "./UnsavedChangesDialog";
 import { DesignerWorkbench, OperationHistory } from "./DesignerWorkbench";
+import { InteractionTools } from "./InteractionTools";
+import { RecoveryNotice } from "./RecoveryNotice";
 import { PreviewQueue } from "./designer";
 import type { DesignerAction } from "./designer";
 
@@ -63,6 +65,8 @@ export default function App() {
   const [bodyResizeMode, setBodyResizeMode] = useState(false);
   const [bodyResizeSize, setBodyResizeSize] = useState<Size3 | null>(null);
   const [historyEdit, setHistoryEdit] = useState<number | null>(null);
+  const [interactionActive, setInteractionActive] = useState(false);
+  const [designerActive, setDesignerActive] = useState(false);
   const preserveResizeRef = useRef(true);
   const designerQueue = useRef(new PreviewQueue());
   const [movePreview, setMovePreview] = useState<{ axis: TransformAxis; delta: number } | null>(null);
@@ -485,6 +489,17 @@ export default function App() {
       setLessonRun(next);
     }
   }, []);
+
+  const commitDesignerAction = useCallback(async (action: DesignerAction) => {
+    const source = docRef.current;
+    if (!source) return false;
+    const state = await runBackend(() => backend.docDesignerAction(action, source), true);
+    if (!state || state.error) { if (state?.error) setStatusMsg(state.error.message); return false; }
+    const operation = action.type === "append" ? action.operation : action.type === "edit" ? source.operations?.[action.index] : null;
+    if (operation) lessonEvent({ type: "operation", op: String(operation.op), state,
+      translate: "translate" in operation ? operation.translate as [number, number, number] : undefined });
+    return true;
+  }, [runBackend, lessonEvent]);
 
   useEffect(() => {
     if (!lessonRun || doc?.slot !== "tutorial") return;
@@ -1189,7 +1204,9 @@ export default function App() {
   }, [runBackend]);
 
   // ---------- проверка печати ----------
-  const runPrintCheck = useCallback(async (printer: { x: number; y: number; z: number }) => {
+  useEffect(() => { if (!printChecks) viewportRef.current?.setPrintDiagnostics(null); }, [printChecks]);
+
+  const runPrintCheck = useCallback(async (printer: { x: number; y: number; z: number; minimum_wall?: number }) => {
     if (documentActionPending.current || geometryOperationCount.current > 0) return;
     const token = ++printRequestToken.current;
     setPrintChecks(null);
@@ -1203,6 +1220,7 @@ export default function App() {
       const res = await backend.printCheck(printer);
       if (token !== printRequestToken.current) return;
       setPrintChecks(res.checks ?? []);
+      viewportRef.current?.setPrintDiagnostics({ x: printer.x, y: printer.y, z: printer.z }, (res.checks ?? []).flatMap((check) => check.issues?.map((issue) => issue.point) ?? []));
       lessonEvent({ type: "check_result", checks: res.checks ?? [], state: docRef.current ?? undefined });
     } catch (e) {
       setStatusMsg(`Ошибка проверки: ${parseIpcError(e).message}`);
@@ -1327,10 +1345,27 @@ export default function App() {
   }, [applyDoc]);
 
   // ---------- файлы ----------
-  const doSave = useCallback(async () => {
-    const state = await runBackend(() => backend.docSave(expandTilde(savePath)));
+  const doSave = useCallback(async (saveAs = false) => {
+    const source = docRef.current;
+    if (!source || documentActionPending.current || geometryOperationCount.current > 0) return;
+    let target = saveAs ? expandTilde(savePath) : source.path ?? expandTilde(savePath);
+    if (isTauri() && (saveAs || !source.path)) {
+      setComputing(true);
+      try {
+        const chosen = await backend.dialogSavePath(target.split(/[\\/]/).pop() || "Без названия.printforge");
+        if (!chosen) { setStatusMsg("Сохранение отменено"); return; }
+        const active = docRef.current;
+        if (!active || active.document_instance_id !== source.document_instance_id || active.revision !== source.revision || active.slot !== source.slot) {
+          setStatusMsg("Документ изменился во время выбора пути. Повторите сохранение."); return;
+        }
+        target = chosen;
+      } catch (cause) { setStatusMsg(`Ошибка выбора файла: ${parseIpcError(cause).message}`); return; }
+      finally { setComputing(false); }
+    }
+    const state = await runBackend(() => backend.docSave(target));
     if (state) {
-      setStatusMsg(`Сохранено: ${state.path ?? expandTilde(savePath)}`);
+      setSavePath(state.path ?? target);
+      setStatusMsg(`Сохранено: ${state.path ?? target}`);
       lessonEvent({ type: "saved", state, path: state.path ?? undefined });
     }
   }, [savePath, runBackend, lessonEvent]);
@@ -1625,21 +1660,29 @@ export default function App() {
         />
         <main className="scene-area">
           <div className="viewport" ref={viewportEl} aria-label="Сцена 3D" />
+          <RecoveryNotice busy={computing || geometryBusy || meshLoading || !!doc?.dirty || doc?.slot === "tutorial"} restore={async (name) => {
+            const state = await runBackend(() => backend.recoveryRestore(name));
+            return !!state && !state.error;
+          }} />
+          {doc && mesh && <InteractionTools doc={doc} mesh={mesh} viewport={viewportRef.current} selectedFace={selectedFace} selectedPartId={selectedPartId}
+            busy={computing || geometryBusy || meshLoading || !!unsavedRequest} inspectMode={whatIsThis}
+            active={interactionActive} onFinish={() => setInteractionActive(false)} suspended={designerActive}
+            onClearSelection={() => { setSelectedFace(null); setSelectedPartId(null); setSelectedPartIds([]); }}
+            onHistoryPick={(index) => { setInteractionActive(false); setHistoryEdit(index); }}
+            preview={designerPreview} clearPreview={clearDesignerPreview} prepare={() => {
+              setHistoryEdit(null); cancelEdgeTool(); cancelPushPull(); setBodyResizeMode(false); setMoveMode(false); setInteractionActive(true);
+            }} commit={commitDesignerAction} />}
           {doc && mesh && <DesignerWorkbench key={`${doc.document_instance_id}:${doc.slot}:${doc.revision}:${selectedPartId}`}
             doc={doc} mesh={mesh} viewport={viewportRef.current} partId={selectedPartId} face={faceFeatureTarget}
+            selectedRange={mesh.face_ranges.find((range) => range.face_index === selectedFace)} externalToolActive={interactionActive} onActiveChange={setDesignerActive}
             edge={edgeTool} busy={computing || geometryBusy || meshLoading || !!unsavedRequest} inspectMode={whatIsThis}
             sceneToolActive={bodyResizeMode || moveMode || edgeTool.active}
             historyIndex={historyEdit} onHistoryClose={() => setHistoryEdit(null)}
             onHistoryPick={setHistoryEdit} onPartSelect={(id) => { setSelectedPartId(id); setSelectedPartIds([id]); setSelectedFace(null); }}
             preview={designerPreview} clearPreview={clearDesignerPreview}
-            commit={async (action) => {
-              const source = docRef.current;
-              if (!source) return false;
-              const state = await runBackend(() => backend.docDesignerAction(action, source), true);
-              if (state?.error) setStatusMsg(state.error.message);
-              return !!state && !state.error;
-            }}
+            commit={commitDesignerAction}
             prepare={() => {
+              setInteractionActive(false);
               viewportRef.current?.setBodyResizeHandle(null); viewportRef.current?.setTransformHandle(null);
               viewportRef.current?.cancelPushPullPreview(); viewportRef.current?.setPushPullHandle(null);
               setBodyResizeMode(false); setMoveMode(false); cancelEdgeTool();
@@ -1680,7 +1723,7 @@ export default function App() {
             />
           )}
           <div className={`scene-dock${bodyResizeMode ? " scene-dock-resize" : ""}`}>
-          {!doc?.stats?.mesh_mode && <SelectionCoach
+          {!doc?.stats?.mesh_mode && !designerActive && !interactionActive && <SelectionCoach
             key={`${doc?.doc_id}:${doc?.slot}:${doc?.revision}:${selectedPartId}`}
             hasBody={hasBody}
             busy={computing || geometryBusy || meshLoading}
@@ -1832,7 +1875,7 @@ export default function App() {
           savePath={savePath} setSavePath={setSavePath}
           openPath={openPath} setOpenPath={setOpenPath}
           exportPath={exportPath} setExportPath={setExportPath}
-          onSave={() => void doSave()}
+          onSave={() => void doSave(true)}
           onOpen={() => void doOpen()}
           onExport={(f) => void doExport(f)}
         />

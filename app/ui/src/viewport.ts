@@ -527,6 +527,10 @@ export class Viewport {
   private pointer = new THREE.Vector2();
   private mesh: THREE.Mesh | null = null;
   private faceRanges: FaceRange[] = [];
+  private hiddenSolids = new Set<number>();
+  private selectionHint: ((label: string) => void) | null = null;
+  private selectionCycle: { x: number; y: number; faces: number[]; index: number } | null = null;
+  private printDiagnosticGroup: THREE.Group | null = null;
   private hoverOverlay: THREE.Object3D | null = null;
   private selOverlay: THREE.Object3D | null = null;
   private edgeMarker: THREE.Group | null = null;
@@ -780,10 +784,20 @@ export class Viewport {
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const hits = this.raycaster.intersectObject(this.mesh, false);
-    if (!hits.length || hits[0].faceIndex == null) return null;
-    const tri = hits[0].faceIndex;
-    const range = this.faceRanges.find((r) => tri >= r.tri_start && tri < r.tri_start + r.tri_count);
-    return range ? range.face_index : null;
+    const faces: number[] = [];
+    for (const hit of hits) {
+      const triangle = hit.faceIndex;
+      if (triangle == null) continue;
+      const range = this.faceRanges.find((candidate) => triangle >= candidate.tri_start && triangle < candidate.tri_start + candidate.tri_count);
+      if (!range || this.hiddenSolids.has(range.solid_index ?? -1) || faces.includes(range.face_index)) continue;
+      faces.push(range.face_index);
+    }
+    if (!e.altKey) return faces[0] ?? null;
+    const previous = this.selectionCycle;
+    const same = previous && Math.hypot(previous.x - e.clientX, previous.y - e.clientY) < 5 && previous.faces.join() === faces.join();
+    const index = same && faces.length ? (previous.index + 1) % faces.length : 0;
+    this.selectionCycle = { x: e.clientX, y: e.clientY, faces, index };
+    return faces[index] ?? null;
   }
 
   private updatePointer(e: PointerEvent) {
@@ -813,6 +827,7 @@ export class Viewport {
     const pointer = new THREE.Vector2(e.clientX - rect.left, e.clientY - rect.top);
     let best: { edge: EdgeRef; distance: number; depth: number } | null = null;
     for (const edge of this.selectableEdges) {
+      if (this.hiddenSolids.has(edge.solid_index)) continue;
       const points = edgePoints(edge);
       for (let index = 1; index < points.length; index += 1) {
       const worldStart = new THREE.Vector3(...docToThree(...points[index - 1]));
@@ -1063,7 +1078,9 @@ export class Viewport {
     const edge = !overTransform && !overHandle && !this.bodyResizeTarget && !this.transformTarget && !e.shiftKey ? this.pickEdge(e) : null;
     this.setHoverEdge(edge);
     this.renderer.domElement.style.cursor = overTransform || overHandle ? "grab" : edge ? "crosshair" : "default";
-    const face = edge || this.edgeSelectionActive ? null : this.pickFace(e);
+    const face = edge || this.edgeSelectionActive ? null : this.pickFace({ clientX: e.clientX, clientY: e.clientY, altKey: false } as PointerEvent);
+    const range = this.faceRanges.find((candidate) => candidate.face_index === face);
+    this.selectionHint?.(edge ? "Ребро · щелчок для скругления или фаски" : range ? `${range.surface_ref?.kind === "cylinder" ? "Цилиндрическая поверхность" : range.face_ref ? "Плоская грань" : "Поверхность"}${range.feature_index != null ? " · редактируемый элемент" : ""} · Alt+щелчок: следующий слой` : "Выберите тело, грань или ребро");
     this.setHoverFace(face);
     this.events.onHoverFace(face);
   }
@@ -1143,7 +1160,7 @@ export class Viewport {
     if (!this.editingEnabled) return;
     if (this.pickDimension(e) != null) return;
     if (this.designerTool) return;
-    const edge = !this.bodyResizeTarget && !this.transformTarget && !e.shiftKey ? this.pickEdge(e) : null;
+    const edge = !this.bodyResizeTarget && !this.transformTarget && !e.shiftKey && !e.altKey ? this.pickEdge(e) : null;
     if (edge) { this.events.onSelectEdge(edge); return; }
     if (this.edgeSelectionActive) return;
     const face = this.pickFace(e);
@@ -1283,6 +1300,43 @@ export class Viewport {
     this.selOverlay = new THREE.Mesh(sub, mat);
     this.selOverlay.renderOrder = 5;
     this.scene.add(this.selOverlay);
+  }
+
+  setSelectionHint(handler: ((label: string) => void) | null) { this.selectionHint = handler; }
+
+  setPrintDiagnostics(profile: { x: number; y: number; z: number } | null, points: Size3[] = []) {
+    if (this.printDiagnosticGroup) { this.scene.remove(this.printDiagnosticGroup); disposeObject(this.printDiagnosticGroup); this.printDiagnosticGroup = null; }
+    if (!profile || !Object.values(profile).every((value) => Number.isFinite(value) && value > 0)) return;
+    const group = new THREE.Group();
+    const box = new THREE.BoxGeometry(profile.x, profile.z, profile.y);
+    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: COLOR.hover, transparent: true, opacity: 0.7 }));
+    box.dispose(); outline.position.y = profile.z / 2; group.add(outline);
+    for (const point of points) {
+      if (!point.every(Number.isFinite)) continue;
+      const marker = new THREE.Mesh(new THREE.SphereGeometry(0.8, 12, 8), new THREE.MeshBasicMaterial({ color: 0xc4242a, depthTest: false }));
+      marker.position.set(...docToThree(...point)); marker.renderOrder = 25; group.add(marker);
+    }
+    this.printDiagnosticGroup = group; this.scene.add(group); this.render();
+  }
+
+  setHiddenSolids(indices: number[]) {
+    this.hiddenSolids = new Set(indices);
+    if (!this.mesh) return;
+    const geometry = this.mesh.geometry;
+    const materials = Array.isArray(this.mesh.material) ? this.mesh.material : [this.mesh.material];
+    if (materials.length === 1) this.mesh.material = [materials[0], new THREE.MeshBasicMaterial({ visible: false })];
+    geometry.clearGroups();
+    for (const range of this.faceRanges) geometry.addGroup(range.tri_start * 3, range.tri_count * 3, this.hiddenSolids.has(range.solid_index ?? -1) ? 1 : 0);
+    for (const child of [...this.mesh.children]) { this.mesh.remove(child); disposeObject(child); }
+    const visible = this.faceRanges.filter((range) => !this.hiddenSolids.has(range.solid_index ?? -1));
+    if (visible.length) {
+      const subset = subGeometryRanges(geometry, visible);
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(subset, 15), new THREE.LineBasicMaterial({ color: COLOR.bodyEdge }));
+      subset.dispose(); this.mesh.add(edges);
+    }
+    this.setHoverFace(null);
+    this.selectionCycle = null;
+    this.render();
   }
 
   setSelectedSolids(solidIndices: number[]) {

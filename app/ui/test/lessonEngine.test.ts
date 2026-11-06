@@ -55,8 +55,16 @@ function complete(run: LessonRun, events: LessonEvent[]): LessonRun {
 const box20 = () => documentState("box", { length: 40, width: 30, height: 20 }, stats([40, 30, 20], 24000));
 const box25 = () => documentState("box", { length: 40, width: 30, height: 20 }, stats([40, 30, 25], 30000), 2);
 
-test("все 13 поставляемых уроков проходят только свои реальные последовательности событий", () => {
-  assert.equal(lessons.length, 13);
+test("все 14 поставляемых уроков проходят только свои реальные последовательности событий", () => {
+  assert.equal(lessons.length, 14);
+  complete(runFor("precise-canvas"), [
+    { type: "params", state: box20() }, { type: "face_selected", normal: [0, 0, 1] },
+    { type: "operation", op: "constrained_sketch_extrude", state: box20() },
+    { type: "command", command_id: "op.undo", state: box20() },
+    { type: "command", command_id: "op.redo", state: box20() },
+    { type: "operation", op: "transform", state: box20() },
+    { type: "check_result", state: box20(), checks: [{ id: "bed_position", status: "pass" }] },
+  ]);
   complete(runFor("navigation"), [
     { type: "camera_rotated" }, { type: "camera_zoomed" },
     { type: "command", command_id: "view.fit" }, { type: "command", command_id: "view.top" },

@@ -1,6 +1,13 @@
 {
   "schema_version": 1,
   "commands": [
+    {"command_id": "view.hide_body", "title": "Временно скрыть деталь", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "view.show_bodies", "title": "Показать скрытые детали", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.local_feature", "title": "Изменить выбранный элемент", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.mate", "title": "Соединить по поверхности", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.place_on_bed", "title": "Разместить на центре стола", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.canvas_sketch", "title": "Эскиз с ограничениями", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.suggest_feature_size", "title": "Проверить меньший радиус или фаску", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
     {"command_id": "op.designer", "title": "Ручное проектирование", "help_id": "ruchnoe-proektirovanie", "shortcut": null, "availability": "always", "params": []},
     {"command_id": "op.dimensions", "title": "Размеры в сцене", "help_id": "ruchnoe-proektirovanie", "shortcut": null, "availability": "always", "params": []},
     {"command_id": "op.placement", "title": "Перемещение, поворот и выравнивание", "help_id": "ruchnoe-proektirovanie", "shortcut": null, "availability": "always", "params": []},

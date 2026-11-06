@@ -28,6 +28,7 @@ export interface Operation {
   mode?: "add" | "cut";
   face_ref?: FaceFeatureRef | FaceOffsetRef;
   profile?: FaceFeatureProfile | SketchProfile;
+  dimension_bindings?: DimensionBindings;
   sketch?: ConstrainedSketch;
   drag?: SketchDrag;
   depth?: number | "through";
@@ -144,9 +145,10 @@ export interface SketchExtrudeArgs {
 
 export type ConstrainedSketchEntity =
   | { id: string; type: "line"; start: Point2; end: Point2 }
+  | { id: string; type: "arc"; start: Point2; mid: Point2; end: Point2 }
   | { id: string; type: "circle"; center: Point2; radius: number };
 
-export type SketchPointRef = [string, "start" | "end" | "center"];
+export type SketchPointRef = [string, "start" | "end" | "mid" | "center"];
 
 export type SketchConstraint =
   | { type: "coincident"; a: SketchPointRef; b: SketchPointRef }
@@ -458,6 +460,23 @@ export interface FaceRange {
   tri_count: number;
   solid_index?: number;
   face_ref?: FaceOffsetRef | null;
+  surface_ref?: SurfaceRef | null;
+  feature_index?: number | null;
+}
+
+export interface SurfaceRef {
+  kind: "plane" | "cylinder";
+  center: Point3;
+  direction: Point3;
+  area: number;
+  origin?: Point3;
+  radius?: number;
+}
+
+export interface DimensionBindings {
+  u?: { edge: "min" | "max"; offset: number };
+  v?: { edge: "min" | "max"; offset: number };
+  equal_diameter?: number;
 }
 
 export interface MeshData {
@@ -532,6 +551,7 @@ export interface PrintCheck {
   title: string;
   status: "pass" | "fail" | "unknown";
   detail?: string;
+  issues?: Array<{ solid_index: number; face_local_index: number; point: Point3; thickness: number }>;
 }
 
 export interface PrintCheckResult {
