@@ -2,6 +2,14 @@
 
 Дата: 2026-11-06. Scope — все восемь пунктов DESIGNER_RELEASE_PLAN.md в одном релизе. После ранее выполненного FULL запускаются изменённые компоненты и связующие, не весь ручной каталог повторно.
 
+## Публикация — PASS с performance observation
+
+[Release workflow 42209995840](https://github.com/yakut-sekonts/printforge/actions/runs/42209995840) завершился SUCCESS. Публичный v0.5.0 содержит два DMG, Windows NSIS и подписанные updater assets. Все 10 packaged-designer gates прошли на каждой платформе; установленный Windows payload и политика unsigned Authenticode прошли blocking gates.
+
+Public latest feed возвращает 0.5.0 и все шесть canonical/bundle-specific platform entries. Их API asset URLs сверены с assets именно этого релиза. С заголовком `Accept: application/octet-stream`, как в Tauri updater, скачаны три уникальных payload. SHA-256 совпадают с GitHub digests; все три Minisign-подписи проверены существующим публичным ключом. Изменение первого byte каждого payload отклоняется. Версия 0.5.0 и Mach-O architecture обоих macOS archives проверены. Машинный результат: `artifacts/designer-release/published-release.json`. Это не повышает полный install/relaunch cycle до PASS.
+
+Windows performance остаётся **failed/non-blocking**: минимум 26,0 FPS при цели ≥30 на stress-сцене 20 тел / 100 операций / 40880 треугольников. Cold startup p95 6,91 с проходит цель ≤8 с; максимум process-tree RSS 868,5 MiB проходит лимит 2 GiB. Виртуальный runner не является гарантией FPS на другом ПК. Статус failure не переименовывается в PASS.
+
 ## Automated — PASS
 
 511 уникальных тестов: 412 Python, 77 Node, 22 Rust. Повторные прогоны не суммируются. Source connected stage: `artifacts/designer-release/connected/test-report.json`; финальные follow-up: `designer-final.xml`, `final-contracts.xml`, `ui-final-layout/test-report.json` в том же каталоге. Исходный HEAD отчёта — baseline до commit, а не утверждение, что незакоммиченные изменения уже опубликованы.

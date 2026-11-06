@@ -97,6 +97,8 @@ Target-specific sidecar не хранится в Git. Результат native-
 
 Срез v0.5.0: **511 уникальных automated-тестов PASS** в connected stage и точечных follow-up; отдельно 10 packaged-sidecar smoke gates, browser/native проверки. Полный каталог из 179 сценариев не объявляется пройденным повторно: границы и BLOCKED описаны в [QA-отчёте](docs/testing/QA_0.5.0.md). В release matrix packaged geometry проверяется на каждой платформе до публикации.
 
+Windows runner: в stress-сцене 20 тел/100 операций минимум 26,0 FPS при цели 30. Это `failed/non-blocking` performance observation, не полный performance PASS; installer/payload и startup/memory gates проходят. Подробности — в release notes и QA-отчёте.
+
 ```bash
 backend/.venv/bin/python scripts/run_test_stage.py --scope full
 backend/.venv/bin/python scripts/run_test_stage.py --scope changed

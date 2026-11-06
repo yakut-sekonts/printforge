@@ -1,6 +1,6 @@
 # STATUS.md — статус PrintForge
 
-Обновлено: 2026-11-06. Подготовлен v0.5.0 — единый релиз ручного проектирования. Согласованный scope и границы: [DESIGNER_RELEASE_PLAN.md](docs/DESIGNER_RELEASE_PLAN.md). M4 сохраняет открытые расширенные задачи: все группы `EXT-001…EXT-012` имеют рабочий partial slice, оставшиеся generic/direct-editing clauses перечислены в `docs/testing/TEST_GAPS.md`.
+Обновлено: 2026-11-06. Опубликован [v0.5.0](https://github.com/yakut-sekonts/printforge/releases/tag/v0.5.0) — единый релиз ручного проектирования. Согласованный scope и границы: [DESIGNER_RELEASE_PLAN.md](docs/DESIGNER_RELEASE_PLAN.md). M4 сохраняет открытые расширенные задачи: все группы `EXT-001…EXT-012` имеют рабочий partial slice, оставшиеся generic/direct-editing clauses перечислены в `docs/testing/TEST_GAPS.md`.
 
 ## Release v0.5.0 — ручное проектирование
 
@@ -11,6 +11,8 @@
 - Schema 6 для новых операций; 37 статей/69 команд. Старые проекты читаются.
 - Connected source stage и точечные follow-up: **511 уникальных PASS = 412 Python + 77 Node + 22 Rust**. Отдельно 10 packaged-sidecar smoke gates. [QA_0.5.0.md](docs/testing/QA_0.5.0.md) отделяет automated, browser/native и BLOCKED.
 - Release matrix выполняет новый blocking packaged-designer smoke на всех трёх платформах; Windows installer/payload gate сохранён. Performance по-прежнему record-only, failures не переименовываются в PASS.
+- Workflow `42209995840` завершился SUCCESS: macOS ARM/Intel и Windows x64 опубликованы. Public latest feed 0.5.0, SHA-256 всех updater assets, три Minisign-подписи и rejection изменённых bytes проверены; версии/архитектуры macOS archives совпадают.
+- Windows runner: stress-сцена 20 тел/100 операций — минимум 26,0 FPS при цели 30, performance `failed/non-blocking`. Startup p95 6,91 с и RSS 868,5 MiB проходят свои бюджеты. Это наблюдение, не полный performance PASS.
 
 ## Release v0.4.1 — исправления после QA
 
