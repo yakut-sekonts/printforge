@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import type { DocState, MeshData, SurfaceRef } from "./types";
 import type { Viewport } from "./viewport";
 import type { DesignerAction } from "./designer";
@@ -8,13 +9,14 @@ type Preview = (action: DesignerAction, done: (error: string | null) => void) =>
 type SurfacePick = { partId: string; surface: SurfaceRef };
 
 export function InteractionTools({ doc, mesh, viewport, selectedFace, selectedPartId, busy, inspectMode, onClearSelection,
-  onHistoryPick, preview, clearPreview, commit, prepare, active, onFinish, suspended,
+  onHistoryPick, preview, clearPreview, commit, prepare, active, onFinish, suspended, dock,
 }: {
   doc: DocState; mesh: MeshData; viewport: Viewport | null; selectedFace: number | null; selectedPartId: string | null;
   busy: boolean; inspectMode: boolean; onClearSelection: () => void; onHistoryPick: (index: number) => void;
   preview: Preview; clearPreview: () => void; commit: (action: DesignerAction) => Promise<boolean>; prepare: () => void;
   active: boolean; onFinish: () => void;
   suspended: boolean;
+  dock: HTMLElement | null;
 }) {
   const [hint, setHint] = useState("Выберите тело, грань или ребро");
   const [hidden, setHidden] = useState<string[]>([]);
@@ -51,6 +53,7 @@ export function InteractionTools({ doc, mesh, viewport, selectedFace, selectedPa
   const cancel = () => { clearPreview(); setMoving(null); setFixed(null); setError(null); onFinish(); };
   if (suspended) return null;
   return <>
+    {dock && createPortal(<div className="interaction-controls">
     <div className="selection-hint" role="status">{hint}</div>
     <div className="interaction-toolbar" role="toolbar" aria-label="Выбор и сборка">
       <button className="btn" data-cmd="view.hide_body" disabled={busy || inspectMode || !selectedPartId} onClick={hide}>Скрыть деталь</button>
@@ -66,6 +69,7 @@ export function InteractionTools({ doc, mesh, viewport, selectedFace, selectedPa
           translate: [-(part.bbox[0] + part.bbox[3]) / 2, -(part.bbox[1] + part.bbox[4]) / 2, -part.bbox[2]] } });
       }}>На центр стола</button>}
     </div>
+    </div>, dock)}
     {moving && <section className="mate-card" aria-label="Сборочная связь">
       <strong>{moving.surface.kind === "plane" ? "Приложить грань к грани" : "Совместить оси"}</strong>
       <p>{fixed ? "Ответная поверхность выбрана. Детали останутся отдельными." : "Выберите подходящую поверхность другой детали и нажмите «Выбрать ответную поверхность»."}</p>

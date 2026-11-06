@@ -67,6 +67,7 @@ export default function App() {
   const [historyEdit, setHistoryEdit] = useState<number | null>(null);
   const [interactionActive, setInteractionActive] = useState(false);
   const [designerActive, setDesignerActive] = useState(false);
+  const [sceneDock, setSceneDock] = useState<HTMLDivElement | null>(null);
   const preserveResizeRef = useRef(true);
   const designerQueue = useRef(new PreviewQueue());
   const [movePreview, setMovePreview] = useState<{ axis: TransformAxis; delta: number } | null>(null);
@@ -1664,7 +1665,7 @@ export default function App() {
             const state = await runBackend(() => backend.recoveryRestore(name));
             return !!state && !state.error;
           }} />
-          {doc && mesh && <InteractionTools doc={doc} mesh={mesh} viewport={viewportRef.current} selectedFace={selectedFace} selectedPartId={selectedPartId}
+          {doc && mesh && <InteractionTools doc={doc} mesh={mesh} viewport={viewportRef.current} selectedFace={selectedFace} selectedPartId={selectedPartId} dock={sceneDock}
             busy={computing || geometryBusy || meshLoading || !!unsavedRequest} inspectMode={whatIsThis}
             active={interactionActive} onFinish={() => setInteractionActive(false)} suspended={designerActive}
             onClearSelection={() => { setSelectedFace(null); setSelectedPartId(null); setSelectedPartIds([]); }}
@@ -1722,7 +1723,7 @@ export default function App() {
               onLesson={() => void startLesson("first-part")}
             />
           )}
-          <div className={`scene-dock${bodyResizeMode ? " scene-dock-resize" : ""}`}>
+          <div ref={setSceneDock} className={`scene-dock${bodyResizeMode ? " scene-dock-resize" : ""}`}>
           {!doc?.stats?.mesh_mode && !designerActive && !interactionActive && <SelectionCoach
             key={`${doc?.doc_id}:${doc?.slot}:${doc?.revision}:${selectedPartId}`}
             hasBody={hasBody}

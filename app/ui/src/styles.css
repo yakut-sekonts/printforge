@@ -872,10 +872,12 @@ mark { background: var(--pill-warning-bg); color: var(--accent-ink); border-radi
 .designer-error { color: #b42318; }
 .designer-preview { color: #216147; }
 .designer-policy { position: absolute; top: 100px; left: 12px; z-index: 9; max-width: 275px; padding: 6px; background: var(--surface); border-radius: 6px; font-size: 11px; }
-.interaction-toolbar { position: absolute; left: 12px; right: 12px; bottom: 92px; z-index: 10; display: flex; gap: 6px; flex-wrap: wrap; }
-.selection-hint { position: absolute; left: 12px; right: 12px; bottom: 136px; z-index: 9; width: fit-content; max-width: calc(100% - 24px); padding: 4px 8px; border-radius: 4px; background: var(--surface); color: var(--muted); font-size: 12px; pointer-events: none; }
+.interaction-controls { order: -1; flex: none; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.interaction-toolbar { display: flex; gap: 6px; flex-wrap: wrap; }
+.selection-hint { width: fit-content; max-width: 100%; padding: 4px 8px; border-radius: 4px; background: var(--surface); color: var(--muted); font-size: 12px; pointer-events: none; }
 .mate-card, .recovery-notice { position: absolute; top: 150px; right: 12px; z-index: 14; width: min(330px, calc(100% - 24px)); max-height: calc(100% - 180px); overflow-y: auto; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-size: 12px; line-height: 1.5; }
 .recovery-notice { top: 12px; left: 12px; right: auto; z-index: 30; }
+.mate-card { position: fixed; top: 54px; right: 8px; width: 284px; max-height: calc(100vh - 90px); }
 .sketch-workspace { position: absolute; inset: 100px 12px 24px; z-index: 16; display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 240px); grid-template-rows: auto minmax(0, 1fr); border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
 .sketch-canvas-toolbar { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); font-size: 12px; }
 .sketch-canvas { display: block; width: 100%; height: 100%; min-height: 180px; touch-action: none; user-select: none; }

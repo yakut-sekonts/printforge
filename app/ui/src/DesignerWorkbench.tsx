@@ -39,7 +39,7 @@ function NumberField({ label, value, onChange, min, step = 0.1 }: {
 function ParameterFields({ value, onChange, prefix = "" }: {
   value: Record<string, unknown>; onChange: (value: Record<string, unknown>) => void; prefix?: string;
 }) {
-  const labels: Record<string, string> = { radius: "Радиус, мм", distance: "Расстояние, мм", size: "Габариты, мм",
+  const labels: Record<string, string> = { profile: "Профиль", gap: "Зазор / осевое смещение, мм", radius: "Радиус, мм", distance: "Расстояние, мм", size: "Габариты, мм",
     anchor: "Неподвижный угол", translate: "Перемещение, мм", rotate_deg: "Поворот, °", pivot: "Центр поворота, мм",
     depth: "Глубина, мм", diameter: "Диаметр, мм", width: "Ширина, мм", height: "Высота, мм", center: "Центр, мм", delta: "Смещение, мм" };
   return <>{Object.entries(value).map(([key, current]) => {
