@@ -1549,6 +1549,8 @@ export default function App() {
         setWhatIsThis((v) => !v);
       } else if (e.key === "Escape") {
         if (whatIsThis) { setWhatIsThis(false); return; }
+        setHistoryEdit(null);
+        clearDesignerPreview();
         if (bodyResizeMode) {
           viewportRef.current?.setBodyResizeHandle(null);
           setBodyResizeMode(false);
@@ -1580,7 +1582,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [whatIsThis, helpOpen, aiOpen, moveMode, bodyResizeMode, unsavedRequest, undoDocument, redoDocument, doSave, doOpen, cancelEdgeTool, cancelPushPull]);
+  }, [whatIsThis, helpOpen, aiOpen, moveMode, bodyResizeMode, unsavedRequest, undoDocument, redoDocument, doSave, doOpen, cancelEdgeTool, cancelPushPull, clearDesignerPreview]);
 
   const faceAreaValue = mesh && selectedFace != null ? faceArea(mesh, selectedFace) : null;
   const docName = doc?.path ? doc.path.split("/").pop()! : "Без названия";
@@ -1626,6 +1628,7 @@ export default function App() {
           {doc && mesh && <DesignerWorkbench key={`${doc.document_instance_id}:${doc.slot}:${doc.revision}:${selectedPartId}`}
             doc={doc} mesh={mesh} viewport={viewportRef.current} partId={selectedPartId} face={faceFeatureTarget}
             edge={edgeTool} busy={computing || geometryBusy || meshLoading || whatIsThis || !!unsavedRequest}
+            sceneToolActive={bodyResizeMode || moveMode || edgeTool.active}
             historyIndex={historyEdit} onHistoryClose={() => setHistoryEdit(null)}
             onHistoryPick={setHistoryEdit} onPartSelect={(id) => { setSelectedPartId(id); setSelectedPartIds([id]); setSelectedFace(null); }}
             preview={designerPreview} clearPreview={clearDesignerPreview}

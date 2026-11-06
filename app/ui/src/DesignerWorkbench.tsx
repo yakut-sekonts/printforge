@@ -56,7 +56,7 @@ function ParameterFields({ value, onChange, prefix = "" }: {
 }
 
 export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, busy, historyIndex, onHistoryClose,
-  preview, clearPreview, commit, prepare, onResizePolicy, onEdgeSize, onEdgeKind, onEdgeCancel, onStartResize, onStartMove, onFaceActions, onHistoryPick, onPartSelect,
+  preview, clearPreview, commit, prepare, onResizePolicy, onEdgeSize, onEdgeKind, onEdgeCancel, onStartResize, onStartMove, onFaceActions, onHistoryPick, onPartSelect, sceneToolActive,
 }: {
   doc: DocState; mesh: MeshData; viewport: Viewport | null; partId: string | null; face: FaceFeatureTarget | null;
   edge: EdgeToolUi; busy: boolean; historyIndex: number | null; onHistoryClose: () => void;
@@ -65,6 +65,7 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   onEdgeSize: (size: string) => void; onEdgeKind: (kind: "fillet" | "chamfer") => void; onEdgeCancel: () => void;
   onStartResize: () => void; onStartMove: () => void; onFaceActions: () => void;
   onHistoryPick: (index: number) => void; onPartSelect: (id: string) => void;
+  sceneToolActive: boolean;
 }) {
   const part = doc.stats?.parts?.find((candidate) => candidate.part_id === partId) ?? doc.stats?.parts?.[0];
   const bounds = part?.bbox ?? doc.stats?.bbox ?? [0, 0, 0, 1, 1, 1];
@@ -104,9 +105,15 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   };
 
   useEffect(() => {
-    if (historyIndex == null || !operation) return;
+    if (historyIndex == null) { setMode((currentMode) => currentMode === "history" ? null : currentMode); return; }
+    if (!operation) return;
     prepare(); setMode("history"); setChanges(editableParameters(operation)); setEnabled(operation.enabled !== false);
   }, [historyIndex]);
+
+  useEffect(() => {
+    if (!sceneToolActive) return;
+    clearPreview(); setMode(null); onHistoryClose();
+  }, [sceneToolActive]);
 
   useEffect(() => {
     if (!viewport) return;

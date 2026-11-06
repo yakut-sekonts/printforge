@@ -37,11 +37,14 @@ macOS ARM `.app` собрана с финальным sidecar; `codesign --verif
 
 В реально собранной `.app`/WKWebView: sphere 30 → Dimensions X=36 автоматически связывает XYZ=36 → точный Preview при revision 1 → Apply, revision 2. Явная конвертация создаёт mesh из 32000 треугольников, 0 открытых рёбер; Undo восстанавливает точный BRep 36×36×36. Native save в отдельный `/private/tmp/printforge-050-native-smoke.printforge` действительно записал schema 6 с `resize_parametric`; reopen восстановил геометрию, сбросил revision к 1 и принял новый instance. Эти результаты подтверждают native IPC и binary Preview path, но не все мышиные жесты на всех ОС.
 
+После исправления отмены повторно проверены Escape в native BRep history и browser mesh history: редактор закрывается, не открывается заново, revision и модель не меняются. Инструменты рамки/перемещения/ребра закрывают незавершённый designer draft и его Preview.
+
 ## Исправления, найденные проверками
 
 - Designer edge request обязан использовать `part_id`, не `target_id`; добавлен чистый payload builder и regression test.
 - У сферы tessellation давала два degenerate pole triangles. Они удаляются до uniform subdivision; адаптивное независимое уплотнение заменено сохраняющим связность. Конвертация, не дающая замкнутую сетку, отклоняется без потери BRep.
 - Сохранность transient mesh, подписей transform gizmo и отмена второго pointer проверяются отдельно.
+- Native manual выявил зависимость Escape от порядка window listeners: сброс выбранного тела мог перемонтировать инструмент до очистки history index. Root keyboard handler теперь очищает index и Preview до сброса выбора; отмена не должна открывать редактор повторно.
 - Первые запуски нового smoke-harness выявили несоответствие shutdown response без `result`; исправлен harness. Неуспешные промежуточные запуски не объявляются PASS.
 
 ## BLOCKED / не проверено
@@ -54,3 +57,5 @@ macOS ARM `.app` собрана с финальным sidecar; `codesign --verif
 - Остальные ограничения предыдущего FULL QA не закрываются только фактом этого релиза. Native/manual набор из 179 сценариев и все 13 уроков повторно целиком не прогонялись.
 
 Публичный релиз создаётся draft и публикуется только после трёх платформ и blocking Windows installer/payload gate. Performance observations сохраняются с исходным failed-статусом, если превышен budget.
+
+Отдельное наблюдение: прежний scheduled FULL run `42194356561` на baseline v0.4.1 завершился FAIL из-за ASCII `UnicodeDecodeError` при default-encoding `read_text` в contract-тестах после загрузки ядра. Это не скрывается утверждением о FULL PASS и не относится к проверке новых жестов. Connected run `42205709204` для реализации v0.5.0 завершился SUCCESS; точечный follow-up отмены проверяется отдельно. Полный nightly harness не исправлялся в рамках этого feature scope.
