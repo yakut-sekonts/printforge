@@ -1,6 +1,12 @@
 {
   "schema_version": 1,
   "commands": [
+    {"command_id": "op.designer", "title": "Ручное проектирование", "help_id": "ruchnoe-proektirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.dimensions", "title": "Размеры в сцене", "help_id": "ruchnoe-proektirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.placement", "title": "Перемещение, поворот и выравнивание", "help_id": "ruchnoe-proektirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.face_sketch", "title": "Эскиз мышью на грани", "help_id": "ruchnoe-proektirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.mesh_deform", "title": "Мягкая mesh-форма", "help_id": "ruchnoe-proektirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.history_edit", "title": "Редактирование истории", "help_id": "ruchnoe-proektirovanie", "shortcut": null, "availability": "always", "params": []},
     {
       "command_id": "app.help.open",
       "title": "Открыть справочник",
@@ -394,6 +400,15 @@
       "shortcut": null,
       "availability": "requires_body",
       "disabled_reason": "Сначала создайте деталь",
+      "params": []
+    },
+    {
+      "command_id": "op.resize_body",
+      "title": "Изменить форму мышью",
+      "help_id": "forma-myshyu",
+      "shortcut": null,
+      "availability": "requires_body",
+      "disabled_reason": "Сначала создайте точное тело",
       "params": []
     },
     {

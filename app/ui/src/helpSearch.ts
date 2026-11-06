@@ -28,6 +28,7 @@ function tokens(value: string): string[] {
 function tokenSimilarity(queryToken: string, candidate: string): number {
   if (queryToken === candidate) return 1;
   if (Math.min(queryToken.length, candidate.length) >= 4 &&
+      Math.min(queryToken.length, candidate.length) / Math.max(queryToken.length, candidate.length) >= 0.5 &&
       (queryToken.startsWith(candidate) || candidate.startsWith(queryToken))) {
     return 0.72;
   }

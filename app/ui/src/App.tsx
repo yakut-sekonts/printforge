@@ -14,6 +14,8 @@ import { backend, expandTilde, isTauri, parseIpcError } from "./backend";
 import { evalExpression } from "./expr";
 import { acceptsDocumentState, documentGeometryChanged, imageReliefSettingsKey, isEditableTarget } from "./documentState";
 import { parameterValues } from "./parameterEditing";
+import { sizeLabel } from "./bodyResizing";
+import type { BodyResize, Size3 } from "./bodyResizing";
 import { Viewport, faceArea, ViewName } from "./viewport";
 import type { TransformAxis } from "./viewport";
 import {
@@ -37,6 +39,9 @@ import { AiPanel } from "./AiPanel";
 import { SelectionCoach } from "./SelectionCoach";
 import { PrimitivePicker } from "./PrimitivePicker";
 import { UnsavedChangesDialog } from "./UnsavedChangesDialog";
+import { DesignerWorkbench, OperationHistory } from "./DesignerWorkbench";
+import { PreviewQueue } from "./designer";
+import type { DesignerAction } from "./designer";
 
 const TOOLTIP_KEY = "pf-tooltip-mode";
 const ACTIVE_LESSON_KEY = "pf-active-lesson";
@@ -55,6 +60,11 @@ export default function App() {
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [selectedPartIds, setSelectedPartIds] = useState<string[]>([]);
   const [moveMode, setMoveMode] = useState(false);
+  const [bodyResizeMode, setBodyResizeMode] = useState(false);
+  const [bodyResizeSize, setBodyResizeSize] = useState<Size3 | null>(null);
+  const [historyEdit, setHistoryEdit] = useState<number | null>(null);
+  const preserveResizeRef = useRef(true);
+  const designerQueue = useRef(new PreviewQueue());
   const [movePreview, setMovePreview] = useState<{ axis: TransformAxis; delta: number } | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
@@ -127,6 +137,7 @@ export default function App() {
     preview: (_axis: TransformAxis, _delta: number) => {},
     commit: (_axis: TransformAxis, _delta: number) => {},
   });
+  const bodyResizeCommitRef = useRef<(_resize: BodyResize) => void>(() => {});
   const performanceReported = useRef(false);
   const nativeE2eStarted = useRef(false);
   docRef.current = doc;
@@ -190,6 +201,8 @@ export default function App() {
       onPushPullCommit: (delta) => pushPullHandlersRef.current.commit(delta),
       onPartMovePreview: (axis, delta) => partMoveHandlersRef.current.preview(axis, delta),
       onPartMoveCommit: (axis, delta) => partMoveHandlersRef.current.commit(axis, delta),
+      onBodyResizePreview: (size) => setBodyResizeSize(size),
+      onBodyResizeCommit: (resize) => bodyResizeCommitRef.current(resize),
       onCameraRotated: () => lessonEvent({ type: "camera_rotated" }),
       onCameraZoomed: () => lessonEvent({ type: "camera_zoomed" }),
     });
@@ -300,8 +313,8 @@ export default function App() {
   }, [edgeTool.active, edgeTool.kind, edgeTool.selected, edgeTool.size, doc?.stats?.edges, mesh]);
 
   useEffect(() => {
-    viewportRef.current?.setEditingEnabled(!computing && !geometryBusy && !meshLoading && !whatIsThis);
-  }, [computing, geometryBusy, meshLoading, whatIsThis]);
+    viewportRef.current?.setEditingEnabled(!computing && !geometryBusy && !meshLoading && !whatIsThis && !unsavedRequest);
+  }, [computing, geometryBusy, meshLoading, whatIsThis, unsavedRequest]);
 
   useEffect(() => {
     document.body.classList.toggle("what-is-this", whatIsThis);
@@ -326,11 +339,38 @@ export default function App() {
   }, []);
 
   // ---------- работа с документом ----------
+  const clearDesignerPreview = useCallback(() => {
+    designerQueue.current.invalidate();
+    viewportRef.current?.setOperationPreview(null);
+  }, []);
+
+  const designerPreview = useCallback((action: DesignerAction, done: (error: string | null) => void) => {
+    const source = docRef.current;
+    if (!source || documentActionPending.current) return () => {};
+    let cancelled = false;
+    designerQueue.current.schedule(async () => {
+      const candidate = await backend.docDesignerPreview(action, source);
+      return backend.docGetImportedMesh(candidate.mesh);
+    }, (candidate) => {
+      const active = docRef.current;
+      if (cancelled || active?.revision !== source.revision || active.document_instance_id !== source.document_instance_id || active.slot !== source.slot) return;
+      viewportRef.current?.setOperationPreview(candidate); done(null);
+    }, (cause) => {
+      if (cancelled) return;
+      viewportRef.current?.setOperationPreview(null); done(parseIpcError(cause).message);
+    });
+    return () => { cancelled = true; clearDesignerPreview(); };
+  }, [clearDesignerPreview]);
+
   const applyDoc = useCallback((state: DocState) => {
     const cur = docRef.current;
     // страж устаревших ответов: та же пара doc_id+slot, но меньшая ревизия
     if (!acceptsDocumentState(cur, state)) return;
     if (documentGeometryChanged(cur, state)) {
+      designerQueue.current.invalidate();
+      viewportRef.current?.setOperationPreview(null);
+      viewportRef.current?.setDesignerTool(null);
+      setHistoryEdit(null);
       printRequestToken.current += 1;
       measureRequestToken.current += 1;
       setPrintChecks(null);
@@ -339,7 +379,9 @@ export default function App() {
       setImportPreview(null);
       setImageReliefPreview(null);
       setConstraintSolution(null);
+      if (!state.stats?.is_valid || state.stats.mesh_mode) setBodyResizeMode(false);
       viewportRef.current?.cancelTransformPreview();
+      viewportRef.current?.cancelBodyResizePreview();
       viewportRef.current?.cancelPushPullPreview();
       viewportRef.current?.setFaceFeaturePreview(null);
       viewportRef.current?.setFaceDomePreview(null);
@@ -348,6 +390,7 @@ export default function App() {
       setMovePreview(null);
       setSelectedFace(null);
       if (cur && (cur.document_instance_id !== state.document_instance_id || cur.doc_id !== state.doc_id || cur.slot !== state.slot)) {
+        setBodyResizeMode(false);
         setSelectedPartId(null);
         setSelectedPartIds([]);
       }
@@ -398,6 +441,9 @@ export default function App() {
     setComputing(true);
     if (cancellable) beginGeometryOperation();
     try {
+      designerQueue.current.invalidate();
+      viewportRef.current?.setOperationPreview(null);
+      await designerQueue.current.drain();
       const state = await fn();
       applyDoc(state);
       return state;
@@ -707,7 +753,7 @@ export default function App() {
       }
     }
 
-    viewport?.setPushPullHandle(moveMode ? null : target);
+    viewport?.setPushPullHandle(moveMode || bodyResizeMode ? null : target);
     setPushPull({
       target,
       value: target ? String(target.current) : "",
@@ -717,7 +763,7 @@ export default function App() {
     setFaceFeatureTarget(featureTarget);
     setSheetBendTarget(bendTarget);
     setFaceFeatureReason(featureReason);
-  }, [selectedFace, selectedPartId, mesh, doc, templates, importedStats, moveMode]);
+  }, [selectedFace, selectedPartId, mesh, doc, templates, importedStats, moveMode, bodyResizeMode]);
 
   // сброс выбора детали, если она исчезла из живых тел
   useEffect(() => {
@@ -734,6 +780,7 @@ export default function App() {
     if (!viewport || !mesh) {
       viewport?.setSelectedSolids([]);
       viewport?.setTransformHandle(null);
+      viewport?.setBodyResizeHandle(null);
       return;
     }
     const selectedSolidIndices = solidIndicesForParts(liveParts, selectedPartId ? [selectedPartId] : []);
@@ -741,7 +788,11 @@ export default function App() {
     viewport.setTransformHandle(moveMode && selectedPartId && selectedSolidIndices.length > 0
       ? { partId: selectedPartId, solidIndices: selectedSolidIndices }
       : null);
-  }, [doc, mesh, selectedPartId, selectedPartIds, moveMode]);
+    viewport.setBodyResizeHandle(bodyResizeMode && selectedPartId && !doc?.stats?.mesh_mode && selectedSolidIndices.length > 0
+      ? { partId: selectedPartId, solidIndices: selectedSolidIndices,
+        bbox: liveParts.find((part) => part.part_id === selectedPartId)?.bbox }
+      : null);
+  }, [doc, mesh, selectedPartId, selectedPartIds, moveMode, bodyResizeMode]);
 
   const activePartId = useCallback((): string | undefined => {
     const cur = docRef.current;
@@ -814,7 +865,10 @@ export default function App() {
   const runTransform = useCallback(async (translate: [number, number, number]) => {
     const id = activePartId();
     if (!id) return;
-    const state = await runBackend(() => backend.docTransform(id, translate), true);
+    const source = docRef.current;
+    const state = await runBackend(() => source?.stats?.mesh_mode
+      ? backend.docDesignerAction({ type: "append", operation: { op: "mesh_transform", translate } }, source)
+      : backend.docTransform(id, translate), true);
     viewportRef.current?.cancelTransformPreview();
     setMovePreview(null);
     if (state && !state.error) {
@@ -823,6 +877,42 @@ export default function App() {
       lessonEvent({ type: "operation", op: "transform", translate, state });
     }
   }, [runBackend, activePartId, lessonEvent]);
+
+  function startBodyResize() {
+    const id = activePartId();
+    if (docRef.current?.stats?.mesh_mode) {
+      setStatusMsg("Форма мышью доступна для точных BRep-тел, но не для импортированной сетки.");
+      return;
+    }
+    if (!id) return;
+    cancelEdgeTool(); cancelPushPull();
+    setMoveMode(false); setMovePreview(null);
+    setSelectedFace(null);
+    setSelectedPartId(id); setSelectedPartIds([id]);
+    viewportRef.current?.setSplitPreview(null);
+    viewportRef.current?.setTransformHandle(null);
+    setBodyResizeMode(true);
+    setStatusMsg("Потяните синий угол рамки или цветную ручку. Противоположный угол остаётся на месте.");
+  }
+
+  bodyResizeCommitRef.current = (resize) => {
+    void (async () => {
+      const source = docRef.current;
+      if (!source) return;
+      const preserve = preserveResizeRef.current && source.stats?.parts?.find((part) => part.part_id === resize.target_id)?.parametric_resize;
+      const state = await runBackend(() => backend.docDesignerAction({ type: "append", operation: {
+        op: preserve ? "resize_parametric" : "resize_body", ...resize,
+      } }, source), true);
+      viewportRef.current?.cancelBodyResizePreview();
+      if (state && !state.error) {
+        const bounds = state.stats?.parts?.find((part) => part.part_id === resize.target_id)?.bbox;
+        const actualSize = bounds?.length === 6
+          ? bounds.slice(3).map((value, axis) => value - bounds[axis]) as Size3 : resize.size;
+        setStatusMsg(`Размер тела: ${sizeLabel(actualSize)}. Отменить — Cmd/Ctrl+Z.`);
+        lessonEvent({ type: "operation", op: "resize_body", state });
+      }
+    })();
+  };
 
   partMoveHandlersRef.current = {
     preview: (axis, delta) => setMovePreview({ axis, delta }),
@@ -1040,6 +1130,8 @@ export default function App() {
 
   // ---------- обработка рёбер ----------
   const startEdgeTool = useCallback((kind: EdgeFeatureKind) => {
+    viewportRef.current?.setBodyResizeHandle(null);
+    setBodyResizeMode(false);
     setMoveMode(false);
     setMovePreview(null);
     viewportRef.current?.setTransformHandle(null);
@@ -1364,7 +1456,10 @@ export default function App() {
       case "export.3mf": void doExport("3mf"); break;
       case "op.fillet": startEdgeTool("fillet"); break;
       case "op.chamfer": startEdgeTool("chamfer"); break;
+      case "op.resize_body": startBodyResize(); break;
       case "op.face_offset":
+        viewportRef.current?.setBodyResizeHandle(null);
+        setBodyResizeMode(false);
         setMoveMode(false);
         cancelEdgeTool();
         setStatusMsg("Выберите плоскую грань и задайте смещение прямо под сценой");
@@ -1429,6 +1524,7 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (unsavedRequest) return;
+      if (!whatIsThis && !isEditableTarget(e.target) && viewportRef.current?.handleModelingKey(e)) { e.preventDefault(); return; }
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "z") {
         if (isEditableTarget(e.target)) return;
@@ -1453,6 +1549,11 @@ export default function App() {
         setWhatIsThis((v) => !v);
       } else if (e.key === "Escape") {
         if (whatIsThis) { setWhatIsThis(false); return; }
+        if (bodyResizeMode) {
+          viewportRef.current?.setBodyResizeHandle(null);
+          setBodyResizeMode(false);
+          return;
+        }
         const pushPullState = pushPullRef.current;
         const pushPullValueNumber = Number(pushPullState.value.replace(",", "."));
         const pushPullPending = pushPullState.dragging || (
@@ -1479,7 +1580,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [whatIsThis, helpOpen, aiOpen, moveMode, unsavedRequest, undoDocument, redoDocument, doSave, doOpen, cancelEdgeTool, cancelPushPull]);
+  }, [whatIsThis, helpOpen, aiOpen, moveMode, bodyResizeMode, unsavedRequest, undoDocument, redoDocument, doSave, doOpen, cancelEdgeTool, cancelPushPull]);
 
   const faceAreaValue = mesh && selectedFace != null ? faceArea(mesh, selectedFace) : null;
   const docName = doc?.path ? doc.path.split("/").pop()! : "Без названия";
@@ -1508,6 +1609,9 @@ export default function App() {
           importedStats={importedStats}
           selectedPartId={selectedPartId}
           selectedPartIds={selectedPartIds}
+          history={<OperationHistory doc={doc} onEdit={setHistoryEdit} onSelect={(id) => {
+            setSelectedPartId(id); setSelectedPartIds([id]); setSelectedFace(null);
+          }} />}
           onSelectPart={(partId, additive = false) => {
             cancelEdgeTool(); cancelPushPull();
             setSelectedFace(null);
@@ -1519,7 +1623,40 @@ export default function App() {
         />
         <main className="scene-area">
           <div className="viewport" ref={viewportEl} aria-label="Сцена 3D" />
+          {doc && mesh && <DesignerWorkbench key={`${doc.document_instance_id}:${doc.slot}:${doc.revision}:${selectedPartId}`}
+            doc={doc} mesh={mesh} viewport={viewportRef.current} partId={selectedPartId} face={faceFeatureTarget}
+            edge={edgeTool} busy={computing || geometryBusy || meshLoading || whatIsThis || !!unsavedRequest}
+            historyIndex={historyEdit} onHistoryClose={() => setHistoryEdit(null)}
+            onHistoryPick={setHistoryEdit} onPartSelect={(id) => { setSelectedPartId(id); setSelectedPartIds([id]); setSelectedFace(null); }}
+            preview={designerPreview} clearPreview={clearDesignerPreview}
+            commit={async (action) => {
+              const source = docRef.current;
+              if (!source) return false;
+              const state = await runBackend(() => backend.docDesignerAction(action, source), true);
+              if (state?.error) setStatusMsg(state.error.message);
+              return !!state && !state.error;
+            }}
+            prepare={() => {
+              viewportRef.current?.setBodyResizeHandle(null); viewportRef.current?.setTransformHandle(null);
+              viewportRef.current?.cancelPushPullPreview(); viewportRef.current?.setPushPullHandle(null);
+              setBodyResizeMode(false); setMoveMode(false); cancelEdgeTool();
+            }}
+            onResizePolicy={(preserve) => { preserveResizeRef.current = preserve; }}
+            onEdgeSize={(size) => setEdgeTool((current) => ({ ...current, size }))}
+            onEdgeKind={startEdgeTool} onEdgeCancel={cancelEdgeTool}
+            onStartResize={startBodyResize} onStartMove={() => {
+              const id = activePartId();
+              if (!id) return;
+              cancelEdgeTool(); setBodyResizeMode(false); setSelectedPartId(id); setSelectedPartIds([id]); setMoveMode(true);
+            }}
+            onFaceActions={showFaceActions}
+          />}
           <div className="view-toolbar" role="toolbar" aria-label="Виды">
+            {hasBody && !doc?.stats?.mesh_mode && <button className={`btn ${bodyResizeMode ? "btn-primary" : ""}`}
+              data-cmd="op.resize_body" disabled={computing || geometryBusy || meshLoading} aria-pressed={bodyResizeMode} onClick={() => {
+                if (bodyResizeMode) { viewportRef.current?.setBodyResizeHandle(null); setBodyResizeMode(false); }
+                else startBodyResize();
+              }}>Форма мышью</button>}
             <button className="btn" data-cmd="view.top" aria-label="Вид сверху" onClick={() => viewCommand("view.top")}>Сверху</button>
             <button className="btn" data-cmd="view.front" aria-label="Вид спереди" onClick={() => viewCommand("view.front")}>Спереди</button>
             <button className="btn" data-cmd="view.side" aria-label="Вид сбоку" onClick={() => viewCommand("view.side")}>Сбоку</button>
@@ -1539,8 +1676,8 @@ export default function App() {
               onLesson={() => void startLesson("first-part")}
             />
           )}
-          <div className="scene-dock">
-          <SelectionCoach
+          <div className={`scene-dock${bodyResizeMode ? " scene-dock-resize" : ""}`}>
+          {!doc?.stats?.mesh_mode && <SelectionCoach
             key={`${doc?.doc_id}:${doc?.slot}:${doc?.revision}:${selectedPartId}`}
             hasBody={hasBody}
             busy={computing || geometryBusy || meshLoading}
@@ -1553,11 +1690,21 @@ export default function App() {
             pushPull={pushPull}
             edgeTool={edgeTool}
             moveMode={moveMode}
+            bodyResizeMode={bodyResizeMode}
+            bodyResizeSize={bodyResizeSize}
+            onStartBodyResize={startBodyResize}
+            canResizeBody={!doc?.stats?.mesh_mode}
+            onCancelBodyResize={() => {
+              viewportRef.current?.setBodyResizeHandle(null);
+              setBodyResizeMode(false);
+            }}
             movePreview={movePreview}
             parts={sceneParts}
             splitDefaults={splitDefaults}
             onStartEdgeTool={startEdgeTool}
             onStartMove={() => {
+              viewportRef.current?.setBodyResizeHandle(null);
+              setBodyResizeMode(false);
               cancelEdgeTool();
               cancelPushPull();
               setSelectedPartIds(selectedPartId ? [selectedPartId] : []);
@@ -1586,7 +1733,7 @@ export default function App() {
             onApplyEdgeTool={() => void applyEdgeTool()}
             onCancelEdgeTool={cancelEdgeTool}
             onShowFaceActions={showFaceActions}
-          />
+          />}
           {lessonRun && (
             <LessonBar
               run={lessonRun}

@@ -18,7 +18,7 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::{watch, Mutex};
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const QUIT_MENU_ID: &str = "printforge.quit";
 
@@ -1199,6 +1199,72 @@ async fn doc_split_connector_pair(
 }
 
 #[tauri::command]
+async fn doc_resize_body(
+    app: tauri::AppHandle,
+    target_id: String,
+    size: [f64; 3],
+    anchor: [i8; 3],
+) -> Result<Value, String> {
+    if size.iter().any(|value| !value.is_finite() || *value <= 0.0)
+        || anchor.iter().any(|value| *value != -1 && *value != 1)
+    {
+        return Err(geo_err("bad_params", "Укажите положительные размеры и неподвижный угол тела."));
+    }
+    apply_atomic_op(&app, json!({
+        "op": "resize_body", "target_id": target_id, "size": size, "anchor": anchor,
+    })).await
+}
+
+#[tauri::command]
+async fn doc_designer_action(
+    app: tauri::AppHandle,
+    action: Value,
+    expected_revision: u64,
+    expected_instance: Value,
+    preview: bool,
+) -> Result<Value, String> {
+    let _task = DocumentTask::begin();
+    let (slot, mut candidate) = with_store(|store| {
+        if CLOSE_CONFIRMED.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(geo_err("application_closing", "Приложение закрывается."));
+        }
+        let slot = store.active.clone();
+        let document = active_doc(store);
+        if document.revision != expected_revision || json!(document.document_instance_id) != expected_instance {
+            return Err(geo_err("document_changed", "Документ изменился. Выберите область заново."));
+        }
+        Ok((slot, document.candidate(document.snap.clone())))
+    }).await?;
+    let prepared = worker_call(&app, "designer_action", json!({
+        "document": candidate.build_params(), "action": action,
+    }), expected_revision).await?;
+    candidate.snap.parts = serde_json::from_value(prepared["parts"].clone())
+        .map_err(|error| geo_err("bad_params", error.to_string()))?;
+    candidate.snap.operations = serde_json::from_value(prepared["operations"].clone())
+        .map_err(|error| geo_err("bad_params", error.to_string()))?;
+    if candidate.snap.parts.is_empty() { candidate.snap.expressions.clear(); }
+    rebuild(&app, &mut candidate).await;
+    if preview {
+        if let Some(error) = candidate.error { return Err(error.to_string()); }
+        return with_store(|store| {
+            let active_slot = store.active.clone();
+            let document = active_doc(store);
+            if active_slot != slot || document.revision != expected_revision || json!(document.document_instance_id) != expected_instance {
+                return Err(geo_err("document_changed", "Preview устарел: документ изменился."));
+            }
+            Ok(json!({"stats": candidate.stats, "mesh": candidate.mesh,
+                "base_revision": expected_revision, "document_instance_id": expected_instance}))
+        }).await;
+    }
+    with_store(|store| {
+        if store.active != slot { return Err(geo_err("document_changed", "Активный документ изменился.")); }
+        let document = active_doc(store);
+        document.apply_built_candidate(candidate)?;
+        Ok(document.state(&slot))
+    }).await
+}
+
+#[tauri::command]
 async fn doc_face_offset(
     app: tauri::AppHandle,
     target_id: String,
@@ -1960,6 +2026,12 @@ async fn doc_get_imported_mesh_binary(
 }
 
 fn document_schema_version(doc: &Document) -> u32 {
+    if doc.snap.operations.iter().any(|operation| {
+        matches!(operation["op"].as_str(), Some("resize_body" | "resize_parametric" | "mesh_deform"))
+            || operation.get("enabled").is_some()
+            || (operation["op"] == "transform" && (operation.get("rotate_deg").is_some() || operation.get("pivot").is_some()))
+            || (operation["op"] == "mesh_transform" && operation.get("pivot").is_some())
+    }) { return 6; }
     if doc.snap.operations.iter().any(|operation| operation["op"] == "step_source") {
         return 5;
     }
@@ -2729,6 +2801,8 @@ fn main() {
             doc_thread_pair,
             doc_clearance_calibration,
             doc_split_connector_pair,
+            doc_resize_body,
+            doc_designer_action,
             doc_face_offset,
             doc_face_feature,
             doc_face_dome,
@@ -2976,6 +3050,12 @@ mod mesh_tests {
         }
         document.snap.operations.push(json!({"op": "step_source"}));
         assert_eq!(document_schema_version(&document), 5);
+        for operation in [json!({"op": "resize_body"}), json!({"op": "resize_parametric"}),
+            json!({"op": "mesh_deform"}), json!({"op": "fillet", "enabled": false}),
+            json!({"op": "transform", "rotate_deg": [0, 0, 30]}), json!({"op": "mesh_transform", "pivot": [1, 2, 3]})] {
+            document.snap.operations = vec![operation];
+            assert_eq!(document_schema_version(&document), 6);
+        }
     }
 
     #[test]

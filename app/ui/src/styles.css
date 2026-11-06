@@ -855,3 +855,27 @@ mark { background: var(--pill-warning-bg); color: var(--accent-ink); border-radi
 }
 .scene-dock .selection-coach { position: static; transform: none; width: 100%; max-height: none; overflow: visible; }
 .scene-dock .lesson-bar { position: static; flex: none; }
+.scene-dock-resize { max-height: 35%; }
+.designer-toolbar { position: absolute; top: 54px; left: 12px; right: 12px; z-index: 9; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; pointer-events: auto; }
+.designer-toolbar label { display: flex; align-items: center; gap: 4px; padding: 4px; background: var(--surface); border-radius: 4px; }
+.designer-grid { width: 52px; }
+.designer-card { position: absolute; top: 106px; right: 12px; width: min(330px, calc(100% - 24px)); max-height: calc(100% - 126px); overflow-y: auto; z-index: 12; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 8px 30px #0002; font-size: 12px; }
+.designer-card header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.designer-card p { line-height: 1.5; margin: 8px 0; }
+.designer-card fieldset { min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 8px 0; }
+.designer-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; flex: 1; margin-bottom: 8px; }
+.designer-field input, .designer-field select, .designer-card select { min-width: 0; width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--surface); }
+.designer-vector, .designer-buttons { display: flex; gap: 6px; }
+.designer-context { position: fixed; z-index: 100; display: flex; flex-direction: column; width: 250px; padding: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 24px #0003; }
+.designer-context button { padding: 8px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.designer-context button:hover { background: var(--control); }
+.designer-error { color: #b42318; }
+.designer-preview { color: #216147; }
+.designer-policy { position: absolute; top: 100px; left: 12px; z-index: 9; max-width: 275px; padding: 6px; background: var(--surface); border-radius: 6px; font-size: 11px; }
+.designer-align { display: inline-flex; align-items: center; gap: 2px; margin: 4px; }
+.history-operation { display: block; width: 100%; border: 0; padding: 6px 0; background: none; color: var(--text); text-align: left; cursor: pointer; font-size: 12px; }
+.history-operation:hover { color: var(--accent); }
+.designer-card { position: fixed; top: 54px; right: 8px; width: 284px; max-height: calc(100vh - 90px); }
+.designer-toolbar { right: 100px; }
+.designer-snapping { display: flex; align-items: center; gap: 8px; }
+.designer-snapping label { display: flex; align-items: center; gap: 3px; }

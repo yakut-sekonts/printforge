@@ -96,6 +96,10 @@ export function parseIpcError(e: unknown): GeoError {
 }
 
 export const backend = {
+  docDesignerAction: (action: import("./designer").DesignerAction, state: DocState) =>
+    call<DocState>("doc_designer_action", { action, expected_revision: state.revision, expected_instance: state.document_instance_id, preview: false }),
+  docDesignerPreview: (action: import("./designer").DesignerAction, state: DocState) =>
+    call<import("./designer").DesignerPreview>("doc_designer_action", { action, expected_revision: state.revision, expected_instance: state.document_instance_id, preview: true }),
   docCreate: (template: string, params?: Record<string, number>) =>
     call<DocState>("doc_create", { template, params }),
   docAddPart: (template: string, params?: Record<string, number>) =>
@@ -149,6 +153,8 @@ export const backend = {
     call<DocState>("doc_clearance_calibration", args as unknown as Record<string, unknown>),
   docSplitConnectorPair: (args: SplitConnectorPairArgs) =>
     call<DocState>("doc_split_connector_pair", args as unknown as Record<string, unknown>),
+  docResizeBody: (args: import("./bodyResizing").BodyResize) =>
+    call<DocState>("doc_resize_body", args as unknown as Record<string, unknown>),
   docFaceOffset: (args: FaceOffsetArgs) =>
     call<DocState>("doc_face_offset", args as unknown as Record<string, unknown>),
   docFaceFeature: (args: FaceFeatureArgs) =>

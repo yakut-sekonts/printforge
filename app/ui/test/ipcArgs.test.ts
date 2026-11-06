@@ -98,6 +98,15 @@ test("backend SDK sends native contracts and retains flat shim measurement argum
   });
   try {
     const { backend } = await import("../src/backend.ts");
+    const resize = { target_id: "part-1", size: [60, 40, 20] as [number, number, number], anchor: [-1, 1, -1] as [-1, 1, -1] };
+    await backend.docResizeBody(resize);
+    assert.deepEqual(requests.pop(), { command: "doc_resize_body", args: { targetId: "part-1", size: resize.size, anchor: resize.anchor } });
+    const source = { revision: 9, document_instance_id: 7 } as import("../src/types.ts").DocState;
+    const action = { type: "append" as const, operation: { op: "resize_parametric", target_id: "part-1", size: [60, 40, 20], anchor: [-1, 1, -1] } };
+    await backend.docDesignerPreview(action, source);
+    assert.deepEqual(requests.pop(), { command: "doc_designer_action", args: { action, expectedRevision: 9, expectedInstance: 7, preview: true } });
+    await backend.docDesignerAction(action, source);
+    assert.deepEqual(requests.pop(), { command: "doc_designer_action", args: { action, expectedRevision: 9, expectedInstance: 7, preview: false } });
     const measurement = { type: "distance" as const, face_index: 2, p0: [0, 0, 0] as [number, number, number], p1: [3, 4, 0] as [number, number, number] };
     await backend.measure(measurement);
     assert.deepEqual(requests.pop(), {
@@ -127,6 +136,8 @@ test("backend SDK sends native contracts and retains flat shim measurement argum
     };
     await backend.measure(measurement);
     assert.deepEqual(requests.pop(), { command: "http://localhost:8787/api/measure", args: measurement });
+    await backend.docResizeBody(resize);
+    assert.deepEqual(requests.pop(), { command: "http://localhost:8787/api/doc_resize_body", args: resize });
   } finally {
     clearMocks();
     globalThis.window = previousWindow;

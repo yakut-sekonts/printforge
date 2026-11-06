@@ -49,6 +49,8 @@ def groups(run_dir):
                 "backend/test_face_offset.py",
                 "backend/test_split_bodies.py",
                 "backend/test_full_regressions.py",
+                "backend/test_body_resize.py",
+                "backend/test_designer.py",
                 "backend/test_parameter_expressions.py",
             ], run_dir / "pytest-cad.xml"),
             "junit": str(run_dir / "pytest-cad.xml"),
@@ -137,6 +139,10 @@ def impact_groups(paths):
             selected.add("ai")
         if path.startswith(("scripts/dev_shim.py", "backend/worker.py", "backend/test_worker", "backend/test_templates.py", "backend/test_extended_modeling.py", "backend/test_document", "backend/test_face_offset.py", "backend/test_split_bodies.py", "backend/test_full_regressions.py", "backend/test_parameter_expressions.py", "backend/parameter_expressions.py", "tests/fixtures/")):
             selected.add("cad")
+        if path in {"backend/test_body_resize.py", "backend/test_designer.py", "backend/designer_actions.py", "scripts/run_designer_sidecar_smoke.py"}:
+            selected.add("cad")
+        if path == "scripts/run_designer_sidecar_smoke.py":
+            selected.add("release")
         if path in {"backend/worker.py", "backend/parameter_expressions.py", "backend/test_parameter_expressions.py", "backend/test_full_regressions.py"}:
             selected.update({"ai", "cad"})
         if path in {"app/ui/src/documentState.ts", "app/ui/src/parameterEditing.ts", "app/ui/src/expr.ts"}:

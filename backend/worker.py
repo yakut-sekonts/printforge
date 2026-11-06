@@ -18,6 +18,7 @@
 Прочее: export_stl/step/3mf, import_step/stl, print_check.
 """
 import base64
+import copy
 import hashlib
 import json
 import math
@@ -55,6 +56,138 @@ class GeometryError(Exception):
 
 
 # ---------- шаблоны ----------
+
+def _resize_body(shape, operation):
+    from build123d import Matrix, Pos
+
+    size = operation.get("size")
+    anchor = operation.get("anchor")
+    if (not isinstance(size, list) or len(size) != 3 or
+            any(isinstance(value, bool) or not isinstance(value, (int, float)) or
+                not math.isfinite(value) or value <= 0 for value in size)):
+        raise GeometryError("bad_params", "Укажите три конечных размера больше нуля в миллиметрах.")
+    if (not isinstance(anchor, list) or len(anchor) != 3 or
+            any(isinstance(value, bool) or value not in (-1, 1) for value in anchor)):
+        raise GeometryError("bad_params", "Неподвижный угол должен содержать три направления -1 или 1.")
+    bounds = shape.bounding_box()
+    spans = [bounds.size.X, bounds.size.Y, bounds.size.Z]
+    if any(not math.isfinite(value) or value <= 1e-7 for value in spans):
+        raise GeometryError("bad_params", "Изменение размеров доступно только объёмным телам.")
+    factors = [value / span for value, span in zip(size, spans)]
+    fixed = [getattr(bounds.min if side < 0 else bounds.max, axis)
+             for side, axis in zip(anchor, ("X", "Y", "Z"))]
+    try:
+        if max(factors) - min(factors) < 1e-10:
+            resized = Pos(*[value * (1 - factors[0]) for value in fixed]) * shape.scale(factors[0])
+        else:
+            matrix = [[factors[row] if row == column else 0 for column in range(4)]
+                      for row in range(3)]
+            for row in range(3):
+                matrix[row][3] = fixed[row] * (1 - factors[row])
+            matrix.append([0, 0, 0, 1])
+            resized = shape.transform_geometry(Matrix(matrix))
+        if not resized.is_valid or not resized.solids() or resized.volume <= 0:
+            raise ValueError("Invalid resized solid")
+        return resized
+    except Exception as exc:
+        raise GeometryError("resize_failed", "Не удалось изменить форму. Исходная модель сохранена.", str(exc)) from exc
+
+
+def _rebind_design_reference(old_shape, new_shape, operation):
+    updated = copy.deepcopy(operation)
+    before, after = old_shape.bounding_box(), new_shape.bounding_box()
+
+    def predicted(point):
+        return [getattr(after.min, axis) +
+                (point[index] - getattr(before.min, axis)) *
+                getattr(after.size, axis) / max(1e-9, getattr(before.size, axis))
+                for index, axis in enumerate(("X", "Y", "Z"))]
+
+    if operation["op"] in ("fillet", "chamfer"):
+        edge = match_edge(old_shape, operation["edge_ref"])
+        signature = edge_signature(edge, 0)
+        midpoint = signature["midpoint"]
+        boundary_axes = sum(min(abs(midpoint[index] - getattr(before.min, axis)),
+                                abs(midpoint[index] - getattr(before.max, axis))) < 1e-4
+                            for index, axis in enumerate(("X", "Y", "Z")))
+        if signature["kind"] != "LINE" or boundary_axes < 2:
+            raise GeometryError("preserve_unsupported", "Сохранение элементов пока поддерживает скругления прямых внешних рёбер. Используйте масштабирование либо измените исходную форму.")
+        expected = predicted(midpoint)
+        candidates = sorted((math.dist(candidate["midpoint"], expected), index, candidate)
+                            for index, candidate in enumerate(list_edges(new_shape))
+                            if candidate["kind"] == signature["kind"])
+        if not candidates or (len(candidates) > 1 and abs(candidates[1][0] - candidates[0][0]) < 1e-6):
+            raise GeometryError("reselect_required", "Не удалось однозначно сохранить выбранное ребро при изменении габаритов.")
+        updated["edge_ref"] = candidates[0][2]
+    elif operation["op"] == "face_offset":
+        _, _, old_face = _match_offset_face(old_shape, operation["face_ref"])
+        normal = list(old_face.normal_at())
+        dominant = max(range(3), key=lambda axis: abs(normal[axis]))
+        axis_name = ("X", "Y", "Z")[dominant]
+        center = list(old_face.center())
+        boundary = getattr(before.max if normal[dominant] > 0 else before.min, axis_name)
+        if abs(normal[dominant]) < 0.999 or abs(center[dominant] - boundary) > 1e-4:
+            raise GeometryError("preserve_unsupported", "Сохранение элементов после смещения внутренней или наклонной грани пока недоступно.")
+        expected = predicted(operation["face_ref"]["center"])
+        candidates = []
+        for solid_index, solid in enumerate(new_shape.solids()):
+            for face in solid.faces():
+                reference = face_offset_reference(face, solid_index)
+                if reference and sum(value * other for value, other in zip(reference["normal"], normal)) > 1 - 1e-7:
+                    candidates.append((math.dist(reference["center"], expected), reference))
+        candidates.sort(key=lambda candidate: candidate[0])
+        if not candidates or (len(candidates) > 1 and abs(candidates[0][0] - candidates[1][0]) < 1e-6):
+            raise GeometryError("reselect_required", "Не удалось однозначно сохранить плоскую грань.")
+        updated["face_ref"] = candidates[0][1]
+    return updated
+
+
+def _resize_parametric(part, operation, part_id):
+    design = part.get("_design")
+    if not design:
+        raise GeometryError("preserve_unsupported", "У этого тела нет поддерживаемой параметрической истории. Масштабирование всего тела доступно отдельно.")
+    size, anchor = operation.get("size"), operation.get("anchor")
+    _resize_body(part["shape"], operation)
+    bounds = part["shape"].bounding_box()
+    spans = [bounds.size.X, bounds.size.Y, bounds.size.Z]
+    params = copy.deepcopy(design["params"])
+    template = design["template"]
+    if template in ("box", "plate_with_holes"):
+        for index, name in enumerate(("length", "width", "height")):
+            params[name] += size[index] - spans[index]
+    elif template in ("cylinder", "washer"):
+        if abs(size[0] - size[1]) > 1e-4:
+            raise GeometryError("preserve_unsupported", "Для сохранения круглой формы размеры X и Y должны совпадать. Для эллипса выберите масштабирование.")
+        params["diameter" if template == "cylinder" else "outer_diameter"] += size[0] - spans[0]
+        params["height"] += size[2] - spans[2]
+    elif template == "sphere":
+        if max(size) - min(size) > 1e-4:
+            raise GeometryError("preserve_unsupported", "У сферы размеры X, Y и Z должны совпадать. Для эллипсоида выберите масштабирование.")
+        params["diameter"] += size[0] - spans[0]
+    else:
+        raise GeometryError("preserve_unsupported", "Для этой заготовки сохранение элементов пока недоступно.")
+    original, _ = TEMPLATES[template][0](design["params"])
+    resized, _ = TEMPLATES[template][0](params)
+    rebound = []
+    for previous in design["operations"]:
+        updated = _rebind_design_reference(original, resized, previous)
+        original = apply_part_operations({part_id: {"shape": original}}, [previous])[part_id]["shape"]
+        resized = apply_part_operations({part_id: {"shape": resized}}, [updated])[part_id]["shape"]
+        rebound.append(updated)
+    from build123d import Pos
+    new_bounds = resized.bounding_box()
+    shift = [getattr(bounds.min if side < 0 else bounds.max, axis) -
+             getattr(new_bounds.min if side < 0 else new_bounds.max, axis)
+             for side, axis in zip(anchor, ("X", "Y", "Z"))]
+    resized = Pos(*shift) * resized
+    actual = resized.bounding_box()
+    if (not resized.is_valid or any(abs(getattr(actual.size, axis) - expected) > 1e-3
+                                    for axis, expected in zip(("X", "Y", "Z"), size))):
+        raise GeometryError("preserve_unsupported", "Эта история не позволяет сохранить элементы при заданных габаритах. Исходная модель сохранена.")
+    rebound.append({"op": "transform", "part_id": part_id, "translate": shift})
+    part["_design"] = {"template": template, "params": params, "operations": rebound}
+    return resized
+
 
 def _positive_params(params, *names):
     invalid = [name for name in names if float(params[name]) <= 0]
@@ -305,9 +438,29 @@ def apply_operations(part, operations):
 
 # ---------- сетка и статистика ----------
 
+def _is_planar_face(face):
+    from build123d import GeomType
+    from OCP.ShapeAnalysis import ShapeAnalysis_CanonicalRecognition
+    from OCP.gp import gp_Pln
+    return face.geom_type == GeomType.PLANE or (
+        face.geom_type == GeomType.BSPLINE and
+        ShapeAnalysis_CanonicalRecognition(face.wrapped).IsPlane(1e-7, gp_Pln()))
+
+
+def _face_area(face):
+    from build123d import GeomType
+    if face.geom_type != GeomType.BSPLINE:
+        return face.area
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GProp import GProp_GProps
+    properties = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(face.wrapped, properties, 1e-9, False)
+    return properties.Mass()
+
+
 def face_offset_reference(face, solid_index):
     from build123d import CenterOf, GeomType
-    if face.geom_type != GeomType.PLANE:
+    if not _is_planar_face(face):
         return None
     center = face.center(CenterOf.MASS)
     normal = face.normal_at()
@@ -316,7 +469,7 @@ def face_offset_reference(face, solid_index):
         "solid_index": solid_index,
         "center": [round(value, 6) for value in center],
         "normal": [round(value, 9) for value in normal],
-        "area": round(face.area, 6),
+        "area": round(_face_area(face), 6),
     }
 
 
@@ -679,6 +832,36 @@ def _decimate_mesh(mesh, operation):
     }
 
 
+def _deform_mesh(mesh, operation):
+    import numpy as np
+    if (any(not isinstance(operation.get(name), list) or len(operation[name]) != 3 or
+            any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in operation[name])
+            for name in ("center", "delta")) or isinstance(operation.get("radius"), bool)):
+        raise GeometryError("bad_params", "Центр и смещение должны содержать три числа, радиус — положительное число.")
+    try:
+        center = np.asarray(operation["center"], dtype=float)
+        delta = np.asarray(operation["delta"], dtype=float)
+        radius = float(operation["radius"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GeometryError("bad_params", "Укажите центр, радиус и смещение мягкой деформации.") from exc
+    if (center.shape != (3,) or delta.shape != (3,) or not np.isfinite(center).all() or
+            not np.isfinite(delta).all() or not math.isfinite(radius) or radius <= 0 or
+            np.linalg.norm(delta) < 1e-7):
+        raise GeometryError("bad_params", "Радиус должен быть положительным, смещение — конечным и ненулевым.")
+    distance = np.linalg.norm(mesh.vertices - center, axis=1) / radius
+    weight = np.maximum(0, 1 - distance ** 2) ** 2
+    if not np.any(weight > 0):
+        raise GeometryError("deform_no_vertices", "В радиус кисти не попала ни одна вершина. Увеличьте радиус.")
+    result = mesh.copy()
+    result.vertices = mesh.vertices + weight[:, None] * delta
+    before = np.cross(mesh.triangles[:, 1] - mesh.triangles[:, 0], mesh.triangles[:, 2] - mesh.triangles[:, 0])
+    after = np.cross(result.triangles[:, 1] - result.triangles[:, 0], result.triangles[:, 2] - result.triangles[:, 0])
+    if (not np.isfinite(result.vertices).all() or np.any(np.einsum("ij,ij->i", before, after) <= 1e-16) or
+            (mesh.is_watertight and (not result.is_watertight or result.volume <= 1e-8))):
+        raise GeometryError("deform_foldover", "Деформация переворачивает или схлопывает треугольники. Уменьшите смещение или увеличьте радиус.")
+    return result
+
+
 def _build_mesh_workflow(params):
     operations = params.get("operations") or []
     if params.get("parts"):
@@ -694,13 +877,18 @@ def _build_mesh_workflow(params):
                 "diagnostics": _mesh_diagnostics(mesh)}]
     for operation in operations[1:]:
         kind = operation.get("op")
+        if operation.get("enabled") is False:
+            continue
         if kind == "mesh_transform":
             import numpy as np
             import trimesh
             translate = operation.get("translate") or [0, 0, 0]
             rotate = operation.get("rotate_deg") or [0, 0, 0]
+            pivot = operation.get("pivot") or [0, 0, 0]
             scale = operation.get("scale", 1.0)
-            if len(translate) != 3 or len(rotate) != 3:
+            if any(not isinstance(vector, list) or len(vector) != 3 or
+                   any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in vector)
+                   for vector in (translate, rotate, pivot)):
                 raise GeometryError("bad_params", "Mesh transform требует translate/rotate_deg XYZ.")
             scale_values = ([float(scale)] * 3 if isinstance(scale, (int, float))
                             else [float(value) for value in scale])
@@ -709,10 +897,13 @@ def _build_mesh_workflow(params):
             matrix = trimesh.transformations.euler_matrix(
                 *[math.radians(float(value)) for value in rotate], axes="sxyz")
             matrix[:3, :3] = matrix[:3, :3] @ np.diag(scale_values)
-            matrix[:3, 3] = [float(value) for value in translate]
+            matrix[:3, 3] = np.asarray(translate) + np.asarray(pivot) - matrix[:3, :3] @ np.asarray(pivot)
             mesh.apply_transform(matrix)
             history.append({"op": kind, "translate": translate, "rotate_deg": rotate,
                             "scale": scale_values})
+        elif kind == "mesh_deform":
+            mesh = _deform_mesh(mesh, operation)
+            history.append(copy.deepcopy(operation))
         elif kind == "mesh_repair":
             import trimesh
             action = operation.get("action", "fill_holes")
@@ -748,6 +939,7 @@ def _build_mesh_workflow(params):
         "mesh_history": history,
         "parts": [{
             "part_id": "mesh-1",
+            "bbox": [float(value) for value in [*bounds[0], *bounds[1]]],
             "name": "Декоративный mesh" if source_kind == "image_relief_source" else "Mesh",
             "volume": (
                 float(abs(mesh.volume)) if mesh.is_watertight else None),
@@ -810,7 +1002,25 @@ def _export_trimesh_3mf(mesh, path):
 
 
 def shape_volume(part):
-    return sum(solid.volume for solid in part.solids())
+    from build123d import GeomType
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GProp import GProp_GProps
+    volume = 0.0
+    for solid in part.solids():
+        if any(face.geom_type == GeomType.BSPLINE for face in solid.faces()):
+            properties = GProp_GProps()
+            error = BRepGProp.VolumePropertiesGK_s(solid.wrapped, properties, 1e-9, True, True)
+            if error < 0 or not math.isfinite(properties.Mass()):
+                raise GeometryError("measurement_failed", "Не удалось точно вычислить объём изменённой формы.")
+            volume += properties.Mass()
+        else:
+            volume += solid.volume
+    return volume
+
+
+def shape_bounds(part):
+    bounds = part.bounding_box()
+    return [bounds.min.X, bounds.min.Y, bounds.min.Z, bounds.max.X, bounds.max.Y, bounds.max.Z]
 
 
 def stats_of(part, extra=None, with_edges=True):
@@ -955,9 +1165,9 @@ def _match_offset_face(target, reference):
     candidates = []
     for solid_index, solid in enumerate(target.solids()):
         for face in solid.faces():
-            if face.geom_type != GeomType.PLANE:
+            if not _is_planar_face(face):
                 continue
-            if abs(face.area - area) > max(1e-4, area * 1e-6):
+            if abs(_face_area(face) - area) > max(1e-4, area * 1e-6):
                 continue
             if math.dist(tuple(face.center(CenterOf.MASS)), center) > 1e-4:
                 continue
@@ -984,9 +1194,9 @@ def _apply_face_offset(target, operation):
     try:
         prism = extrude(face, amount=abs(distance), dir=direction)
         result = solid + prism if distance > 0 else solid - prism
-        expected_change = face.area * abs(distance)
+        expected_change = _face_area(face) * abs(distance)
         tolerance = max(1e-4, expected_change * 1e-6)
-        actual_change = (result.volume - solid.volume) * (1 if distance > 0 else -1)
+        actual_change = (shape_volume(result) - shape_volume(solid)) * (1 if distance > 0 else -1)
         if (not result.is_valid or len(result.solids()) != 1 or
                 result.volume <= 1e-8 or abs(actual_change - expected_change) > tolerance):
             raise GeometryError(
@@ -3269,6 +3479,8 @@ def apply_part_operations(parts, operations):
     from build123d import Plane
     for operation_index, op in enumerate(operations or []):
         kind = op.get("op")
+        if op.get("enabled") is False:
+            continue
         pid = op.get("part_id")
         if kind == "step_source":
             _apply_step_source(parts, op, operation_index)
@@ -3318,9 +3530,26 @@ def apply_part_operations(parts, operations):
             if pid not in parts:
                 raise GeometryError("bad_params", "Деталь для обработки ребра не найдена.")
             parts[pid]["shape"] = _apply_edge_feature(parts[pid]["shape"], op)
+        elif kind == "resize_parametric":
+            target_id = op.get("target_id")
+            if target_id not in parts:
+                raise GeometryError("bad_params", "Тело для изменения габаритов не найдено.")
+            parts[target_id]["shape"] = _resize_parametric(parts[target_id], op, target_id)
+        elif kind == "resize_body":
+            target_id = op.get("target_id")
+            if target_id not in parts:
+                raise GeometryError("bad_params", "Тело для изменения формы не найдено.")
+            parts[target_id]["shape"] = _resize_body(parts[target_id]["shape"], op)
         elif kind == "transform":
+            from build123d import Rotation
             t = op.get("translate") or [0, 0, 0]
-            parts[pid]["shape"] = Pos(*t) * parts[pid]["shape"]
+            rotation = op.get("rotate_deg") or [0, 0, 0]
+            pivot = op.get("pivot") or [0, 0, 0]
+            if any(not isinstance(vector, list) or len(vector) != 3 or
+                   any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in vector)
+                   for vector in (t, rotation, pivot)):
+                raise GeometryError("bad_params", "Перемещение, поворот и центр должны содержать три конечных числа.")
+            parts[pid]["shape"] = Pos(*t) * Pos(*pivot) * Rotation(*rotation) * Pos(*[-value for value in pivot]) * parts[pid]["shape"]
         elif kind == "array_linear":
             n = int(op["count"])
             step = op.get("step") or [0, 0, 0]
@@ -3446,6 +3675,8 @@ def apply_part_operations(parts, operations):
             from build123d import Pos as _Pos
             parts[pid]["shape"] = _Pos(*t) * base
         elif kind == "split":
+            if pid in parts:
+                parts[pid].pop("_design", None)
             plane = op.get("plane", "XZ")
             try:
                 off = float(op.get("offset", 0))
@@ -3507,6 +3738,17 @@ def apply_part_operations(parts, operations):
             parts[new_id] = {"shape": halves[1], "name": f"{name} (часть 2)"}
         else:
             raise GeometryError("unknown_op", f"Неизвестная операция: {kind}")
+        changed_id = op.get("target_id", pid)
+        if changed_id in parts and kind != "resize_parametric":
+            design = parts[changed_id].get("_design")
+            if design and kind in ("fillet", "chamfer", "face_offset", "face_feature", "face_dome", "transform") and not any(op.get("rotate_deg") or []):
+                design["operations"].append(copy.deepcopy(op))
+            else:
+                parts[changed_id].pop("_design", None)
+        if kind == "split":
+            for result_id, part in parts.items():
+                if result_id.startswith(f"{pid}-split-"):
+                    part.pop("_design", None)
     return parts
 
 
@@ -3524,12 +3766,17 @@ def handle_build_v3(params):
             "name": p.get("name", template),
             "template": template,
             "params": tp,
+            **({"_design": {"template": template, "params": copy.deepcopy(tp), "operations": []}}
+               if template in ("box", "plate_with_holes", "cylinder", "washer", "sphere") else {}),
         }
     parts = apply_part_operations(parts, params.get("operations"))
     compound = Compound(children=[p["shape"] for p in parts.values()])
     extra = {"parts": [{
         "part_id": pid, "name": p["name"],
         "volume": shape_volume(p["shape"]),
+        "bbox": shape_bounds(p["shape"]),
+        "parametric_resize": "_design" in p,
+        "size_constraint": "uniform" if p.get("template") == "sphere" else "radial" if p.get("template") in ("cylinder", "washer") else "free",
         "solid_count": len(p["shape"].solids()),
         **({"metadata": p["metadata"]} if p.get("metadata") else {}),
     } for pid, p in parts.items()]}
@@ -3551,6 +3798,59 @@ def build_any(params):
     return build_document(params)
 
 
+def handle_designer_action(params):
+    from designer_actions import APPEND_OPERATIONS, edit_operations
+    document = copy.deepcopy(params.get("document") or {})
+    action = params.get("action") or {}
+    operations = document.get("operations") or []
+    kind = action.get("type")
+    if kind == "append":
+        operation = action.get("operation")
+        if not isinstance(operation, dict) or operation.get("op") not in APPEND_OPERATIONS:
+            raise GeometryError("bad_params", "Операция не поддерживается ручным инструментом.")
+        document["operations"] = operations + [copy.deepcopy(operation)]
+    elif kind == "edit":
+        try:
+            document["operations"] = edit_operations(operations, action.get("index"), action.get("changes"))
+        except ValueError as exc:
+            raise GeometryError("bad_params", str(exc)) from exc
+    elif kind == "convert_mesh":
+        if _is_mesh_workflow(document):
+            raise GeometryError("bad_params", "Документ уже является сеткой.")
+        import numpy as np
+        import trimesh
+        shape, _ = build_any(document)
+        resource = mesh_resource(shape, "sculpt-source")
+        data = Path(resource["path"]).read_bytes()
+        vertex_count, triangle_count = struct.unpack_from("<II", data)
+        vertices = np.frombuffer(data, dtype="<f4", count=vertex_count * 3, offset=8).reshape((-1, 3))
+        faces = np.frombuffer(data, dtype="<u4", count=triangle_count * 3, offset=8 + vertex_count * 12).reshape((-1, 3))
+        if len(faces) > 200_000:
+            raise GeometryError("mesh_too_large", "Для мягкой формы нужен mesh не более 200 000 треугольников.")
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+        mesh.update_faces(mesh.nondegenerate_faces())
+        mesh.update_faces(mesh.unique_faces())
+        mesh.remove_unreferenced_vertices()
+        if not mesh.is_watertight or not mesh.is_winding_consistent:
+            raise GeometryError("mesh_conversion_failed", "Не удалось получить замкнутую сетку. Исходный BRep сохранён.")
+        diagonal = float(np.linalg.norm(mesh.extents))
+        for _level in range(7):
+            if len(mesh.faces) * 4 > 200_000 or mesh.edges_unique_length.max() <= max(0.2, diagonal / 30):
+                break
+            vertices, faces = trimesh.remesh.subdivide(mesh.vertices, mesh.faces)
+            mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        if not mesh.is_watertight:
+            raise GeometryError("mesh_conversion_failed", "Уплотнение нарушило замкнутость. Исходный BRep сохранён.")
+        source = mesh.export(file_type="stl")
+        document = {"parts": [], "operations": [{
+            "op": "mesh_source", "format": "stl", "source_name": "CAD-to-mesh.stl",
+            "source_base64": base64.b64encode(source).decode("ascii"), "unit_scale": 1,
+        }]}
+    else:
+        raise GeometryError("bad_params", "Неизвестное действие конструктора.")
+    return {"parts": document.get("parts") or [], "operations": document.get("operations") or []}
+
+
 def handle_build(params):
     if _is_mesh_workflow(params):
         mesh, stats = _build_mesh_workflow(params)
@@ -3562,6 +3862,7 @@ def handle_build(params):
                            "name": (params or {}).get("template",
                                                      "plate_with_holes"),
                            "volume": shape_volume(part),
+                           "bbox": shape_bounds(part),
                            "solid_count": len(part.solids())}]
     return {"stats": stats_of(part, extra),
             "mesh": mesh_resource(part, "model")}
@@ -3813,6 +4114,7 @@ HANDLERS = {
     "build_plate": lambda p: handle_build({"template": "plate_with_holes",
                                            "params": p}),
     "build": handle_build,
+    "designer_action": handle_designer_action,
     "solve_sketch": handle_solve_sketch,
     "resolve_parameters": handle_resolve_parameters,
     "image_relief_preview": handle_image_relief_preview,

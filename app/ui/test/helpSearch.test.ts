@@ -31,6 +31,14 @@ test("понимает словоформу запроса об экспорте
   assert.match(answers[0]?.article.help_id ?? "", /^eksport-/);
 });
 
+test("находит мышиное изменение формы и не путает короткое «теле» с «телепортатором»", async () => {
+  const { index, commands } = await shippedData();
+  const answers = findHelpAnswers(index, "Как потянуть уголки?", commands);
+  assert.equal(answers[0]?.article.help_id, "forma-myshyu");
+  assert.deepEqual(answers[0]?.commands.map((command) => command.command_id), ["op.resize_body"]);
+  assert.deepEqual(findHelpAnswers(index, "телепортатор", commands), []);
+});
+
 test("не возвращает незарегистрированную команду из повреждённой статьи", () => {
   const index: HelpIndex = {
     articles: [{

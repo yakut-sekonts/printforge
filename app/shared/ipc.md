@@ -4,6 +4,12 @@
 
 ## DocState
 
+### Designer Preview и commit (0.5.0)
+
+`doc_designer_action({action, expected_revision, expected_instance, preview})` принимает `append` с operation, `edit` с index/changes или явный `convert_mesh`. Native outer keys преобразуются в camelCase SDK; вложенные CAD identifiers сохраняются. Обе проверки identity обязательны; смена slot/instance/revision до commit отклоняет candidate. Preview возвращает `{stats, mesh, base_revision, document_instance_id}` без изменения подтверждённого документа, error, history или Redo. Ошибка Preview отклоняет запрос. Обычный commit возвращает DocState и выполняется одним атомарным действием. Конвертация заменяет исходник embedded STL; Undo возвращает BRep.
+
+`resize_parametric` сохраняет поддерживаемые элементы перестроением исходника; `resize_body` масштабирует всё тело. `mesh_deform` принимает center/delta XYZ и radius в мм. `transform`/`mesh_transform` поддерживают rotate_deg и pivot XYZ. `enabled: false` исключает поддерживаемую операцию при rebuild. История не разрешает менять ID, op или геометрические ссылки; источники нельзя отключать.
+
 ```jsonc
 {
   "doc_id": "doc-3",
@@ -36,6 +42,7 @@
 
 ## Команды
 
+- `doc_resize_body({target_id, size: [x,y,z], anchor: [sx,sy,sz]})` → DocState. Меняет габариты одного живого BRep-тела, не затрагивая остальные. Размеры — конечные положительные миллиметры; каждая сторона неподвижного угла `sx/sy/sz` равна `-1` (min) или `1` (max). Противоположный угол/сторона остаётся на месте. Операция `resize_body` сохраняется в истории, выполняется атомарно после отпускания ручки и поддерживает Undo/Redo/save/reopen. Preview работает только с отображаемой копией сетки, без IPC и истории. Неудача сохраняет подтверждённую геометрию и Redo. Не применяется к mesh workflow. Неравномерное растяжение меняет также отверстия и скругления; это изменение всего тела, не локальный sculpting.
 - `doc_create({template, params?})` → DocState. Новый документ с одной деталью из шаблона (одна транзакция). Шаблоны и поля — `app/shared/templates.json`.
 - `doc_add_part({template, params?})` → DocState. Добавить деталь в документ (для булевых операций и массивов).
 - `doc_set_parameter({part_id?, name, value, expression?})` → DocState. Без part_id — первая деталь.
@@ -70,7 +77,7 @@
 - Native import: `doc_get_imported_mesh_binary({path, expected_sha256})` → raw `ArrayBuffer`; path берётся только из результата `doc_import`, содержимое обязательно проверяется по SHA-256.
 - Binary mesh layout little-endian: `u32 vertex_count`, `u32 triangle_count`, затем `vertex_count × 3` значений `f32` и `triangle_count × 3` индексов `u32`. В WebView данные декодируются в typed-array views без JSON-раздувания; преобразование CAD → Three.js выполняется только для positions.
 - `MeshResource`: выданная пара `path`/`sha256` описывает неизменяемые bytes. Preview, candidate build, импорт и переключение main/tutorial не перезаписывают ресурс старого descriptor. Клиент считает path непрозрачным: не конструирует его из имени модели и всегда проверяет заявленный SHA-256. Session resources адресуются содержимым и дедуплицируются по SHA; старые ресурсы сохраняются для main/tutorial и восстановления подтверждённых состояний. GC вне текущего scope: ресурс нельзя удалять, пока на него ссылается существующий `DocState`; descriptor не обещает вечного хранения вне сессии.
-- `doc_save({path})` / `doc_open({path})` → DocState. Читает прежние template- и operation-only документы, схемы до 5 включительно. Открытие строит candidate до замены активного документа; ошибка оставляет прежнюю модель. Возвращённый после open экземпляр имеет новый `document_instance_id`, путь открытого файла и `dirty: false`.
+- `doc_save({path})` / `doc_open({path})` → DocState. Читает прежние template- и operation-only документы, схемы до 6 включительно. Resize/deform, выключенные операции и поворот вокруг центра требуют schema 6. Открытие строит candidate до замены активного документа; ошибка оставляет прежнюю модель. Возвращённый после open экземпляр имеет новый `document_instance_id`, путь открытого файла и `dirty: false`.
 - `doc_export({path, format: "stl"|"step"|"3mf", linear_deflection?})` → `{path, bytes, format, stats}`.
 - `doc_import({path, format: "step"|"stl", unit_scale?})` → `{stats, mesh, mode: "brep"|"mesh", document?: DocState}`. STEP — Open/New, не временный viewport preview и не добавление к старому проекту: после успешного построения атомарно заменяет активный слот новым документом с `step_source`, новым ID/instance, `path: null`, `dirty: true`; возвращает `mode: "brep"` и обязательный `document`. UI перед заменой dirty-документа запрашивает Save/Discard/Cancel. Native проверяет неизменность активного слота, instance и revision перед commit (`document_changed` при гонке). Неудачный импорт сохраняет прежний документ. Для STL `unit_scale` задаётся после показа габарита пользователю; применение сетки выполняет отдельный `doc_mesh_import_apply`.
 - `doc_mesh_import_apply({path, format: "stl"|"obj"|"ply", unit_scale})` → DocState. Встраивает source bytes и начинает отдельную mesh-history без симуляции параметрического BRep.

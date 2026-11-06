@@ -3,6 +3,9 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { FaceAxis, FaceRange, FaceFeatureProfile, MeshData, EdgeRef } from "./types";
 import { mapMeshPositionsForViewport } from "./meshBinary";
 import { edgePoints } from "./sceneSelection";
+import { resizeAnchor, resizeChanged, resizeDirection, resizedDimensions, sizeLabel } from "./bodyResizing";
+import type { BodyResize, ResizeHandle, Size3 } from "./bodyResizing";
+import { constrainedSize, snapTranslation } from "./designer";
 import type {
   FaceDomePreview, FaceEditTarget, FaceFeaturePreview, SheetBendPreview,
 } from "./faceEditing";
@@ -13,6 +16,18 @@ export type TransformAxis = "x" | "y" | "z";
 export interface PartTransformTarget {
   partId: string;
   solidIndices: number[];
+  bbox?: number[];
+}
+
+export interface DesignerPointerTool {
+  kind: "sketch" | "sculpt" | "edge";
+  origin?: Size3;
+  normal?: Size3;
+  radius?: number;
+  start: (point: Size3) => void;
+  move: (point: Size3, delta: Size3) => void;
+  finish: (cancelled: boolean) => void;
+  numeric?: (value: number) => void;
 }
 
 export interface ViewportEvents {
@@ -24,6 +39,8 @@ export interface ViewportEvents {
   onPushPullCommit: (delta: number) => void;
   onPartMovePreview: (axis: TransformAxis, delta: number) => void;
   onPartMoveCommit: (axis: TransformAxis, delta: number) => void;
+  onBodyResizePreview: (size: Size3 | null) => void;
+  onBodyResizeCommit: (resize: BodyResize) => void;
   onCameraRotated: () => void;
   onCameraZoomed: () => void;
 }
@@ -525,6 +542,17 @@ export class Viewport {
   private transformGroup: THREE.Group | null = null;
   private transformTarget: (PartTransformTarget & { center: THREE.Vector3 }) | null = null;
   private transformLabel: THREE.Sprite | null = null;
+  private bodyResizeGroup: THREE.Group | null = null;
+  private bodyResizeLabel: THREE.Sprite | null = null;
+  private bodyResizeTarget: (PartTransformTarget & { minimum: Size3; maximum: Size3; size: Size3 }) | null = null;
+  private bodyResizeOriginal: THREE.BufferGeometry | null = null;
+  private bodyResizePreview: THREE.BufferGeometry | null = null;
+  private bodyResizeVertices = new Set<number>();
+  private bodyResizeDrag: {
+    pointerId: number; startX: number; startY: number;
+    direction: THREE.Vector2; pixelsPerMm: number;
+    handle: ResizeHandle; size: Size3;
+  } | null = null;
   private faceFeatureGroup: THREE.Group | null = null;
   private faceDomeGroup: THREE.Group | null = null;
   private sheetBendGroup: THREE.Group | null = null;
@@ -546,6 +574,19 @@ export class Viewport {
     delta: number;
   } | null = null;
   private dimGroup: THREE.Group | null = null;
+  private operationPreview: THREE.Mesh | null = null;
+  private designerTool: DesignerPointerTool | null = null;
+  private designerDrag: { pointerId: number; start: THREE.Vector3; startX: number; plane: THREE.Plane } | null = null;
+  private designerMarker: THREE.Object3D | null = null;
+  private designerContext: ((x: number, y: number) => void) | null = null;
+  private dimensionEdit: ((axis: number) => void) | null = null;
+  private dimensionBounds: number[] | null = null;
+  private dimensionData: MeshData | null = null;
+  private numericDrag = "";
+  private designerPull: ((delta: number, commit: boolean) => void) | null = null;
+  private resizeConstraint = "free";
+  private snapSettings: { bounds: number[]; others: number[][]; grid: number } | null = null;
+  private snapGuide: THREE.PlaneHelper | null = null;
   private resizeObs!: ResizeObserver;
   private downPos = { x: 0, y: 0 };
   private orthoMode = false;
@@ -600,7 +641,17 @@ export class Viewport {
     this.renderer.domElement.addEventListener("pointerup", (e) => this.onPointerUp(e), true);
     this.renderer.domElement.addEventListener("pointercancel", (e) => this.onPointerCancel(e), true);
     this.renderer.domElement.addEventListener("lostpointercapture", (e) => this.onPointerCancel(e), true);
-    this.renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+    this.renderer.domElement.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (!this.editingEnabled || this.designerDrag) return;
+      this.onClick(e as PointerEvent);
+      this.designerContext?.(e.clientX, e.clientY);
+    });
+    this.renderer.domElement.addEventListener("dblclick", (event) => {
+      if (!this.editingEnabled) return;
+      const axis = this.pickDimension(event as PointerEvent);
+      if (axis != null) this.dimensionEdit?.(axis);
+    });
 
     this.resizeObs = new ResizeObserver(() => this.onResize());
     this.resizeObs.observe(this.container);
@@ -718,6 +769,7 @@ export class Viewport {
   }
 
   private render() {
+    this.updateBodyResizeHandleSizes();
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -834,8 +886,61 @@ export class Viewport {
   }
 
   private onPointerDown(e: PointerEvent) {
+    if (this.bodyResizeDrag || this.transformDrag || this.pushPullDrag || this.designerDrag) return;
     this.downPos = { x: e.clientX, y: e.clientY };
     if (e.button !== 0 || !this.editingEnabled) return;
+    this.numericDrag = "";
+    if (this.designerTool) {
+      const tool = this.designerTool;
+      this.updatePointer(e);
+      let start: THREE.Vector3 | null = null;
+      const normal = tool.normal ? new THREE.Vector3(...docToThree(...tool.normal)) : this.camera.getWorldDirection(new THREE.Vector3());
+      if (tool.kind === "sculpt") start = this.mesh ? this.raycaster.intersectObject(this.mesh, false)[0]?.point ?? null : null;
+      else if (tool.origin) {
+        const origin = new THREE.Vector3(...docToThree(...tool.origin));
+        if (tool.kind === "edge") {
+          const rect = this.renderer.domElement.getBoundingClientRect();
+          const screen = origin.clone().project(this.camera);
+          if (Math.hypot(e.clientX - rect.left - (screen.x + 1) * rect.width / 2,
+            e.clientY - rect.top - (1 - screen.y) * rect.height / 2) > 24) return;
+        }
+        start = this.raycaster.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(normal, origin), new THREE.Vector3());
+      }
+      if (!start) return;
+      e.preventDefault(); e.stopPropagation();
+      this.designerDrag = { pointerId: e.pointerId, start, startX: e.clientX, plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, start) };
+      if (this.designerMarker && tool.kind === "sculpt") { this.designerMarker.position.copy(start); this.designerMarker.visible = true; }
+      this.controls.enabled = false;
+      this.renderer.domElement.setPointerCapture(e.pointerId);
+      tool.start([start.x, -start.z, start.y]);
+      return;
+    }
+    const resizeHandle = this.pickBodyResizeHandle(e);
+    if (resizeHandle && this.bodyResizeTarget) {
+      e.preventDefault();
+      e.stopPropagation();
+      const target = this.bodyResizeTarget;
+      const center = target.size.map((_, axis) => resizeHandle.axis == null || axis === resizeHandle.axis
+        ? resizeHandle.corner[axis] < 0 ? target.minimum[axis] : target.maximum[axis]
+        : (target.minimum[axis] + target.maximum[axis]) / 2) as Size3;
+      const origin = new THREE.Vector3(...docToThree(...center));
+      const direction = new THREE.Vector3(...docToThree(...resizeDirection(target.size, resizeHandle)));
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      const projected = origin.clone().project(this.camera);
+      const sample = origin.clone().addScaledVector(direction, 10).project(this.camera);
+      const screen = new THREE.Vector2((sample.x - projected.x) * rect.width / 2, -(sample.y - projected.y) * rect.height / 2);
+      const pixelsPerMm = screen.length() / 10;
+      this.bodyResizeDrag = {
+        pointerId: e.pointerId, startX: e.clientX, startY: e.clientY,
+        direction: pixelsPerMm >= 0.15 ? screen.normalize() : new THREE.Vector2(0, -1),
+        pixelsPerMm: pixelsPerMm >= 0.15 ? pixelsPerMm : 2,
+        handle: resizeHandle, size: [...target.size],
+      };
+      this.controls.enabled = false;
+      this.renderer.domElement.setPointerCapture(e.pointerId);
+      this.renderer.domElement.style.cursor = "grabbing";
+      return;
+    }
     const transformAxis = this.pickTransformAxis(e);
     if (transformAxis && this.transformTarget) {
       e.preventDefault();
@@ -870,10 +975,42 @@ export class Viewport {
     this.controls.enabled = false;
     this.renderer.domElement.setPointerCapture(e.pointerId);
     this.renderer.domElement.style.cursor = "grabbing";
-    this.events.onPushPullStart();
+    if (!this.designerPull) this.events.onPushPullStart();
   }
 
   private onPointerMove(e: PointerEvent) {
+    if (this.numericDrag && (this.bodyResizeDrag || this.transformDrag || this.pushPullDrag || this.designerDrag)) return;
+    if (this.designerDrag) {
+      if (e.pointerId !== this.designerDrag.pointerId) return;
+      e.preventDefault();
+      this.updatePointer(e);
+      const point = this.raycaster.ray.intersectPlane(this.designerDrag.plane, new THREE.Vector3());
+      if (point) {
+        const delta = point.clone().sub(this.designerDrag.start);
+        this.designerTool?.move([point.x, -point.z, point.y], this.designerTool.kind === "edge"
+          ? [(e.clientX - this.designerDrag.startX) / 4, 0, 0] : [delta.x, -delta.z, delta.y]);
+      }
+      return;
+    }
+    if (this.designerTool?.kind === "sculpt" && this.designerMarker && this.editingEnabled && this.mesh) {
+      this.updatePointer(e);
+      const hit = this.raycaster.intersectObject(this.mesh, false)[0];
+      this.designerMarker.visible = !!hit;
+      if (hit) this.designerMarker.position.copy(hit.point);
+      this.render(); return;
+    }
+    if (this.bodyResizeDrag && e.pointerId !== this.bodyResizeDrag.pointerId) return;
+    if (this.bodyResizeDrag && e.pointerId === this.bodyResizeDrag.pointerId && this.bodyResizeTarget) {
+      e.preventDefault();
+      const drag = this.bodyResizeDrag;
+      const movement = new THREE.Vector2(e.clientX - drag.startX, e.clientY - drag.startY);
+      const delta = movement.dot(drag.direction) / drag.pixelsPerMm;
+      drag.size = resizedDimensions(this.bodyResizeTarget.size, drag.handle, delta, e.shiftKey);
+      if (drag.handle.axis != null) drag.size = constrainedSize(this.bodyResizeTarget.size, drag.handle.axis, drag.size[drag.handle.axis], this.resizeConstraint);
+      this.previewBodyResize(drag.handle, drag.size);
+      this.events.onBodyResizePreview(drag.size);
+      return;
+    }
     if (this.transformDrag && e.pointerId === this.transformDrag.pointerId) {
       e.preventDefault();
       const movement = new THREE.Vector2(
@@ -881,8 +1018,24 @@ export class Viewport {
         e.clientY - this.transformDrag.startY,
       );
       const delta = movement.dot(this.transformDrag.screenDirection) / this.transformDrag.pixelsPerMm;
-      this.transformDrag.delta = Math.round(delta * 10) / 10;
+      const axis = "xyz".indexOf(this.transformDrag.axis);
+      const snapped = this.snapSettings ? snapTranslation(this.snapSettings.bounds, this.snapSettings.others, axis, delta,
+        e.shiftKey ? 0.1 : this.snapSettings.grid, e.altKey ? 0 : 1) : null;
+      this.transformDrag.delta = snapped?.delta ?? Math.round(delta * 10) / 10;
+      if (this.snapGuide) { this.scene.remove(this.snapGuide); disposeObject(this.snapGuide); this.snapGuide = null; }
+      if (snapped?.target != null && this.snapSettings) {
+        const normal = new THREE.Vector3(...docToThree(...axisVector(this.transformDrag.axis)));
+        const size = Math.max(...this.snapSettings.bounds.slice(3).map((value, index) => value - this.snapSettings!.bounds[index])) * 2;
+        this.snapGuide = new THREE.PlaneHelper(new THREE.Plane(normal, -snapped.target), size, 0x2b8858);
+        this.scene.add(this.snapGuide);
+      }
       this.setTransformPreview(this.transformDrag.axis, this.transformDrag.delta);
+      if (snapped && this.transformLabel) {
+        const previous = this.transformLabel;
+        const label = makeTextSprite(`${this.transformDrag.delta.toFixed(2)} мм · ${snapped.label}`);
+        label.position.copy(previous.position); previous.parent?.remove(previous); disposeObject(previous);
+        this.transformLabel = label; this.transformGroup?.add(label);
+      }
       this.events.onPartMovePreview(this.transformDrag.axis, this.transformDrag.delta);
       return;
     }
@@ -894,13 +1047,20 @@ export class Viewport {
       );
       const delta = movement.dot(this.pushPullDrag.screenDirection) / this.pushPullDrag.pixelsPerMm;
       this.pushPullDrag.delta = Math.round(delta * 10) / 10;
-      this.setPushPullPreview(this.pushPullDrag.delta);
-      this.events.onPushPullPreview(this.pushPullDrag.delta);
+      if (this.designerPull) this.designerPull(this.pushPullDrag.delta, false);
+      else { this.setPushPullPreview(this.pushPullDrag.delta); this.events.onPushPullPreview(this.pushPullDrag.delta); }
+      return;
+    }
+    if (!this.editingEnabled) { this.renderer.domElement.style.cursor = "default"; return; }
+    const overResize = this.pickBodyResizeHandle(e);
+    if (overResize) {
+      this.setHoverFace(null); this.setHoverEdge(null);
+      this.renderer.domElement.style.cursor = "grab";
       return;
     }
     const overTransform = this.pickTransformAxis(e);
     const overHandle = this.pickPushPullHandle(e);
-    const edge = !overTransform && !overHandle && !this.transformTarget && !e.shiftKey ? this.pickEdge(e) : null;
+    const edge = !overTransform && !overHandle && !this.bodyResizeTarget && !this.transformTarget && !e.shiftKey ? this.pickEdge(e) : null;
     this.setHoverEdge(edge);
     this.renderer.domElement.style.cursor = overTransform || overHandle ? "grab" : edge ? "crosshair" : "default";
     const face = edge || this.edgeSelectionActive ? null : this.pickFace(e);
@@ -909,6 +1069,24 @@ export class Viewport {
   }
 
   private onPointerUp(e: PointerEvent) {
+    if (this.designerDrag) {
+      if (e.pointerId === this.designerDrag.pointerId && e.button === 0) this.finishDesignerDrag(false);
+      return;
+    }
+    if (this.bodyResizeDrag && e.pointerId !== this.bodyResizeDrag.pointerId) return;
+    if (this.bodyResizeDrag && e.pointerId === this.bodyResizeDrag.pointerId && e.button === 0) {
+      e.preventDefault(); e.stopPropagation();
+      const drag = this.bodyResizeDrag;
+      const target = this.bodyResizeTarget;
+      this.bodyResizeDrag = null;
+      this.controls.enabled = true;
+      if (this.renderer.domElement.hasPointerCapture(e.pointerId)) this.renderer.domElement.releasePointerCapture(e.pointerId);
+      this.renderer.domElement.style.cursor = "grab";
+      if (target && resizeChanged(target.size, drag.size)) {
+        this.events.onBodyResizeCommit({ target_id: target.partId, size: drag.size, anchor: resizeAnchor(drag.handle) });
+      } else this.cancelBodyResizePreview();
+      return;
+    }
     if (this.transformDrag && e.pointerId === this.transformDrag.pointerId) {
       e.preventDefault();
       e.stopPropagation();
@@ -929,7 +1107,8 @@ export class Viewport {
       this.controls.enabled = true;
       this.renderer.domElement.releasePointerCapture(e.pointerId);
       this.renderer.domElement.style.cursor = "grab";
-      if (Math.abs(delta) >= 0.05) this.events.onPushPullCommit(delta);
+      if (Math.abs(delta) >= 0.05 && this.designerPull) this.designerPull(delta, true);
+      else if (Math.abs(delta) >= 0.05) this.events.onPushPullCommit(delta);
       else this.cancelPushPullPreview();
       return;
     }
@@ -940,6 +1119,11 @@ export class Viewport {
   }
 
   private onPointerCancel(e: PointerEvent) {
+    if (this.designerDrag?.pointerId === e.pointerId) { this.finishDesignerDrag(true); return; }
+    if (this.bodyResizeDrag && e.pointerId === this.bodyResizeDrag.pointerId) {
+      this.cancelBodyResizePreview();
+      return;
+    }
     if (this.transformDrag && e.pointerId === this.transformDrag.pointerId) {
       const axis = this.transformDrag.axis;
       this.controls.enabled = true;
@@ -957,7 +1141,9 @@ export class Viewport {
 
   private onClick(e: PointerEvent) {
     if (!this.editingEnabled) return;
-    const edge = !this.transformTarget && !e.shiftKey ? this.pickEdge(e) : null;
+    if (this.pickDimension(e) != null) return;
+    if (this.designerTool) return;
+    const edge = !this.bodyResizeTarget && !this.transformTarget && !e.shiftKey ? this.pickEdge(e) : null;
     if (edge) { this.events.onSelectEdge(edge); return; }
     if (this.edgeSelectionActive) return;
     const face = this.pickFace(e);
@@ -984,6 +1170,8 @@ export class Viewport {
   setEditingEnabled(enabled: boolean) {
     this.editingEnabled = enabled;
     if (!enabled) {
+      this.finishDesignerDrag(true);
+      this.cancelBodyResizePreview();
       this.cancelTransformPreview();
       this.cancelPushPullPreview();
       this.setHoverEdge(null);
@@ -1107,8 +1295,8 @@ export class Viewport {
     const selected = new Set(solidIndices);
     const ranges = this.faceRanges.filter((range) =>
       range.solid_index != null && selected.has(range.solid_index));
-    if (ranges.length === 0) return;
-    const geometry = subGeometryRanges(this.mesh.geometry as THREE.BufferGeometry, ranges);
+    if (ranges.length === 0 && this.faceRanges.length > 0) return;
+    const geometry = ranges.length ? subGeometryRanges(this.mesh.geometry as THREE.BufferGeometry, ranges) : this.mesh.geometry.clone();
     const material = new THREE.MeshBasicMaterial({
       color: COLOR.selBody,
       transparent: true,
@@ -1121,6 +1309,143 @@ export class Viewport {
     this.selectedSolidsOverlay = new THREE.Mesh(geometry, material);
     this.selectedSolidsOverlay.renderOrder = 4;
     this.scene.add(this.selectedSolidsOverlay);
+  }
+
+  private pickBodyResizeHandle(event: PointerEvent): ResizeHandle | null {
+    if (!this.bodyResizeGroup) return null;
+    this.updatePointer(event);
+    const hit = this.raycaster.intersectObject(this.bodyResizeGroup, true)
+      .find((candidate) => candidate.object.userData.bodyResizeHandle != null);
+    return (hit?.object.userData.bodyResizeHandle as ResizeHandle | undefined) ?? null;
+  }
+
+  setBodyResizeHandle(target: PartTransformTarget | null) {
+    this.cancelBodyResizePreview();
+    if (this.bodyResizeGroup) {
+      this.scene.remove(this.bodyResizeGroup);
+      disposeObject(this.bodyResizeGroup);
+    }
+    this.bodyResizeGroup = null;
+    this.bodyResizeTarget = null;
+    this.bodyResizeVertices.clear();
+    if (!target || !this.mesh) return;
+    const ranges = this.faceRanges.filter((range) => range.solid_index != null && target.solidIndices.includes(range.solid_index));
+    const bounds = rangesBounds(this.mesh.geometry, ranges);
+    if (!bounds) return;
+    if (target.bbox?.length === 6 && target.bbox.every(Number.isFinite)) {
+      const [minX, minY, minZ, maxX, maxY, maxZ] = target.bbox;
+      bounds.min.set(...docToThree(minX, maxY, minZ));
+      bounds.max.set(...docToThree(maxX, minY, maxZ));
+    }
+    const minimum: Size3 = [bounds.min.x, -bounds.max.z, bounds.min.y];
+    const maximum: Size3 = [bounds.max.x, -bounds.min.z, bounds.max.y];
+    const size = maximum.map((value, axis) => value - minimum[axis]) as Size3;
+    if (!size.every((value) => Number.isFinite(value) && value > 1e-7)) return;
+    this.bodyResizeTarget = { ...target, minimum, maximum, size };
+    const indices = this.mesh.geometry.getIndex()!;
+    for (const range of ranges) for (let index = range.tri_start * 3; index < (range.tri_start + range.tri_count) * 3; index += 1) {
+      this.bodyResizeVertices.add(indices.getX(index));
+    }
+    const group = new THREE.Group();
+    const outline = new THREE.Box3Helper(bounds, COLOR.selEdge);
+    (outline.material as THREE.LineBasicMaterial).depthTest = false;
+    outline.renderOrder = 24;
+    group.add(outline);
+    const addHandle = (handle: ResizeHandle) => {
+      const position = size.map((_, axis) => handle.axis == null || axis === handle.axis
+        ? handle.corner[axis] < 0 ? minimum[axis] : maximum[axis]
+        : (minimum[axis] + maximum[axis]) / 2) as Size3;
+      const color = handle.axis == null ? COLOR.selEdge : [COLOR.axisX, COLOR.axisY, COLOR.axisZ][handle.axis];
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color, depthTest: false }));
+      mesh.position.set(...docToThree(...position));
+      mesh.userData.bodyResizeHandle = handle;
+      mesh.renderOrder = 28;
+      group.add(mesh);
+    };
+    for (const sideX of [-1, 1] as const) for (const sideY of [-1, 1] as const) for (const sideZ of [-1, 1] as const) {
+      addHandle({ corner: [sideX, sideY, sideZ], axis: null });
+    }
+    for (const axis of [0, 1, 2] as const) for (const side of [-1, 1] as const) {
+      const corner: ResizeHandle["corner"] = [1, 1, 1];
+      corner[axis] = side;
+      addHandle({ corner, axis });
+    }
+    this.bodyResizeGroup = group;
+    this.scene.add(group);
+    this.updateBodyResizeHandleSizes();
+    this.events.onBodyResizePreview(size);
+    this.render();
+  }
+
+  private updateBodyResizeHandleSizes() {
+    if (!this.bodyResizeGroup || !this.bodyResizeTarget) return;
+    const target = this.bodyResizeTarget;
+    const center = new THREE.Vector3(...docToThree(...target.size.map((_, axis) => (target.minimum[axis] + target.maximum[axis]) / 2) as Size3));
+    const projected = center.clone().project(this.camera);
+    const sample = projected.clone();
+    sample.y += 16 / Math.max(1, this.renderer.domElement.clientHeight);
+    const size = Math.max(0.01, sample.unproject(this.camera).distanceTo(center));
+    for (const child of this.bodyResizeGroup.children) if (child.userData.bodyResizeHandle) {
+      child.scale.set(size / this.bodyResizeGroup.scale.x, size / this.bodyResizeGroup.scale.y, size / this.bodyResizeGroup.scale.z);
+    }
+  }
+
+  private previewBodyResize(handle: ResizeHandle, size: Size3) {
+    const target = this.bodyResizeTarget;
+    if (!target || !this.mesh || !this.bodyResizeGroup) return;
+    if (!this.bodyResizeOriginal) {
+      this.bodyResizeOriginal = this.mesh.geometry;
+      this.bodyResizePreview = this.mesh.geometry.clone();
+      this.mesh.geometry = this.bodyResizePreview;
+    }
+    const factor = size.map((value, axis) => value / target.size[axis]) as Size3;
+    const anchor = resizeAnchor(handle).map((side, axis) => side < 0 ? target.minimum[axis] : target.maximum[axis]) as Size3;
+    const origin = new THREE.Vector3(...docToThree(...anchor));
+    const scale = new THREE.Vector3(factor[0], factor[2], factor[1]);
+    const original = this.bodyResizeOriginal.getAttribute("position");
+    const positions = this.mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const point = new THREE.Vector3();
+    for (const vertex of this.bodyResizeVertices) {
+      point.fromBufferAttribute(original, vertex).sub(origin).multiply(scale).add(origin);
+      positions.setXYZ(vertex, point.x, point.y, point.z);
+    }
+    positions.needsUpdate = true;
+    this.mesh.geometry.computeVertexNormals();
+    this.mesh.geometry.computeBoundingSphere();
+    this.bodyResizeGroup.scale.copy(scale);
+    this.bodyResizeGroup.position.copy(origin.clone().multiply(new THREE.Vector3(1 - scale.x, 1 - scale.y, 1 - scale.z)));
+    this.updateBodyResizeHandleSizes();
+    for (const child of this.mesh.children) child.visible = false;
+    if (this.selOverlay) this.selOverlay.visible = false;
+    if (this.selectedSolidsOverlay) this.selectedSolidsOverlay.visible = false;
+    if (this.dimGroup) this.dimGroup.visible = false;
+    if (this.bodyResizeLabel) { this.scene.remove(this.bodyResizeLabel); disposeObject(this.bodyResizeLabel); }
+    const label = makeTextSprite(sizeLabel(size));
+    label.position.copy(origin.clone().add(new THREE.Vector3(...docToThree(...resizeDirection(size, handle))).multiplyScalar(Math.max(...size))));
+    label.position.y += 8;
+    this.bodyResizeLabel = label;
+    this.scene.add(label);
+    this.render();
+  }
+
+  cancelBodyResizePreview() {
+    const drag = this.bodyResizeDrag;
+    this.bodyResizeDrag = null;
+    if (drag) {
+      this.controls.enabled = true;
+      if (this.renderer.domElement.hasPointerCapture(drag.pointerId)) this.renderer.domElement.releasePointerCapture(drag.pointerId);
+    }
+    if (this.bodyResizeOriginal && this.mesh) this.mesh.geometry = this.bodyResizeOriginal;
+    this.bodyResizeOriginal = null;
+    this.bodyResizePreview?.dispose(); this.bodyResizePreview = null;
+    if (this.bodyResizeGroup) { this.bodyResizeGroup.scale.set(1, 1, 1); this.bodyResizeGroup.position.set(0, 0, 0); }
+    if (this.mesh) for (const child of this.mesh.children) child.visible = true;
+    if (this.selOverlay) this.selOverlay.visible = true;
+    if (this.selectedSolidsOverlay) this.selectedSolidsOverlay.visible = true;
+    if (this.dimGroup) this.dimGroup.visible = true;
+    if (this.bodyResizeLabel) { this.scene.remove(this.bodyResizeLabel); disposeObject(this.bodyResizeLabel); this.bodyResizeLabel = null; }
+    this.renderer.domElement.style.cursor = "default";
+    this.events.onBodyResizePreview(null);
   }
 
   setTransformHandle(target: PartTransformTarget | null) {
@@ -1136,7 +1461,8 @@ export class Viewport {
     const selected = new Set(target.solidIndices);
     const ranges = this.faceRanges.filter((range) =>
       range.solid_index != null && selected.has(range.solid_index));
-    const bounds = rangesBounds(this.mesh.geometry as THREE.BufferGeometry, ranges);
+    const bounds = rangesBounds(this.mesh.geometry as THREE.BufferGeometry, ranges) ??
+      (this.faceRanges.length === 0 ? new THREE.Box3().setFromBufferAttribute(this.mesh.geometry.getAttribute("position") as THREE.BufferAttribute) : null);
     if (!bounds) return;
     const center = bounds.getCenter(new THREE.Vector3());
     const size = bounds.getSize(new THREE.Vector3());
@@ -1224,6 +1550,7 @@ export class Viewport {
   }
 
   cancelTransformPreview() {
+    if (this.snapGuide) { this.scene.remove(this.snapGuide); disposeObject(this.snapGuide); this.snapGuide = null; }
     if (this.transformDrag) {
       const pointerId = this.transformDrag.pointerId;
       this.transformDrag = null;
@@ -1516,6 +1843,11 @@ export class Viewport {
   }
 
   setMesh(data: MeshData | null) {
+    this.setOperationPreview(null);
+    this.setDesignerTool(null);
+    this.designerPull = null;
+    this.dimensionData = data;
+    this.setBodyResizeHandle(null);
     this.cancelTransformPreview();
     this.cancelPushPullPreview();
     this.setHoverEdge(null);
@@ -1558,6 +1890,7 @@ export class Viewport {
   private rebuildDimensions(data: MeshData | null) {
     if (this.dimGroup) {
       this.scene.remove(this.dimGroup);
+      disposeObject(this.dimGroup);
       this.dimGroup = null;
     }
     if (!data || !data.positions.length) return;
@@ -1568,6 +1901,7 @@ export class Viewport {
       minY = Math.min(minY, p[i + 1]); maxY = Math.max(maxY, p[i + 1]);
       minZ = Math.min(minZ, p[i + 2]); maxZ = Math.max(maxZ, p[i + 2]);
     }
+    if (this.dimensionBounds?.length === 6) [minX, minY, minZ, maxX, maxY, maxZ] = this.dimensionBounds;
     const fmt = (v: number) => `${Math.round(v * 100) / 100} мм`;
     const group = new THREE.Group();
     const lineMat = new THREE.LineBasicMaterial({ color: COLOR.dim });
@@ -1586,6 +1920,7 @@ export class Viewport {
     };
     const label = (text: string, at: [number, number, number]) => {
       const s = makeTextSprite(text);
+      s.userData.dimensionAxis = group.children.filter((child) => child instanceof THREE.Sprite).length;
       s.position.set(...at);
       group.add(s);
     };
@@ -1615,6 +1950,104 @@ export class Viewport {
 
     this.dimGroup = group;
     this.scene.add(group);
+  }
+
+  setDimensionEditor(bounds: number[] | null, edit: ((axis: number) => void) | null) {
+    this.dimensionBounds = bounds; this.dimensionEdit = edit;
+    this.rebuildDimensions(this.dimensionData); this.render();
+  }
+
+  private pickDimension(event: PointerEvent): number | null {
+    if (!this.dimGroup || !this.dimensionEdit) return null;
+    this.updatePointer(event);
+    return this.raycaster.intersectObject(this.dimGroup, true).find((item) => item.object.userData.dimensionAxis != null)?.object.userData.dimensionAxis ?? null;
+  }
+
+  setDesignerContext(handler: ((x: number, y: number) => void) | null) { this.designerContext = handler; }
+  setDesignerPull(target: FaceEditTarget | null, handler: ((delta: number, commit: boolean) => void) | null) {
+    this.designerPull = handler; this.setPushPullHandle(target);
+  }
+  setResizeConstraint(value: string) { this.resizeConstraint = value; }
+  setSnapping(settings: { bounds: number[]; others: number[][]; grid: number } | null) { this.snapSettings = settings; }
+
+  setOperationPreview(data: MeshData | null) {
+    if (this.operationPreview) { this.scene.remove(this.operationPreview); disposeObject(this.operationPreview); this.operationPreview = null; }
+    if (this.mesh) this.mesh.visible = !data;
+    if (this.selOverlay) this.selOverlay.visible = !data;
+    if (this.selectedSolidsOverlay) this.selectedSolidsOverlay.visible = !data;
+    if (data) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(mapMeshPositionsForViewport(data.positions), 3));
+      geometry.setIndex(new THREE.BufferAttribute(Uint32Array.from(data.indices), 1));
+      geometry.computeVertexNormals();
+      this.operationPreview = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0x91b4c7, roughness: 0.75, side: THREE.DoubleSide }));
+      this.scene.add(this.operationPreview);
+    }
+    this.render();
+  }
+
+  setDesignerTool(tool: DesignerPointerTool | null) {
+    this.finishDesignerDrag(true);
+    if (this.designerMarker) { this.scene.remove(this.designerMarker); disposeObject(this.designerMarker); this.designerMarker = null; }
+    this.designerTool = tool;
+    if (tool?.origin) {
+      const marker = new THREE.Mesh(new THREE.SphereGeometry(tool.kind === "edge" ? 2 : 0.8, 16, 8),
+        new THREE.MeshBasicMaterial({ color: 0x2563eb, depthTest: false }));
+      marker.position.set(...docToThree(...tool.origin)); marker.renderOrder = 30;
+      this.designerMarker = marker; this.scene.add(marker);
+    } else if (tool?.kind === "sculpt" && Number.isFinite(tool.radius) && tool.radius! > 0) {
+      const marker = new THREE.Mesh(new THREE.SphereGeometry(tool.radius, 24, 12), new THREE.MeshBasicMaterial({ color: 0x2563eb, wireframe: true, transparent: true, opacity: 0.25, depthTest: false }));
+      marker.visible = false; marker.renderOrder = 30; this.designerMarker = marker; this.scene.add(marker);
+    }
+    this.render();
+  }
+
+  private finishDesignerDrag(cancelled: boolean) {
+    const drag = this.designerDrag;
+    if (!drag) return;
+    this.designerDrag = null;
+    this.controls.enabled = true;
+    if (this.renderer.domElement.hasPointerCapture(drag.pointerId)) this.renderer.domElement.releasePointerCapture(drag.pointerId);
+    this.designerTool?.finish(cancelled);
+  }
+
+  handleModelingKey(event: KeyboardEvent): boolean {
+    if (this.designerDrag && this.designerTool?.numeric && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (event.key === "Escape" || event.key === "Enter") { this.finishDesignerDrag(event.key === "Escape"); return true; }
+      if (!/^[0-9.,]$/.test(event.key) && event.key !== "Backspace") return false;
+      this.numericDrag = event.key === "Backspace" ? this.numericDrag.slice(0, -1) : this.numericDrag + event.key.replace(",", ".");
+      const value = Number(this.numericDrag);
+      if (this.numericDrag && Number.isFinite(value) && value > 0) this.designerTool.numeric(value);
+      return true;
+    }
+    const active = this.bodyResizeDrag ?? this.transformDrag ?? this.pushPullDrag;
+    if (!active || event.ctrlKey || event.metaKey || event.altKey) return false;
+    if (event.key === "Escape") {
+      this.cancelBodyResizePreview(); this.cancelTransformPreview(); this.cancelPushPullPreview();
+      this.numericDrag = ""; return true;
+    }
+    if (event.key === "Enter") {
+      this.onPointerUp({ pointerId: active.pointerId, button: 0, preventDefault() {}, stopPropagation() {} } as PointerEvent);
+      return true;
+    }
+    if (!/^[0-9.,-]$/.test(event.key) && event.key !== "Backspace") return false;
+    this.numericDrag = event.key === "Backspace" ? this.numericDrag.slice(0, -1) : this.numericDrag + event.key.replace(",", ".");
+    const value = Number(this.numericDrag);
+    if (!this.numericDrag || !Number.isFinite(value)) return true;
+    if (this.bodyResizeDrag && this.bodyResizeTarget && value > 0) {
+      const drag = this.bodyResizeDrag, size = this.bodyResizeTarget.size;
+      drag.size = drag.handle.axis == null ? size.map((item) => item * value / Math.max(...size)) as Size3
+        : constrainedSize(size, drag.handle.axis, value, this.resizeConstraint);
+      this.previewBodyResize(drag.handle, drag.size); this.events.onBodyResizePreview(drag.size);
+    } else if (this.transformDrag) {
+      this.transformDrag.delta = value; this.setTransformPreview(this.transformDrag.axis, value);
+      this.events.onPartMovePreview(this.transformDrag.axis, value);
+    } else if (this.pushPullDrag) {
+      this.pushPullDrag.delta = value;
+      if (this.designerPull) this.designerPull(value, false);
+      else { this.setPushPullPreview(value); this.events.onPushPullPreview(value); }
+    }
+    return true;
   }
 
   setView(name: ViewName) {
@@ -1669,6 +2102,10 @@ export class Viewport {
   }
 
   dispose() {
+    this.setDesignerTool(null);
+    this.setOperationPreview(null);
+    if (this.dimGroup) { this.scene.remove(this.dimGroup); disposeObject(this.dimGroup); this.dimGroup = null; }
+    this.setBodyResizeHandle(null);
     this.setHoverEdge(null);
     this.setSplitPreview(null);
     this.setTransformHandle(null);

@@ -31,9 +31,11 @@ def test_shipped_help_and_lessons_match_authoritative_sources():
         "constraint-solver", "mesh-repair", "image-relief",
     }
     help_ids = {article["help_id"] for article in help_index["articles"]}
-    assert len(help_ids) == 35
+    assert len(help_ids) == 37
+    assert "forma-myshyu" in help_ids
     assert "ai-pomoshchnik" in help_ids
-    assert len(public_commands["commands"]) == 62
+    assert "ruchnoe-proektirovanie" in help_ids
+    assert len(public_commands["commands"]) == 69
     assert all(command["help_id"] in help_ids for command in public_commands["commands"])
 
 

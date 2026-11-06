@@ -60,6 +60,9 @@ def test_release_workflow_declares_all_supported_desktop_targets():
     assert "publish-release:" in workflow
     assert "needs: publish" in workflow
     assert "Publish draft after every installer passes" in workflow
+    assert "Verify packaged designer geometry" in workflow
+    assert "scripts/run_designer_sidecar_smoke.py" in workflow
+    assert "designer-sidecar-${{ matrix.target }}" in workflow
     assert '"repos/${GITHUB_REPOSITORY}/releases?per_page=100"' in workflow
     assert "Draft release not found for tag" in workflow
     assert "-F draft=false" in workflow

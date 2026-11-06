@@ -100,6 +100,7 @@ interface LeftPanelProps {
   selectedPartIds?: string[];
   onSelectPart: (partId: string, additive?: boolean) => void;
   onCreateTemplate: (t: TemplateDef) => void;
+  history?: React.ReactNode;
 }
 
 const TEMPLATE_BLURBS: Record<string, string> = {
@@ -119,7 +120,7 @@ function templateIcon(templateId: string): React.ReactNode {
   return <IconPlate />;
 }
 
-export function LeftPanel({ doc, templates, importedStats, selectedPartId, selectedPartIds, onSelectPart, onCreateTemplate }: LeftPanelProps) {
+export function LeftPanel({ doc, templates, importedStats, selectedPartId, selectedPartIds, onSelectPart, onCreateTemplate, history }: LeftPanelProps) {
   const p = doc?.params;
   const s = doc?.stats;
   const liveParts = s?.parts;
@@ -223,7 +224,7 @@ export function LeftPanel({ doc, templates, importedStats, selectedPartId, selec
       </section>
       <section>
         <h2 className="panel-section">История операций</h2>
-        {doc ? (
+        {history ?? (doc ? (
           <ol className="history-list">
             {Array.from({ length: doc.history_len ?? doc.revision }, (_, i) => (doc.history_len ?? doc.revision) - i).map((rev) => (
               <li key={rev} className={rev === (doc.history_index ?? doc.revision) + 1 ? "history-current" : ""}>
@@ -233,7 +234,7 @@ export function LeftPanel({ doc, templates, importedStats, selectedPartId, selec
           </ol>
         ) : (
           <p className="panel-empty">История появится после первой операции.</p>
-        )}
+        ))}
       </section>
     </aside>
   );

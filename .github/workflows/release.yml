@@ -68,6 +68,18 @@ jobs:
       - name: Build native geometry sidecar
         run: python scripts/build_sidecar.py --target ${{ matrix.target }}
 
+      - name: Verify packaged designer geometry
+        run: python scripts/run_designer_sidecar_smoke.py --binary app/src-tauri/binaries/printforge-geo-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }} --output artifacts/designer-sidecar/report.json
+
+      - name: Upload designer sidecar evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: designer-sidecar-${{ matrix.target }}
+          path: artifacts/designer-sidecar/
+          if-no-files-found: warn
+          retention-days: 30
+
       - uses: actions/setup-node@v6
         with:
           node-version: "22"

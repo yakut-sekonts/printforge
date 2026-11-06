@@ -637,6 +637,42 @@ def cmd_doc_split_connector_pair(a):
     })
 
 
+def cmd_doc_designer_action(a):
+    document = doc()
+    slot = ACTIVE[0]
+    if document.revision != a.get("expected_revision") or document.document_instance_id != a.get("expected_instance"):
+        raise geo_error("document_changed", "Документ изменился. Выберите область заново.")
+    candidate = copy.deepcopy(document)
+    prepared = worker_call("designer_action", {"document": candidate.build_params(), "action": a.get("action")}, document.revision)
+    candidate.parts = prepared["parts"]
+    candidate.operations = prepared["operations"]
+    if not candidate.parts:
+        candidate.expressions = {}
+    candidate.rebuild()
+    if doc() is not document or document.revision != a["expected_revision"] or ACTIVE[0] != slot:
+        raise geo_error("document_changed", "Документ изменился перед применением.")
+    if a.get("preview"):
+        if candidate.error:
+            raise RuntimeError(json.dumps(candidate.error, ensure_ascii=False))
+        return {"stats": candidate.stats, "mesh": candidate.mesh, "base_revision": document.revision,
+                "document_instance_id": document.document_instance_id}
+    if candidate.error:
+        document.error = candidate.error
+        return document.state(slot)
+    document.restore(candidate.snapshot())
+    document.commit()
+    document.revision = candidate.revision
+    document.stats, document.mesh, document.error = candidate.stats, candidate.mesh, None
+    return document.state(slot)
+
+
+def cmd_doc_resize_body(a):
+    return _apply_atomic_op(a, {
+        "op": "resize_body", "target_id": a["target_id"],
+        "size": a["size"], "anchor": a["anchor"],
+    })
+
+
 def cmd_doc_face_offset(a):
     return _apply_atomic_op(a, {
         "op": "face_offset",
@@ -809,7 +845,13 @@ def save_doc(d, path):
         operation.get("op") == "face_offset" or
         (operation.get("op") == "split" and operation.get("separate", False))
         for operation in d.operations)
-    schema_version = 5 if any(operation.get("op") == "step_source" for operation in d.operations) else 4 if requires_schema_four else 3
+    requires_schema_six = any(
+        operation.get("op") in {"resize_body", "resize_parametric", "mesh_deform"} or
+        "enabled" in operation or
+        (operation.get("op") == "transform" and ("rotate_deg" in operation or "pivot" in operation)) or
+        (operation.get("op") == "mesh_transform" and "pivot" in operation)
+        for operation in d.operations)
+    schema_version = 6 if requires_schema_six else 5 if any(operation.get("op") == "step_source" for operation in d.operations) else 4 if requires_schema_four else 3
     manifest = {"schema_version": schema_version, "app": "PrintForge",
                 "app_version": "0.1.0-m2", "units": "mm",
                 "kernel": "build123d/OCP"}
@@ -841,7 +883,7 @@ def cmd_doc_open(a):
     except (zipfile.BadZipFile, KeyError, json.JSONDecodeError):
         raise geo_error("bad_file", "Это не файл проекта PrintForge или файл повреждён.")
     schema_version = int(document.get("schema_version", 1))
-    if schema_version > 5:
+    if schema_version > 6:
         raise geo_error(
             "unsupported_project_version",
             f"Проект создан в более новой версии формата ({schema_version}). Обновите PrintForge.")
@@ -1317,6 +1359,8 @@ HANDLERS = {
     "doc_thread_pair": cmd_doc_thread_pair,
     "doc_clearance_calibration": cmd_doc_clearance_calibration,
     "doc_split_connector_pair": cmd_doc_split_connector_pair,
+    "doc_resize_body": cmd_doc_resize_body,
+    "doc_designer_action": cmd_doc_designer_action,
     "doc_face_offset": cmd_doc_face_offset,
     "doc_face_feature": cmd_doc_face_feature,
     "doc_face_dome": cmd_doc_face_dome,
@@ -1366,7 +1410,8 @@ class Handler(BaseHTTPRequestHandler):
             with guard:
                 result = handler(args)
                 # автосохранение: debounce 30 с после изменений (DOC-007)
-                if name != "ai_cancel" and ACTIVE[0] == "main":
+                pure_preview = name == "doc_designer_action" and args.get("preview") is True
+                if name != "ai_cancel" and not pure_preview and ACTIVE[0] == "main":
                     d = doc()
                     if d.dirty and d.path and time.time() - AUTOSAVE["at"] > 30:
                         save_doc(d, Path(d.path))

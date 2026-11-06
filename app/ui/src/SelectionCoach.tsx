@@ -3,6 +3,8 @@ import type { EdgeFeatureKind } from "./types";
 import type { EdgeToolUi, PushPullUi } from "./ParamsPanel";
 import type { TransformAxis } from "./viewport";
 import { parseMillimeters } from "./sceneSelection";
+import { sizeLabel } from "./bodyResizing";
+import type { Size3 } from "./bodyResizing";
 
 type SplitPlane = "XY" | "XZ" | "YZ";
 type BooleanKind = "union" | "subtract" | "intersect";
@@ -20,6 +22,11 @@ interface Props {
   pushPull: PushPullUi;
   edgeTool: EdgeToolUi;
   moveMode: boolean;
+  bodyResizeMode: boolean;
+  bodyResizeSize: Size3 | null;
+  canResizeBody: boolean;
+  onStartBodyResize: () => void;
+  onCancelBodyResize: () => void;
   movePreview: { axis: TransformAxis; delta: number } | null;
   splitDefaults: Record<SplitPlane, number>;
   onStartEdgeTool: (kind: EdgeFeatureKind) => void;
@@ -63,11 +70,11 @@ export function SelectionCoach(props: Props) {
 
   React.useEffect(() => () => props.onSplitPreview(null), []);
   React.useEffect(() => {
-    if (props.moveMode || props.edgeTool.active) {
+    if (props.moveMode || props.bodyResizeMode || props.edgeTool.active) {
       setSplitOpen(false);
       props.onSplitPreview(null);
     }
-  }, [props.moveMode, props.edgeTool.active]);
+  }, [props.moveMode, props.bodyResizeMode, props.edgeTool.active]);
 
   if (!props.hasBody) return null;
   const frame = (children: React.ReactNode) => (
@@ -79,6 +86,20 @@ export function SelectionCoach(props: Props) {
     <button className="btn" onClick={() => props.onStartEdgeTool("fillet")}>Скруглить ребро</button>
     <button className="btn" onClick={() => props.onStartEdgeTool("chamfer")}>Сделать фаску</button>
   </>;
+
+  if (props.bodyResizeMode) return frame(<>
+    <div className="selection-coach-copy">
+      <span className="selection-coach-kind">Форма мышью · {props.selectedPartName}</span>
+      <strong aria-live="polite">{props.bodyResizeSize ? sizeLabel(props.bodyResizeSize)
+        : props.selectedPartId ? "Потяните ручку на рамке тела" : "Выберите тело на сцене"}</strong>
+      <span>Синие углы — пропорционально. Цветные ручки на сторонах — размер по X / Y / Z. Противоположная сторона неподвижна. Меняется всё тело, включая отверстия и радиусы.</span>
+      <span>Шаг 1 мм · Shift — 0,1 мм · Отпустите мышь, чтобы применить · Esc — отмена · Cmd/Ctrl+Z — назад.</span>
+    </div>
+    <div className="selection-coach-actions">
+      {edgeButtons}
+      <button className="btn" onClick={props.onCancelBodyResize}>Завершить изменение формы</button>
+    </div>
+  </>);
 
   if (props.edgeTool.active) {
     const size = parseMillimeters(props.edgeTool.size);
@@ -162,6 +183,7 @@ export function SelectionCoach(props: Props) {
         {canPush && <button className="btn" onClick={props.onCancelPushPull}>Сбросить</button>}
       </>}
       {props.selectedFace != null && props.canAddFaceFeature && <button className="btn" onClick={props.onShowFaceActions}>Отверстие / выпуклость</button>}
+      {props.selectedPartId && props.canResizeBody && <button className="btn btn-primary" data-cmd="op.resize_body" onClick={props.onStartBodyResize}>Изменить форму мышью</button>}
       {props.selectedPartId && <button className="btn" onClick={props.onStartMove}>Переместить тело</button>}
       {(selectedEdge || props.selectedFace == null) && edgeButtons}
       {props.selectedPartId && <button className={`btn ${splitOpen ? "btn-primary" : ""}`} onClick={() => {

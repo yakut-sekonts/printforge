@@ -90,7 +90,7 @@ def test_empty_diff_and_docs_only_changes_do_not_trigger_full_regression(monkeyp
     assert run_test_stage.impact_groups(["README.md"]) == []
 
 
-@pytest.mark.parametrize("path", ["backend/test_face_offset.py", "backend/test_split_bodies.py"])
+@pytest.mark.parametrize("path", ["backend/test_face_offset.py", "backend/test_split_bodies.py", "backend/test_body_resize.py"])
 def test_direct_edit_changes_select_cad_group_and_the_real_kernel_tests(path, tmp_path):
     assert run_test_stage.impact_groups([path]) == ["cad"]
     commands = run_test_stage.groups(tmp_path)["cad"]

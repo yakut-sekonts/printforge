@@ -16,6 +16,9 @@ export interface EdgeRef {
 
 export interface Operation {
   op: string;
+  enabled?: boolean;
+  size?: [number, number, number];
+  anchor?: [-1 | 1, -1 | 1, -1 | 1];
   separate?: boolean;
   radius?: number;
   distance?: number;
@@ -392,6 +395,9 @@ export interface PartDef {
 
 export interface PartStats {
   part_id: string;
+  parametric_resize?: boolean;
+  size_constraint?: "free" | "radial" | "uniform";
+  bbox?: number[];
   name: string;
   volume: number | null;
   solid_count: number;
