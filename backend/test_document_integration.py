@@ -1225,6 +1225,7 @@ def test_image_relief_preview_apply_hash_guard_and_reopen(monkeypatch, tmp_path)
         with pytest.raises(RuntimeError) as changed:
             dev_shim.cmd_doc_image_relief_apply({
                 **settings, "expected_sha256": preview["source_sha256"],
+                "expected_settings_sha256": preview["settings_sha256"],
             })
         assert "image_changed" in str(changed.value)
         assert dev_shim.cmd_doc_get_state({})["operations"] == []
@@ -1232,6 +1233,7 @@ def test_image_relief_preview_apply_hash_guard_and_reopen(monkeypatch, tmp_path)
         Image.fromarray(pixels, mode="L").save(image_path)
         applied = dev_shim.cmd_doc_image_relief_apply({
             **settings, "expected_sha256": preview["source_sha256"],
+            "expected_settings_sha256": preview["settings_sha256"],
         })
         assert applied["error"] is None
         assert applied["history_len"] == before["history_len"] + 1

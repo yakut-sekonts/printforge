@@ -50,8 +50,9 @@ def test_lesson_checks_reference_supported_actions_and_parameters():
     }
     check_types = {
         "camera_rotated", "camera_zoomed", "command", "face_selected", "params",
-        "saved", "reopened", "exported", "operation", "error_shown", "imported",
-        "check_result",
+        "saved", "reopened", "exported", "operation", "error_shown", "check_result",
+        "inspection", "mesh_source_applied", "mesh_inspected", "sketch_solved",
+        "image_preview", "ai_applied",
     }
     operations = {
         "transform", "face_offset", "fillet", "chamfer", "sketch_extrude", "constrained_sketch_extrude",
@@ -85,7 +86,50 @@ def test_first_lesson_teaches_primitive_selection_and_direct_editing():
         "type": "params", "template": "box",
         "params": {"length": 40, "width": 30, "height": 20},
     }
-    assert selection == {"type": "face_selected"}
-    assert dimension == {"type": "operation", "op": "face_offset"}
-    assert movement == {"type": "operation", "op": "transform"}
-    assert undo == {"type": "command", "command_id": "op.undo"}
+    assert selection == {"type": "face_selected", "normal": [0, 0, 1]}
+    assert dimension == {
+        "type": "operation", "op": "face_offset", "distance": 5, "normal": [0, 0, 1],
+        "bbox_size": [40, 30, 25], "volume": 30000,
+    }
+    assert movement == {
+        "type": "operation", "op": "transform", "nonzero_translate": True,
+        "bbox_size": [40, 30, 25],
+    }
+    assert undo == {
+        "type": "command", "command_id": "op.undo", "bbox": [-20, -15, 0, 20, 15, 25],
+        "volume": 30000,
+    }
+
+
+def test_lessons_require_distinct_actions_and_observable_results():
+    lessons = {
+        lesson["lesson_id"]: lesson
+        for lesson in json.loads((ROOT / "app/shared/lessons.json").read_text())["lessons"]
+    }
+    assert all(lesson["content_version"] >= 2 for lesson in lessons.values())
+    imported = [step["check"] for step in lessons["import"]["steps"]]
+    assert imported == [
+        {"type": "mesh_source_applied", "mesh_mode": True, "boundary_edges": 0},
+        {"type": "mesh_inspected", "mesh_mode": True, "boundary_edges": 0},
+    ]
+    saved = [step["check"] for step in lessons["save-export"]["steps"]]
+    assert len(saved) == 5
+    assert saved[1] == {"type": "saved", "bbox_size": [40, 30, 20]}
+    assert saved[2]["op"] == "face_offset"
+    assert saved[2]["normal"] == [0, 0, 1]
+    assert saved[2]["distance"] == 5
+    assert saved[2]["bbox_size"] == [40, 30, 25]
+    assert saved[3] == {
+        "type": "reopened", "same_saved_path": True, "bbox_size": [40, 30, 20],
+        "params": {"height": 20},
+    }
+    assert saved[4] == {"type": "exported", "format": "stl"}
+    assert lessons["case-lid"]["steps"][1]["check"]["solid_count"] == 2
+    assert lessons["case-lid"]["steps"][2]["check"]["solid_count"] == 2
+    assert lessons["ai-assistant"]["steps"][0]["check"]["type"] == "ai_applied"
+    assert lessons["constraint-solver"]["steps"][0]["check"]["degrees_of_freedom"] == 0
+    assert lessons["image-relief"]["steps"][0]["check"]["type"] == "image_preview"
+    assert lessons["image-relief"]["steps"][2]["check"]["formats"] == ["stl", "3mf"]
+    assert lessons["print-check"]["steps"][2]["check"]["required_check"] == {
+        "id": "wall_thickness", "status": "unknown",
+    }

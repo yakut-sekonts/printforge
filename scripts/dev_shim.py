@@ -6,6 +6,7 @@ import base64
 import copy
 import hashlib
 import json
+import re
 import struct
 import subprocess
 import sys
@@ -22,6 +23,8 @@ WORKER = ROOT / "backend" / "worker.py"
 PYTHON = ROOT / "backend" / ".venv" / "bin" / "python"
 sys.path.insert(0, str(ROOT / "scripts"))
 import ai_planner
+sys.path.insert(0, str(ROOT / "backend"))
+from parameter_expressions import canonical_name
 
 _worker = None
 _req_n = 0
@@ -214,6 +217,7 @@ class Doc:
         self.dirty = True
 
     def add_part(self, template, params, name=None):
+        parameters = dict(DEFAULTS[template]) | {key: float(value) for key, value in params.items()}
         self._part_n += 1
         pid = f"part-{self._part_n}"
         titles = {"box": "Параллелепипед", "cylinder": "Цилиндр", "sphere": "Сфера",
@@ -221,7 +225,7 @@ class Doc:
                   "bracket_l": "Кронштейн", "case_with_lid": "Корпус"}
         self.parts.append({"part_id": pid, "name": name or titles.get(template, template),
                            "template": template,
-                           "params": dict(DEFAULTS[template]) | {k: float(v) for k, v in params.items()}})
+                           "params": parameters})
         return pid
 
     def state(self, slot):
@@ -258,6 +262,11 @@ class Doc:
             self.error = None
             return
         try:
+            resolved = worker_call("resolve_parameters", {
+                "parts": self.parts, "expressions": self.expressions,
+            }, self.revision)
+            self.parts = resolved["parts"]
+            self.expressions = resolved["expressions"]
             result = worker_call("build", self.build_params(), self.revision)
             self.stats = result.get("stats")
             self.mesh = result.get("mesh")
@@ -280,41 +289,56 @@ def cmd_doc_create(a):
     template = a.get("template", "plate_with_holes")
     if template not in DEFAULTS:
         raise geo_error("unknown_template", f"Неизвестный шаблон: {template}")
+    try:
+        parameters = {name: float(value) for name, value in (a.get("params") or {}).items()}
+    except (TypeError, ValueError, AttributeError) as error:
+        raise geo_error("bad_params", "Параметры формы должны быть числами.") from error
     d = doc()
     d.parts = []
     d.expressions = {}
     d.operations = []
     d._part_n = 0
-    d.add_part(template, a.get("params") or {})
+    d.add_part(template, parameters)
     _rebuild_committed(d)
     return d.state(ACTIVE[0])
 
 
 def _rebuild_committed(document):
+    previous = document.history[document.index]
+    candidate = copy.deepcopy(document)
+    try:
+        candidate.rebuild()
+    except Exception:
+        document.restore(previous)
+        raise
+    if candidate.error:
+        document.restore(previous)
+        document.error = candidate.error
+        return
+    document.restore(candidate.snapshot())
     document.commit()
-    document.rebuild()
-    if document.error and document.index > 0:
-        error = document.error
-        document.history.pop()
-        document.index -= 1
-        document.restore(document.history[document.index])
-        document.error = error
-        document.dirty = True
+    document.revision = candidate.revision
+    document.stats = candidate.stats
+    document.mesh = candidate.mesh
+    document.error = None
 
 
 def cmd_doc_set_parameter(a):
     d = doc()
     if not d.parts:
         raise geo_error("no_model", "Сначала создайте деталь")
-    if not isinstance(a.get("value"), (int, float)) or a["value"] <= 0:
-        raise geo_error("bad_value",
-                        f"Значение параметра «{a['name']}» должно быть положительным числом.")
     pid = a.get("part_id") or d.parts[0]["part_id"]
     part = next((p for p in d.parts if p["part_id"] == pid), None)
     if not part:
         raise geo_error("bad_params", f"Деталь не найдена: {pid}")
-    part["params"][a["name"]] = a["value"]
-    key = f"{pid}.{a['name']}"
+    try:
+        name = canonical_name(a["name"])
+    except ValueError as error:
+        raise geo_error("bad_value", str(error)) from error
+    if name not in DEFAULTS[part["template"]]:
+        raise geo_error("bad_value", f"Неизвестный параметр «{name}».")
+    part["params"][name] = a.get("value")
+    key = f"{pid}.{name}"
     if a.get("expression"):
         d.expressions[key] = a["expression"]
     else:
@@ -352,7 +376,7 @@ def _apply_atomic_op(a, operation):
 
 def cmd_doc_add_part(a):
     d = doc()
-    if not d.parts:
+    if not d.parts and not any(operation.get("op") == "step_source" for operation in d.operations):
         raise geo_error("no_model", "Сначала создайте деталь из шаблона")
     template = a.get("template", "plate_with_holes")
     if template not in DEFAULTS:
@@ -681,7 +705,7 @@ def cmd_doc_align(a):
 
 def cmd_measure(a):
     d = doc()
-    if not d.parts:
+    if not d.parts and not d.operations:
         raise geo_error("no_model", "Сначала создайте деталь")
     p = d.build_params()
     p["type"] = a.get("type", "bbox")
@@ -722,23 +746,34 @@ def cmd_doc_clear_error(a):
     return doc().state(ACTIVE[0])
 
 
+def _restore_history(document, index):
+    candidate = copy.deepcopy(document)
+    candidate.index = index
+    candidate.restore(candidate.history[index])
+    candidate.rebuild()
+    if candidate.error:
+        document.error = candidate.error
+        return
+    document.restore(candidate.snapshot())
+    document.index = index
+    document.dirty = True
+    document.revision = candidate.revision
+    document.stats = candidate.stats
+    document.mesh = candidate.mesh
+    document.error = None
+
+
 def cmd_doc_undo(a):
     d = doc()
     if d.index > 0:
-        d.index -= 1
-        d.restore(d.history[d.index])
-        d.dirty = True
-        d.rebuild()
+        _restore_history(d, d.index - 1)
     return d.state(ACTIVE[0])
 
 
 def cmd_doc_redo(a):
     d = doc()
     if d.index + 1 < len(d.history):
-        d.index += 1
-        d.restore(d.history[d.index])
-        d.dirty = True
-        d.rebuild()
+        _restore_history(d, d.index + 1)
     return d.state(ACTIVE[0])
 
 
@@ -774,7 +809,7 @@ def save_doc(d, path):
         operation.get("op") == "face_offset" or
         (operation.get("op") == "split" and operation.get("separate", False))
         for operation in d.operations)
-    schema_version = 4 if requires_schema_four else 3
+    schema_version = 5 if any(operation.get("op") == "step_source" for operation in d.operations) else 4 if requires_schema_four else 3
     manifest = {"schema_version": schema_version, "app": "PrintForge",
                 "app_version": "0.1.0-m2", "units": "mm",
                 "kernel": "build123d/OCP"}
@@ -799,7 +834,6 @@ def cmd_doc_save(a):
 
 
 def cmd_doc_open(a):
-    d = doc()
     path = Path(a["path"]).expanduser()
     try:
         with zipfile.ZipFile(path) as z:
@@ -807,7 +841,7 @@ def cmd_doc_open(a):
     except (zipfile.BadZipFile, KeyError, json.JSONDecodeError):
         raise geo_error("bad_file", "Это не файл проекта PrintForge или файл повреждён.")
     schema_version = int(document.get("schema_version", 1))
-    if schema_version > 4:
+    if schema_version > 5:
         raise geo_error(
             "unsupported_project_version",
             f"Проект создан в более новой версии формата ({schema_version}). Обновите PrintForge.")
@@ -815,19 +849,22 @@ def cmd_doc_open(a):
     operations = document.get("operations") or []
     if template is not None and template not in DEFAULTS:
         raise geo_error("bad_file", f"Неизвестный шаблон в проекте: {template}")
-    d.__init__(document.get("document_id"))
+    candidate = Doc(document.get("document_id"))
     if document.get("parts"):
-        d.parts = document["parts"]
-        d._part_n = len(d.parts)
+        candidate.parts = document["parts"]
+        candidate._part_n = max([len(candidate.parts)] + [int(part["part_id"].removeprefix("part-")) for part in candidate.parts if re.fullmatch(r"part-\d+", str(part.get("part_id", "")))])
     elif template is not None:
-        d.add_part(template, {k: float(v) for k, v in (document.get("parameters") or {}).items()})
-    d.expressions = document.get("expressions") or {}
-    d.operations = operations
-    d.commit()
-    d.path = str(path)
-    d.dirty = False
-    d.rebuild()
-    return d.state(ACTIVE[0])
+        candidate.add_part(template, {k: float(v) for k, v in (document.get("parameters") or {}).items()})
+    candidate.expressions = document.get("expressions") or {}
+    candidate.operations = operations
+    candidate.rebuild()
+    if candidate.error:
+        raise RuntimeError(json.dumps(candidate.error, ensure_ascii=False))
+    candidate.commit()
+    candidate.path = str(path)
+    candidate.dirty = False
+    DOCS[ACTIVE[0]] = candidate
+    return candidate.state(ACTIVE[0])
 
 
 def cmd_doc_export(a):
@@ -844,6 +881,28 @@ def cmd_doc_export(a):
 
 def cmd_doc_import(a):
     fmt = a.get("format", "stl")
+    if fmt == "step":
+        path = Path(a["path"]).expanduser()
+        try:
+            source = path.read_bytes()
+        except OSError as error:
+            raise geo_error("file_read_failed", f"Не удалось прочитать STEP: {error}") from error
+        if not source or len(source) > 25 * 1024 * 1024:
+            raise geo_error("step_source_invalid", "STEP должен быть непустым и не превышать 25 MiB.")
+        candidate = Doc()
+        candidate.operations = [{
+            "op": "step_source",
+            "source_base64": base64.b64encode(source).decode("ascii"),
+            "source_sha256": hashlib.sha256(source).hexdigest(),
+            "source_name": path.name,
+        }]
+        candidate.rebuild()
+        if candidate.error:
+            raise RuntimeError(json.dumps(candidate.error, ensure_ascii=False))
+        candidate.commit()
+        DOCS[ACTIVE[0]] = candidate
+        return {"stats": candidate.stats, "mesh": candidate.mesh, "mode": "brep",
+                "document": candidate.state(ACTIVE[0])}
     return worker_call("import", {"format": fmt,
                                   "path": str(Path(a["path"]).expanduser()),
                                   "unit_scale": a.get("unit_scale", 1.0)})
@@ -867,13 +926,17 @@ def cmd_doc_mesh_import_apply(a):
         raise geo_error("file_read_failed", f"Не удалось прочитать mesh: {exc}") from exc
     if len(source) > 25 * 1024 * 1024:
         raise geo_error("mesh_too_large", "Mesh source превышает лимит 25 MiB.")
+    try:
+        unit_scale = float(a.get("unit_scale", 1.0))
+    except (TypeError, ValueError) as error:
+        raise geo_error("bad_params", "Масштаб mesh должен быть числом.") from error
     d.parts = []
     d.expressions = {}
     d.operations = [{
         "op": "mesh_source",
         "format": mesh_format,
         "source_base64": base64.b64encode(source).decode("ascii"),
-        "unit_scale": float(a.get("unit_scale", 1.0)),
+        "unit_scale": unit_scale,
         "source_name": path.name,
     }]
     d._part_n = 0
@@ -941,11 +1004,19 @@ def cmd_image_relief_preview(a):
     result = worker_call("image_relief_preview", {
         key: value for key, value in operation.items() if key != "op"
     }, doc().revision)
-    return {**result, "source_sha256": source_sha256}
+    binding = worker_call("image_relief_settings_hash", {
+        **operation, "path": a["path"], "source_sha256": source_sha256,
+    }, doc().revision)
+    return {**result, "source_sha256": source_sha256, **binding}
 
 
 def cmd_doc_image_relief_apply(a):
-    operation, _ = _image_relief_operation(a)
+    operation, source_sha256 = _image_relief_operation(a)
+    binding = worker_call("image_relief_settings_hash", {
+        **operation, "path": a["path"], "source_sha256": source_sha256,
+    }, doc().revision)
+    if not a.get("expected_settings_sha256") or a["expected_settings_sha256"] != binding["settings_sha256"]:
+        raise geo_error("image_settings_changed", "Настройки изменились после preview. Выполните preview повторно.")
     d = doc()
     d.parts = []
     d.expressions = {}
@@ -985,6 +1056,7 @@ def _apply_plan_ops_to(d, ops):
             elif cid == "parameter.set":
                 part = next(p for p in d.parts if p["part_id"] == op["target_id"])
                 part["params"][params["name"]] = float(params["value"])
+                d.expressions.pop(f"{op['target_id']}.{params['name']}", None)
             elif cid == "op.fillet":
                 d.operations = [o for o in d.operations if o.get("op") != "fillet"]
                 fop = {"op": "fillet", "radius": float(params["radius"]),
@@ -1294,7 +1366,7 @@ class Handler(BaseHTTPRequestHandler):
             with guard:
                 result = handler(args)
                 # автосохранение: debounce 30 с после изменений (DOC-007)
-                if name != "ai_cancel":
+                if name != "ai_cancel" and ACTIVE[0] == "main":
                     d = doc()
                     if d.dirty and d.path and time.time() - AUTOSAVE["at"] > 30:
                         save_doc(d, Path(d.path))

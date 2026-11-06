@@ -12,10 +12,12 @@ import type {
 } from "./types";
 import { backend, expandTilde, isTauri, parseIpcError } from "./backend";
 import { evalExpression } from "./expr";
+import { acceptsDocumentState, documentGeometryChanged, imageReliefSettingsKey, isEditableTarget } from "./documentState";
+import { parameterValues } from "./parameterEditing";
 import { Viewport, faceArea, ViewName } from "./viewport";
 import type { TransformAxis } from "./viewport";
 import {
-  pushPullDelta, pushPullValue, resolveFaceEditTarget, resolveFaceFeatureTarget,
+  analyzeFace, pushPullDelta, pushPullValue, resolveFaceEditTarget, resolveFaceFeatureTarget,
   resolveSheetBendTarget, resolveGenericFaceEditTarget,
 } from "./faceEditing";
 import { partIdForSolid, parseMillimeters, selectedBoundsCenter, solidIndicesForParts, togglePartSelection } from "./sceneSelection";
@@ -27,24 +29,17 @@ import { ParamsPanel } from "./ParamsPanel";
 import type { EdgeToolUi, PushPullUi } from "./ParamsPanel";
 import { HelpPanel, TooltipMode } from "./HelpPanel";
 import { Tooltips } from "./Tooltips";
-import { LessonBar, LessonRun, StepStatus } from "./LessonBar";
+import { LessonBar } from "./LessonBar";
+import { advanceLesson, createLessonRun, lessonKey, lessonMastered, readLessonProgress, restoreLessonRun, serializeLessonProgress, skipLessonStep } from "./lessonEngine";
+import type { LessonEvent, LessonRun } from "./lessonEngine";
+import { revealCommand } from "./revealCommand";
 import { AiPanel } from "./AiPanel";
 import { SelectionCoach } from "./SelectionCoach";
 import { PrimitivePicker } from "./PrimitivePicker";
+import { UnsavedChangesDialog } from "./UnsavedChangesDialog";
 
 const TOOLTIP_KEY = "pf-tooltip-mode";
-const lessonKey = (id: string, version = 1) => `pf-lesson-${id}-v${version}`;
-
-function loadLessonProgress(id: string, len: number, version = 1): StepStatus[] {
-  try {
-    const raw = localStorage.getItem(lessonKey(id, version));
-    if (raw) {
-      const arr = JSON.parse(raw) as StepStatus[];
-      if (Array.isArray(arr) && arr.length === len) return arr;
-    }
-  } catch { /* игнор */ }
-  return Array(len).fill("pending");
-}
+const ACTIVE_LESSON_KEY = "pf-active-lesson";
 
 export default function App() {
   const [commands, setCommands] = useState<CommandDef[]>([]);
@@ -98,15 +93,22 @@ export default function App() {
   const [imageReliefPreview, setImageReliefPreview] = useState<ImageReliefPreview | null>(null);
   const [measureResult, setMeasureResult] = useState<{
     source?: string; bbox?: number[]; volume?: number;
-    faceDiameter?: number; faceError?: string; distance?: number;
+    faceIndex?: number; faceDiameter?: number; faceError?: string; distance?: number;
   } | null>(null);
   const [measureBusy, setMeasureBusy] = useState(false);
   const [performanceConfig, setPerformanceConfig] = useState<PerformanceConfig | null>(null);
   const [nativeE2eConfig, setNativeE2eConfig] = useState<NativeE2eConfig | null>(null);
+  const [unsavedRequest, setUnsavedRequest] = useState<{ document: DocState; proceed?: () => Promise<void> } | null>(null);
+  const [unsavedPath, setUnsavedPath] = useState("");
+  const [unsavedBusy, setUnsavedBusy] = useState(false);
+  const [unsavedError, setUnsavedError] = useState<string | null>(null);
 
   const viewportRef = useRef<Viewport | null>(null);
   const viewportEl = useRef<HTMLDivElement>(null);
   const meshToken = useRef(0);
+  const printRequestToken = useRef(0);
+  const measureRequestToken = useRef(0);
+  const cancelPending = useRef(false);
   const geometryOperationCount = useRef(0);
   const documentActionPending = useRef(false);
   const docRef = useRef<DocState | null>(null);
@@ -175,7 +177,8 @@ export default function App() {
             setSelectedPartIds(next);
             if (additive) { setSelectedFace(null); vp.setSelectedFace(null); }
           }
-          lessonEvent({ type: "face_selected" });
+          const analysis = meshRef.current ? analyzeFace(meshRef.current, face) : null;
+          lessonEvent({ type: "face_selected", normal: analysis?.normal });
         } else if (!additive) {
           setSelectedPartId(null);
           setSelectedPartIds([]);
@@ -297,24 +300,62 @@ export default function App() {
   }, [edgeTool.active, edgeTool.kind, edgeTool.selected, edgeTool.size, doc?.stats?.edges, mesh]);
 
   useEffect(() => {
-    viewportRef.current?.setEditingEnabled(!computing && !geometryBusy && !meshLoading);
-  }, [computing, geometryBusy, meshLoading]);
+    viewportRef.current?.setEditingEnabled(!computing && !geometryBusy && !meshLoading && !whatIsThis);
+  }, [computing, geometryBusy, meshLoading, whatIsThis]);
 
   useEffect(() => {
     document.body.classList.toggle("what-is-this", whatIsThis);
   }, [whatIsThis]);
 
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    const subscriptions: Array<() => void> = [];
+    void import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const requested = await listen<DocState>("printforge-close-requested", (event) => {
+        setWhatIsThis(false);
+        setUnsavedRequest({ document: event.payload });
+        setUnsavedPath(event.payload.path ?? "");
+        setUnsavedError(null);
+      });
+      const blocked = await listen<{ message: string }>("printforge-close-blocked", (event) => setStatusMsg(event.payload.message));
+      if (disposed) { requested(); blocked(); }
+      else subscriptions.push(requested, blocked);
+    }).catch((error) => setStatusMsg(`Не удалось включить защиту закрытия: ${parseIpcError(error).message}`));
+    return () => { disposed = true; subscriptions.forEach((unsubscribe) => unsubscribe()); };
+  }, []);
+
   // ---------- работа с документом ----------
   const applyDoc = useCallback((state: DocState) => {
     const cur = docRef.current;
     // страж устаревших ответов: та же пара doc_id+slot, но меньшая ревизия
-    if (cur && cur.slot === state.slot && cur.doc_id === state.doc_id && state.revision < cur.revision) return;
-    if (cur && (cur.revision !== state.revision || cur.doc_id !== state.doc_id || cur.slot !== state.slot)) {
+    if (!acceptsDocumentState(cur, state)) return;
+    if (documentGeometryChanged(cur, state)) {
+      printRequestToken.current += 1;
+      measureRequestToken.current += 1;
+      setPrintChecks(null);
+      setMeasureResult(null);
+      setImportedStats(null);
+      setImportPreview(null);
+      setImageReliefPreview(null);
+      setConstraintSolution(null);
+      viewportRef.current?.cancelTransformPreview();
+      viewportRef.current?.cancelPushPullPreview();
+      viewportRef.current?.setFaceFeaturePreview(null);
+      viewportRef.current?.setFaceDomePreview(null);
+      viewportRef.current?.setSheetBendPreview(null);
+      setMoveMode(false);
+      setMovePreview(null);
       setSelectedFace(null);
+      if (cur && (cur.document_instance_id !== state.document_instance_id || cur.doc_id !== state.doc_id || cur.slot !== state.slot)) {
+        setSelectedPartId(null);
+        setSelectedPartIds([]);
+      }
       viewportRef.current?.setSelectedFace(null);
       setEdgeTool((current) => ({ ...current, active: false, selected: null, partId: null }));
       viewportRef.current?.setSplitPreview(null);
     }
+    docRef.current = state;
     setDoc(state);
     const token = ++meshToken.current;
     if (state.stats && (state.stats.is_valid || state.stats.mesh_mode)) {
@@ -334,6 +375,7 @@ export default function App() {
     } else {
       setMesh(null);
       setMeshLoading(false);
+      setComputing(false);
     }
   }, []);
 
@@ -371,7 +413,8 @@ export default function App() {
   }, [applyDoc, beginGeometryOperation, endGeometryOperation]);
 
   const cancelGeometry = useCallback(async () => {
-    if (!geometryBusy || geometryCancelling) return;
+    if (!geometryBusy || cancelPending.current) return;
+    cancelPending.current = true;
     setGeometryCancelling(true);
     try {
       const result = await backend.geometryCancel();
@@ -381,92 +424,52 @@ export default function App() {
     } catch (error) {
       setStatusMsg(`Не удалось отменить вычисление: ${parseIpcError(error).message}`);
     } finally {
+      cancelPending.current = false;
       setGeometryCancelling(false);
     }
   }, [geometryBusy, geometryCancelling]);
 
   // ---------- уроки ----------
-  const persistProgress = (run: LessonRun) => {
-    localStorage.setItem(lessonKey(run.lesson.lesson_id, run.lesson.content_version), JSON.stringify(run.statuses));
-  };
-
-  const advanceIfDone = useCallback((run: LessonRun): LessonRun => {
-    const statuses = [...run.statuses];
-    let idx = run.stepIndex;
-    while (idx < run.lesson.steps.length && (statuses[idx] === "done" || statuses[idx] === "skipped")) idx++;
-    const next = { ...run, statuses, stepIndex: idx };
-    persistProgress(next);
-    return next;
-  }, []);
-
-  const checkParams = useCallback((check: LessonCheck, state: DocState): boolean => {
-    if (check.template && state.template !== check.template) return false;
-    if (!check.params) return true;
-    for (const [k, v] of Object.entries(check.params)) {
-      const actual = state.params?.[k];
-      if (actual == null || Math.abs(actual - v) > 1e-6) return false;
-    }
-    if (check.hole_centers_abs_x != null) {
-      const centers = state.stats?.hole_centers ?? [];
-      const ok = centers.some(([x]) => Math.abs(Math.abs(x) - check.hole_centers_abs_x!) < 1e-6);
-      if (!ok) return false;
-    }
-    return true;
-  }, []);
-
-  const lessonEvent = useCallback((ev: {
-    type: string; command_id?: string; state?: DocState;
-    op?: string; radius?: number; code?: string; mode?: string;
-    checks?: { id: string; status: string }[];
-  }) => {
+  const lessonEvent = useCallback((ev: LessonEvent) => {
     const run = lessonRef.current;
     if (!run || run.paused) return;
-    const matches = (check: (typeof run.lesson.steps)[number]["check"]): boolean => {
-      switch (check.type) {
-        case "camera_rotated": return ev.type === "camera_rotated";
-        case "camera_zoomed": return ev.type === "camera_zoomed";
-        case "command": return ev.type === "command" && ev.command_id === check.command_id;
-        case "face_selected": return ev.type === "face_selected";
-        case "params": return ev.state != null && checkParams(check, ev.state);
-        case "saved": return ev.type === "saved";
-        case "reopened": return ev.type === "reopened" && (!check.params || (ev.state != null && checkParams(check, ev.state)));
-        case "exported": return ev.type === "exported";
-        case "operation":
-          return ev.type === "operation" && ev.op === check.op
-            && (check.radius == null || Math.abs((ev.radius ?? -1) - check.radius) < 1e-9);
-        case "error_shown": return ev.type === "error_shown" && (!check.code || ev.code === check.code);
-        case "imported": return ev.type === "imported" && (!check.mode || ev.mode === check.mode);
-        case "check_result":
-          return ev.type === "check_result"
-            && (ev.checks ?? []).some((c) => c.id === check.id && c.status === check.status);
-        default: return false;
-      }
-    };
-    // событие может закрыть несколько подряд идущих уже выполненных шагов
-    let cur = run;
-    let progressed = false;
-    while (cur.stepIndex < cur.lesson.steps.length
-           && matches(cur.lesson.steps[cur.stepIndex].check)) {
-      const statuses = [...cur.statuses];
-      statuses[cur.stepIndex] = "done";
-      cur = advanceIfDone({ ...cur, statuses });
-      progressed = true;
+    const next = advanceLesson(run, { ...ev, state: ev.state ?? docRef.current ?? undefined });
+    if (next !== run) {
+      lessonRef.current = next;
+      setLessonRun(next);
     }
-    if (progressed) setLessonRun(cur);
-  }, [advanceIfDone, checkParams]);
+  }, []);
+
+  useEffect(() => {
+    if (!lessonRun || doc?.slot !== "tutorial") return;
+    localStorage.setItem(lessonKey(lessonRun.lesson.lesson_id, lessonRun.lesson.content_version), serializeLessonProgress(lessonRun, doc));
+    localStorage.setItem(ACTIVE_LESSON_KEY, lessonRun.lesson.lesson_id);
+  }, [doc, lessonRun]);
+
+  useEffect(() => {
+    if (lessonRef.current || doc?.slot !== "tutorial" || !lessons.length) return;
+    const lesson = lessons.find((candidate) => candidate.lesson_id === localStorage.getItem(ACTIVE_LESSON_KEY));
+    if (!lesson) return;
+    const restored = restoreLessonRun(lesson, lessons.indexOf(lesson), lessons.length,
+      localStorage.getItem(lessonKey(lesson.lesson_id, lesson.content_version)), doc);
+    if (restored) {
+      lessonRef.current = restored;
+      setLessonRun(restored);
+    }
+  }, [doc, lessons]);
 
   const undoDocument = useCallback(async () => {
     const state = await runBackend(() => backend.docUndo());
     if (!state) return;
     setStatusMsg("Последняя операция отменена");
-    lessonEvent({ type: "command", command_id: "op.undo" });
+    lessonEvent({ type: "command", command_id: "op.undo", state });
   }, [runBackend, lessonEvent]);
 
   const redoDocument = useCallback(async () => {
     const state = await runBackend(() => backend.docRedo());
     if (!state) return;
     setStatusMsg("Операция повторена");
-    lessonEvent({ type: "command", command_id: "op.redo" });
+    lessonEvent({ type: "command", command_id: "op.redo", state });
   }, [runBackend, lessonEvent]);
 
   useEffect(() => {
@@ -477,47 +480,68 @@ export default function App() {
     if (check.type === "error_shown" && doc?.error) lessonEvent({ type: "error_shown", code: doc.error.code });
   }, [doc, lessonRun, lessonEvent]);
 
-  const startLesson = useCallback(async (lessonId: string) => {
+  const startLesson = useCallback(async (lessonId: string, restart = false) => {
     const lesson = lessons.find((l) => l.lesson_id === lessonId);
     if (!lesson) return;
+    if (documentActionPending.current || geometryOperationCount.current > 0) return;
+    documentActionPending.current = true;
+    lessonRef.current = null;
+    setLessonRun(null);
     setComputing(true);
     try {
+      const idx = lessons.indexOf(lesson);
+      if (!restart) {
+        const previous = await backend.docSwitchSlot("tutorial");
+        const restored = restoreLessonRun(lesson, idx, lessons.length,
+          localStorage.getItem(lessonKey(lesson.lesson_id, lesson.content_version)), previous);
+        if (restored) {
+          applyDoc(previous);
+          lessonRef.current = restored;
+          setLessonRun(restored);
+          return;
+        }
+      }
       let state = await backend.docNewTutorial();
       applyDoc(state);
-      const idx = lessons.indexOf(lesson);
       if (lessonId === "navigation" || lessonId === "save-export") {
         state = await backend.docCreate("box", { length: 40, width: 30, height: 20 });
         applyDoc(state);
       }
-      const statuses = loadLessonProgress(lesson.lesson_id, lesson.steps.length, lesson.content_version).map(() => "pending" as StepStatus);
-      const run: LessonRun = {
-        lesson, lessonIndex: idx, totalLessons: lessons.length,
-        stepIndex: 0, statuses, paused: false,
-      };
-      persistProgress(run);
+      const run = createLessonRun(lesson, idx, lessons.length);
+      lessonRef.current = run;
       setLessonRun(run);
       setSelectedFace(null);
     } catch (e) {
       setStatusMsg(`Не удалось начать урок: ${(e as GeoError).message ?? e}`);
     } finally {
+      documentActionPending.current = false;
       setComputing(false);
     }
   }, [lessons, applyDoc]);
 
   const exitLesson = useCallback(async () => {
+    if (documentActionPending.current || geometryOperationCount.current > 0) return;
+    documentActionPending.current = true;
+    setComputing(true);
+    lessonRef.current = null;
     setLessonRun(null);
     setSelectedFace(null);
     try {
       const state = await backend.docSwitchSlot("main");
       applyDoc(state);
-    } catch { /* бэкенд недоступен */ }
+    } catch (error) {
+      setStatusMsg(`Не удалось выйти из урока: ${(error as GeoError).message ?? error}`);
+    } finally {
+      documentActionPending.current = false;
+      setComputing(false);
+    }
   }, [applyDoc]);
 
   const lessonDone = useCallback((lessonId: string) => {
     const lesson = lessons.find((l) => l.lesson_id === lessonId);
     if (!lesson) return false;
-    const statuses = loadLessonProgress(lessonId, lesson.steps.length, lesson.content_version);
-    return statuses.every((s) => s !== "pending");
+    const progress = readLessonProgress(lesson, localStorage.getItem(lessonKey(lessonId, lesson.content_version)));
+    return progress != null && lessonMastered(progress.statuses);
   }, [lessons]);
 
   // ---------- команды документа ----------
@@ -537,11 +561,12 @@ export default function App() {
     if (!cur) return;
     const part = partId ? cur.parts?.find((p) => p.part_id === partId) : cur.parts?.[0];
     let num: number;
-    try { num = evalExpression(raw, { ...(part?.params ?? cur.params) }); }
+    const template = templates.find((candidate) => candidate.template_id === (part?.template ?? cur.template)) ?? null;
+    try { num = evalExpression(raw, parameterValues(cur, template, part?.part_id)); }
     catch (e) { setStatusMsg(`Ошибка выражения: ${(e as Error).message}`); return; }
     const state = await runBackend(() => backend.docSetParameter(name, num, raw, partId), true);
     if (state) lessonEvent({ type: "params", state });
-  }, [runBackend, lessonEvent]);
+  }, [runBackend, lessonEvent, templates]);
 
   const cancelPushPull = useCallback(() => {
     const target = pushPullRef.current.target;
@@ -572,7 +597,7 @@ export default function App() {
       : backend.docSetParameter(target.parameter, value, String(value), target.partId), true);
     if (state && !state.error) {
       setStatusMsg(`${target.label}: ${value} мм`);
-      if (target.mode === "offset") lessonEvent({ type: "operation", op: "face_offset" });
+      if (target.mode === "offset") lessonEvent({ type: "operation", op: "face_offset", distance: value, normal: target.normal, state });
       else lessonEvent({ type: "params", state });
     }
   }, [runBackend, lessonEvent]);
@@ -795,7 +820,7 @@ export default function App() {
     if (state && !state.error) {
       const [x, y, z] = translate;
       setStatusMsg(`Деталь перемещена: X ${x} мм, Y ${y} мм, Z ${z} мм`);
-      lessonEvent({ type: "operation", op: "transform" });
+      lessonEvent({ type: "operation", op: "transform", translate, state });
     }
   }, [runBackend, activePartId, lessonEvent]);
 
@@ -818,6 +843,7 @@ export default function App() {
   }, [runBackend, lessonEvent]);
 
   const runSketchSolve = useCallback(async (sketch: ConstrainedSketch) => {
+    if (documentActionPending.current || geometryOperationCount.current > 0) return;
     setComputing(true);
     beginGeometryOperation();
     try {
@@ -826,7 +852,7 @@ export default function App() {
       setStatusMsg(solution.degrees_of_freedom === 0
         ? "Эскиз полностью определён"
         : `Эскиз недоопределён: ${solution.degrees_of_freedom} DOF`);
-      lessonEvent({ type: "command", command_id: "op.sketch.solve" });
+      lessonEvent({ type: "sketch_solved", degrees_of_freedom: solution.degrees_of_freedom });
     } catch (error) {
       setConstraintSolution(null);
       setStatusMsg(`Ошибка решателя: ${parseIpcError(error).message}`);
@@ -943,11 +969,15 @@ export default function App() {
 
   // ---------- измерения ----------
   const runMeasure = useCallback(async () => {
+    if (documentActionPending.current || geometryOperationCount.current > 0) return;
+    const token = ++measureRequestToken.current;
+    setMeasureResult(null);
     setMeasureBusy(true);
     beginGeometryOperation();
     try {
       const bboxRes = await backend.measure({ type: "bbox" });
       const volRes = await backend.measure({ type: "volume" });
+      if (token !== measureRequestToken.current) return;
       setMeasureResult((prev) => ({
         ...prev,
         source: (bboxRes.source as string) ?? "brep",
@@ -956,6 +986,7 @@ export default function App() {
         faceError: undefined,
       }));
     } catch (e) {
+      if (token !== measureRequestToken.current) return;
       setStatusMsg(`Ошибка измерения: ${parseIpcError(e).message}`);
     } finally {
       endGeometryOperation();
@@ -965,14 +996,19 @@ export default function App() {
 
   const runMeasureFace = useCallback(async () => {
     if (selectedFace == null) return;
+    if (documentActionPending.current || geometryOperationCount.current > 0) return;
+    const token = ++measureRequestToken.current;
+    setMeasureResult(null);
     setMeasureBusy(true);
     beginGeometryOperation();
     try {
       const res = await backend.measure({ type: "face_diameter", face_index: selectedFace });
-      setMeasureResult((prev) => ({ ...prev, faceDiameter: res.diameter as number | undefined, faceError: undefined }));
+      if (token !== measureRequestToken.current) return;
+      setMeasureResult((prev) => ({ ...prev, faceIndex: selectedFace, faceDiameter: res.diameter as number | undefined, faceError: undefined }));
     } catch (e) {
+      if (token !== measureRequestToken.current) return;
       const err = parseIpcError(e);
-      setMeasureResult((prev) => ({ ...prev, faceDiameter: undefined, faceError: err.message }));
+      setMeasureResult((prev) => ({ ...prev, faceIndex: selectedFace, faceDiameter: undefined, faceError: err.message }));
     } finally {
       endGeometryOperation();
       setMeasureBusy(false);
@@ -980,12 +1016,21 @@ export default function App() {
   }, [selectedFace, beginGeometryOperation, endGeometryOperation]);
 
   const runMeasureDistance = useCallback(async (p0: [number, number, number], p1: [number, number, number]) => {
+    if (documentActionPending.current || geometryOperationCount.current > 0) return;
+    const token = ++measureRequestToken.current;
+    setMeasureResult(null);
+    if (![...p0, ...p1].every(Number.isFinite)) {
+      setStatusMsg("Координаты должны быть конечными числами");
+      return;
+    }
     setMeasureBusy(true);
     beginGeometryOperation();
     try {
       const res = await backend.measure({ type: "distance", p0, p1 });
+      if (token !== measureRequestToken.current) return;
       setMeasureResult((prev) => ({ ...prev, distance: res.distance as number | undefined }));
     } catch (e) {
+      if (token !== measureRequestToken.current) return;
       setStatusMsg(`Ошибка измерения: ${parseIpcError(e).message}`);
     } finally {
       endGeometryOperation();
@@ -1042,28 +1087,31 @@ export default function App() {
       if (current.kind === "fillet") {
         lessonEvent({ type: "operation", op: "fillet", radius: size });
       }
+    } else if (state?.error) {
+      lessonEvent({ type: "error_shown", code: state.error.code, radius: size, state });
     }
   }, [runBackend, cancelEdgeTool, lessonEvent, activePartId]);
 
   const clearErrorOrUndo = useCallback(() => {
-    const code = docRef.current?.error?.code;
-    if (code === "fillet_failed" || code === "chamfer_failed" || code === "dome_failed" ||
-        code === "bend_failed" || code === "face_offset_failed" || code === "split_failed" || code === "unsupported_face" || code === "bad_ref" ||
-        code === "reselect_required") {
-      void runBackend(() => backend.docClearError());
-    } else {
-      void undoDocument();
-    }
-  }, [runBackend, undoDocument]);
+    void runBackend(() => backend.docClearError());
+  }, [runBackend]);
 
   // ---------- проверка печати ----------
   const runPrintCheck = useCallback(async (printer: { x: number; y: number; z: number }) => {
+    if (documentActionPending.current || geometryOperationCount.current > 0) return;
+    const token = ++printRequestToken.current;
+    setPrintChecks(null);
+    if (!Object.values(printer).every((value) => Number.isFinite(value) && value > 0)) {
+      setStatusMsg("Габариты принтера должны быть положительными конечными числами");
+      return;
+    }
     setPrintBusy(true);
     beginGeometryOperation();
     try {
       const res = await backend.printCheck(printer);
+      if (token !== printRequestToken.current) return;
       setPrintChecks(res.checks ?? []);
-      lessonEvent({ type: "check_result", checks: res.checks ?? [] });
+      lessonEvent({ type: "check_result", checks: res.checks ?? [], state: docRef.current ?? undefined });
     } catch (e) {
       setStatusMsg(`Ошибка проверки: ${parseIpcError(e).message}`);
     } finally {
@@ -1073,7 +1121,15 @@ export default function App() {
   }, [beginGeometryOperation, endGeometryOperation]);
 
   // ---------- импорт ----------
-  const runImport = useCallback(async (path: string, format: "step" | "stl", unitScale?: number) => {
+  const runImport = useCallback(async (path: string, format: "step" | "stl", unitScale?: number, confirmed = false): Promise<void> => {
+    if (documentActionPending.current || geometryOperationCount.current > 0) return;
+    const current = docRef.current;
+    if (format === "step" && current?.dirty && !confirmed) {
+      setUnsavedRequest({ document: current, proceed: () => runImport(path, format, unitScale, true) });
+      setUnsavedPath(current.path ?? "");
+      setUnsavedError(null);
+      return;
+    }
     setImportBusy(true);
     beginGeometryOperation();
     try {
@@ -1081,6 +1137,10 @@ export default function App() {
       if (format === "stl" && unitScale === undefined) {
         // первый проход: показываем габарит и спрашиваем единицы
         setImportPreview(res);
+      } else if (res.document) {
+        applyDoc(res.document);
+        setStatusMsg(`Открыта модель STEP: ${expandTilde(path)}. Сохраните её как новый проект.`);
+        lessonEvent({ type: "imported", mode: res.mode, state: res.document });
       } else {
         const meshData = await backend.docGetImportedMesh(res.mesh);
         setMesh(meshData);
@@ -1098,14 +1158,14 @@ export default function App() {
       endGeometryOperation();
       setImportBusy(false);
     }
-  }, [beginGeometryOperation, endGeometryOperation]);
+  }, [applyDoc, beginGeometryOperation, endGeometryOperation]);
 
   const applyMeshImport = useCallback(async (path: string, unitScale: number) => {
     const state = await runBackend(() => backend.docMeshImportApply(expandTilde(path), "stl", unitScale), true);
     if (state && !state.error) {
       setImportPreview(null);
       setStatusMsg(`Mesh применён к документу: ${expandTilde(path)}`);
-      lessonEvent({ type: "operation", op: "mesh_source" });
+      lessonEvent({ type: "mesh_source_applied", mode: "mesh", state });
     }
   }, [runBackend, lessonEvent]);
 
@@ -1124,6 +1184,8 @@ export default function App() {
   }, [runBackend, lessonEvent]);
 
   const previewImageRelief = useCallback(async (settings: ImageReliefSettings) => {
+    if (documentActionPending.current || geometryOperationCount.current > 0) return;
+    setImageReliefPreview(null);
     setComputing(true);
     beginGeometryOperation();
     try {
@@ -1133,9 +1195,9 @@ export default function App() {
       const previewMesh = await backend.docGetImportedMesh(preview.mesh);
       setMesh(previewMesh);
       setImportedStats(preview.stats);
-      setImageReliefPreview(preview);
+      setImageReliefPreview({ ...preview, settings_key: imageReliefSettingsKey(settings) });
       setStatusMsg("Decorative mesh preview готов; документ не изменён");
-      lessonEvent({ type: "command", command_id: "op.image_relief.preview" });
+      lessonEvent({ type: "image_preview", stats: preview.stats });
     } catch (error) {
       setImageReliefPreview(null);
       setStatusMsg(`Ошибка image relief: ${parseIpcError(error).message}`);
@@ -1148,15 +1210,20 @@ export default function App() {
   const applyImageRelief = useCallback(async (
     settings: ImageReliefSettings, expectedSha256: string,
   ) => {
+    if (!imageReliefPreview || imageReliefPreview.settings_key !== imageReliefSettingsKey(settings) ||
+        imageReliefPreview.source_sha256 !== expectedSha256) {
+      setStatusMsg("Настройки изменились. Обновите Preview перед применением.");
+      return;
+    }
     const state = await runBackend(() => backend.docImageReliefApply({
       ...settings, path: expandTilde(settings.path),
-    }, expectedSha256), true);
+    }, expectedSha256, imageReliefPreview.settings_sha256), true);
     if (state && !state.error) {
       setImageReliefPreview(null);
       setStatusMsg("Decorative mesh применён одной транзакцией");
       lessonEvent({ type: "operation", op: "image_relief_source" });
     }
-  }, [runBackend, lessonEvent]);
+  }, [imageReliefPreview, runBackend, lessonEvent]);
 
   const cancelImageReliefPreview = useCallback(() => {
     setImageReliefPreview(null);
@@ -1172,9 +1239,39 @@ export default function App() {
     const state = await runBackend(() => backend.docSave(expandTilde(savePath)));
     if (state) {
       setStatusMsg(`Сохранено: ${state.path ?? expandTilde(savePath)}`);
-      lessonEvent({ type: "saved" });
+      lessonEvent({ type: "saved", state, path: state.path ?? undefined });
     }
   }, [savePath, runBackend, lessonEvent]);
+
+  const continueUnsavedAction = async (save: boolean) => {
+    const request = unsavedRequest;
+    if (!request || unsavedBusy) return;
+    setUnsavedBusy(true);
+    setUnsavedError(null);
+    try {
+      let snapshot = request.document;
+      if (save) {
+        snapshot = request.proceed
+          ? await backend.docSave(expandTilde(unsavedPath.trim()))
+          : await backend.docSaveMain(expandTilde(unsavedPath.trim()));
+        if (snapshot.slot === docRef.current?.slot) applyDoc(snapshot);
+      }
+      if (request.proceed) {
+        const current = docRef.current;
+        if (!current || current.document_instance_id !== snapshot.document_instance_id || current.revision !== snapshot.revision) {
+          throw new Error("Документ изменился. Отмените действие и повторите импорт.");
+        }
+        setUnsavedRequest(null);
+        await request.proceed();
+      } else {
+        await backend.docConfirmClose(snapshot.document_instance_id!, snapshot.revision, !save);
+      }
+    } catch (error) {
+      setUnsavedError(parseIpcError(error).message);
+    } finally {
+      setUnsavedBusy(false);
+    }
+  };
 
   const doOpen = useCallback(async () => {
     const state = await runBackend(() => backend.docOpen(expandTilde(openPath)));
@@ -1185,6 +1282,7 @@ export default function App() {
   }, [openPath, runBackend, lessonEvent]);
 
   const doExport = useCallback(async (format: "stl" | "step" | "3mf") => {
+    if (documentActionPending.current || geometryOperationCount.current > 0) return;
     const path = expandTilde(exportPath).replace(/\.(stl|step|stp|3mf)$/i, "") + "." + format;
     setComputing(true);
     beginGeometryOperation();
@@ -1194,7 +1292,7 @@ export default function App() {
       const volume = res.stats.volume;
       const volumeText = volume == null ? "объём неизвестен" : `объём ${Math.round(volume * 10) / 10} мм³`;
       setStatusMsg(`Экспортировано: ${res.path} — ${kb} КБ, ${volumeText}`);
-      lessonEvent({ type: "exported" });
+      lessonEvent({ type: "exported", format, path: res.path });
     } catch (e) {
       setStatusMsg(`Ошибка экспорта: ${parseIpcError(e).message}`);
     } finally {
@@ -1234,17 +1332,18 @@ export default function App() {
       mode: "apply",
     }), true);
     if (!state || state.error) return null;
-    lessonEvent({ type: "params", state });
+    lessonEvent({ type: "ai_applied", state });
     setStatusMsg("AI-план применён одной транзакцией");
     return state.revision;
   }, [runBackend, lessonEvent]);
 
   const highlightCommand = useCallback((commandId: string) => {
-    const el = document.querySelector<HTMLElement>(`[data-cmd="${commandId}"]`);
-    if (!el) return;
-    el.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    el.classList.add("cmd-highlight");
-    window.setTimeout(() => el.classList.remove("cmd-highlight"), 1200);
+    const result = revealCommand(commandId);
+    if (result.status === "shown") {
+      setHelpOpen(false);
+      setStatusMsg(result.message);
+    }
+    return result;
   }, []);
 
   const runCommand = useCallback((id: string) => {
@@ -1282,9 +1381,17 @@ export default function App() {
     if (!whatIsThis) return;
     const handler = (e: MouseEvent) => {
       const el = (e.target as HTMLElement).closest?.("[data-cmd]") as HTMLElement | null;
-      if (!el) return;
       e.preventDefault();
       e.stopPropagation();
+      e.stopImmediatePropagation();
+      if (el?.dataset.cmd === "app.help.what_is_this") {
+        setWhatIsThis(false);
+        return;
+      }
+      if (!el) {
+        setStatusMsg("Для этой области нет отдельной статьи. Модель не изменена; выберите кнопку со справкой.");
+        return;
+      }
       const cmd = commands.find((c) => c.command_id === el.dataset.cmd);
       setWhatIsThis(false);
       if (cmd) openHelpArticle(cmd.help_id);
@@ -1294,15 +1401,37 @@ export default function App() {
         else setHelpOpen(true);
       }
     };
+    const blockPointer = (event: PointerEvent) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!(event.target as HTMLElement).closest?.("[data-cmd]")) {
+        setStatusMsg("Режим «Что это?»: действие заблокировано, модель не изменена. Escape — выйти.");
+      }
+    };
+    const blockKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" && event.key !== "Tab") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setStatusMsg("Режим «Что это?» не выполняет команды. Escape — выйти.");
+      }
+    };
     document.addEventListener("click", handler, true);
-    return () => document.removeEventListener("click", handler, true);
+    document.addEventListener("pointerdown", blockPointer, true);
+    document.addEventListener("keydown", blockKey, true);
+    return () => {
+      document.removeEventListener("click", handler, true);
+      document.removeEventListener("pointerdown", blockPointer, true);
+      document.removeEventListener("keydown", blockKey, true);
+    };
   }, [whatIsThis, commands, templates, openHelpArticle]);
 
   // ---------- клавиатура ----------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (unsavedRequest) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "z") {
+        if (isEditableTarget(e.target)) return;
         e.preventDefault();
         if (e.shiftKey) {
           if (docRef.current?.can_redo) void redoDocument();
@@ -1323,6 +1452,7 @@ export default function App() {
         e.preventDefault();
         setWhatIsThis((v) => !v);
       } else if (e.key === "Escape") {
+        if (whatIsThis) { setWhatIsThis(false); return; }
         const pushPullState = pushPullRef.current;
         const pushPullValueNumber = Number(pushPullState.value.replace(",", "."));
         const pushPullPending = pushPullState.dragging || (
@@ -1339,11 +1469,17 @@ export default function App() {
         else if (whatIsThis) setWhatIsThis(false);
         else if (aiOpen) setAiOpen(false);
         else if (helpOpen) setHelpOpen(false);
+        else {
+          setSelectedFace(null);
+          setSelectedPartId(null);
+          setSelectedPartIds([]);
+          viewportRef.current?.setSelectedFace(null);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [whatIsThis, helpOpen, aiOpen, moveMode, undoDocument, redoDocument, doSave, doOpen, cancelEdgeTool, cancelPushPull]);
+  }, [whatIsThis, helpOpen, aiOpen, moveMode, unsavedRequest, undoDocument, redoDocument, doSave, doOpen, cancelEdgeTool, cancelPushPull]);
 
   const faceAreaValue = mesh && selectedFace != null ? faceArea(mesh, selectedFace) : null;
   const docName = doc?.path ? doc.path.split("/").pop()! : "Без названия";
@@ -1363,6 +1499,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <div className="workspace-shell" ref={(element) => { if (element) element.inert = unsavedRequest != null; }}>
       <TopBar commands={commands} doc={doc} docName={docName} onCommand={runCommand} />
       <div className="app-main">
         <LeftPanel
@@ -1454,19 +1591,21 @@ export default function App() {
             <LessonBar
               run={lessonRun}
               onSkip={() => {
-                const statuses = [...lessonRun.statuses];
-                statuses[lessonRun.stepIndex] = "skipped";
-                setLessonRun(advanceIfDone({ ...lessonRun, statuses }));
+                const next = skipLessonStep(lessonRun);
+                lessonRef.current = next;
+                setLessonRun(next);
               }}
               onTogglePause={() => setLessonRun({ ...lessonRun, paused: !lessonRun.paused })}
               onExit={() => void exitLesson()}
-              onRestart={() => void startLesson(lessonRun.lesson.lesson_id)}
+              onRestart={() => void startLesson(lessonRun.lesson.lesson_id, true)}
+              onInspect={() => lessonEvent({ type: lessonRun.lesson.steps[lessonRun.stepIndex].check.type, state: docRef.current ?? undefined, checks: printChecks ?? undefined })}
             />
           )}
           </div>
         </main>
         <ParamsPanel
           doc={doc}
+          busy={computing || geometryBusy || meshLoading}
           templates={templates}
           selectedFace={selectedFace}
           faceArea={faceAreaValue}
@@ -1515,6 +1654,7 @@ export default function App() {
           onMeasure={() => void runMeasure()}
           onMeasureFace={() => void runMeasureFace()}
           onMeasureDistance={(p0, p1) => void runMeasureDistance(p0, p1)}
+          onInvalidateMeasurements={() => { measureRequestToken.current += 1; setMeasureResult(null); }}
           edgeTool={edgeTool}
           onStartEdgeTool={startEdgeTool}
           onSelectEdge={selectEdge}
@@ -1526,6 +1666,7 @@ export default function App() {
           printChecks={printChecks}
           printBusy={printBusy}
           onPrintCheck={(p) => void runPrintCheck(p)}
+          onInvalidatePrintChecks={() => { printRequestToken.current += 1; setPrintChecks(null); }}
           importPreview={importPreview}
           importBusy={importBusy}
           onImport={(p, f, s) => void runImport(p, f, s)}
@@ -1579,6 +1720,10 @@ export default function App() {
         faceArea={faceAreaValue}
       />
       <Tooltips mode={tooltipMode} commands={commands} onOpenArticle={openHelpArticle} />
+      </div>
+      {unsavedRequest && <UnsavedChangesDialog replacing={!!unsavedRequest.proceed} path={unsavedPath} busy={unsavedBusy}
+        error={unsavedError} onPath={setUnsavedPath} onSave={() => void continueUnsavedAction(true)}
+        onDiscard={() => void continueUnsavedAction(false)} onCancel={() => { setUnsavedRequest(null); setUnsavedError(null); }} />}
     </div>
   );
 }

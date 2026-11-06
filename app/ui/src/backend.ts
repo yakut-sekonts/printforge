@@ -162,7 +162,9 @@ export const backend = {
   docAlign: (partId: string, axis: "x" | "y" | "z", align: "center" | "min" | "max", value: number) =>
     call<DocState>("doc_align", { part_id: partId, axis, align, value }),
   measure: (args: { type: "bbox" | "volume" | "face_diameter" | "distance"; face_index?: number; p0?: [number, number, number]; p1?: [number, number, number] }) =>
-    call<Record<string, unknown>>(`measure`, args as Record<string, unknown>),
+    call<Record<string, unknown>>("measure", isTauri()
+      ? { measure_type: args.type, extra: { face_index: args.face_index, p0: args.p0, p1: args.p1 } }
+      : args as Record<string, unknown>),
   aiProviders: () => call<AiProviderInfo>("ai_providers"),
   aiConfigure: (config: AiProviderConfig) => call<AiProviderInfo>(
     "ai_configure",
@@ -227,6 +229,11 @@ export const backend = {
     return decodeMeshBinary(binary, resource.face_ranges);
   },
   docSave: (path: string) => call<DocState>("doc_save", { path }),
+  docSaveMain: (path: string) => call<DocState>("doc_save_main", { path }),
+  docConfirmClose: (documentInstanceId: string | number, revision: number, discard: boolean) =>
+    call<void>("doc_confirm_close", {
+      expected_document_instance_id: documentInstanceId, expected_revision: revision, discard,
+    }),
   docOpen: (path: string) => call<DocState>("doc_open", { path }),
   docExport: (path: string, format: "stl" | "step" | "3mf", linearDeflection?: number) =>
     call<ExportResult>("doc_export", { path, format, linear_deflection: linearDeflection }),
@@ -248,9 +255,9 @@ export const backend = {
   }),
   imageReliefPreview: (settings: ImageReliefSettings) =>
     call<ImageReliefPreview>("image_relief_preview", settings as unknown as Record<string, unknown>),
-  docImageReliefApply: (settings: ImageReliefSettings, expectedSha256: string) =>
+  docImageReliefApply: (settings: ImageReliefSettings, expectedSha256: string, expectedSettingsSha256: string) =>
     call<DocState>("doc_image_relief_apply", {
-      ...settings, expected_sha256: expectedSha256,
+      ...settings, expected_sha256: expectedSha256, expected_settings_sha256: expectedSettingsSha256,
     } as unknown as Record<string, unknown>),
   printCheck: (printer: { x: number; y: number; z: number }) =>
     call<PrintCheckResult>("print_check", { printer }),

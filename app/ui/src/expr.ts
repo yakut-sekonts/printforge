@@ -37,6 +37,15 @@ function tokenize(src: string): Token[] {
 }
 
 export function evalExpression(src: string, vars: Record<string, number>): number {
+  const aliases: Record<string, string> = {
+    длина: "length", ширина: "width", высота: "height", диаметр: "diameter",
+    наружный_диаметр: "outer_diameter", внутренний_диаметр: "inner_diameter",
+    диаметр_отверстия: "hole_diameter", отступ: "hole_offset", отступ_отверстий: "hole_offset", стенка: "wall",
+    дно: "bottom", зазор: "gap", толщина_крышки: "lid_thickness",
+    высота_бортика: "lip_height", стенка_бортика: "lip_wall", толщина_бортика: "lip_wall",
+    длина_полки: "a_length", ширина_полки: "a_width", толщина_полки: "a_thickness",
+    высота_стойки: "b_height",
+  };
   const tokens = tokenize(src);
   let pos = 0;
 
@@ -74,8 +83,9 @@ export function evalExpression(src: string, vars: Record<string, number>): numbe
     if (t.t === "num") { pos++; return t.v; }
     if (t.t === "name") {
       pos++;
-      if (!(t.v in vars)) throw new Error(`Неизвестный параметр «${t.v}»`);
-      return vars[t.v];
+      const name = aliases[t.v.toLowerCase()] ?? t.v;
+      if (!Object.prototype.hasOwnProperty.call(vars, name)) throw new Error(`Неизвестный параметр «${t.v}»`);
+      return vars[name];
     }
     if (t.t === "op" && t.v === "(") {
       pos++;

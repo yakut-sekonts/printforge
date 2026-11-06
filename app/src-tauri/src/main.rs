@@ -12,14 +12,75 @@ use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tauri::async_runtime::Receiver;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::{watch, Mutex};
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const QUIT_MENU_ID: &str = "printforge.quit";
+
+fn application_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID};
+
+    let quit = MenuItem::with_id(app, QUIT_MENU_ID, "Завершить PrintForge", true, Some("CmdOrCtrl+Q"))?;
+    let file = Submenu::with_items(app, "File", true, &[
+        &PredefinedMenuItem::close_window(app, None)?,
+        #[cfg(not(target_os = "macos"))]
+        &quit,
+    ])?;
+    let edit = Submenu::with_items(app, "Edit", true, &[
+        &PredefinedMenuItem::undo(app, None)?,
+        &PredefinedMenuItem::redo(app, None)?,
+        &PredefinedMenuItem::separator(app)?,
+        &PredefinedMenuItem::cut(app, None)?,
+        &PredefinedMenuItem::copy(app, None)?,
+        &PredefinedMenuItem::paste(app, None)?,
+        &PredefinedMenuItem::select_all(app, None)?,
+    ])?;
+    let window = Submenu::with_id_and_items(app, WINDOW_SUBMENU_ID, "Window", true, &[
+        &PredefinedMenuItem::minimize(app, None)?,
+        &PredefinedMenuItem::maximize(app, None)?,
+        &PredefinedMenuItem::close_window(app, None)?,
+    ])?;
+    let about = PredefinedMenuItem::about(app, None, Some(AboutMetadata {
+        name: Some(app.package_info().name.clone()),
+        version: Some(APP_VERSION.into()),
+        copyright: app.config().bundle.copyright.clone(),
+        authors: app.config().bundle.publisher.clone().map(|publisher| vec![publisher]),
+        ..Default::default()
+    }))?;
+    let help = Submenu::with_id_and_items(app, HELP_SUBMENU_ID, "Help", true, &[
+        #[cfg(not(target_os = "macos"))]
+        &about,
+    ])?;
+    #[cfg(target_os = "macos")]
+    let application = Submenu::with_items(app, &app.package_info().name, true, &[
+        &about,
+        &PredefinedMenuItem::separator(app)?,
+        &PredefinedMenuItem::services(app, None)?,
+        &PredefinedMenuItem::separator(app)?,
+        &PredefinedMenuItem::hide(app, None)?,
+        &PredefinedMenuItem::hide_others(app, None)?,
+        &PredefinedMenuItem::show_all(app, None)?,
+        &PredefinedMenuItem::separator(app)?,
+        &quit,
+    ])?;
+    #[cfg(target_os = "macos")]
+    let view = Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?;
+    Menu::with_items(app, &[
+        #[cfg(target_os = "macos")]
+        &application,
+        &file,
+        &edit,
+        #[cfg(target_os = "macos")]
+        &view,
+        &window,
+        &help,
+    ])
+}
 
 // ---------- геометрический worker ----------
 
@@ -32,6 +93,23 @@ struct GeoWorker {
 
 static WORKER: Mutex<Option<GeoWorker>> = Mutex::const_new(None);
 static GEOMETRY_TASK: StdMutex<Option<watch::Sender<bool>>> = StdMutex::new(None);
+static DOCUMENT_TASKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static CLOSE_CONFIRMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct DocumentTask;
+
+impl DocumentTask {
+    fn begin() -> Self {
+        DOCUMENT_TASKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for DocumentTask {
+    fn drop(&mut self) {
+        DOCUMENT_TASKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 enum WorkerRequestFailure {
     Write(String),
@@ -340,6 +418,23 @@ impl Document {
         self.dirty = true;
     }
 
+    fn candidate(&self, snap: Snapshot) -> Self {
+        Self {
+            doc_id: self.doc_id,
+            document_instance_id: self.document_instance_id,
+            snap,
+            history: vec![],
+            index: 0,
+            dirty: self.dirty,
+            path: self.path.clone(),
+            revision: self.revision,
+            stats: self.stats.clone(),
+            mesh: self.mesh.clone(),
+            error: None,
+            applied_actions: HashMap::new(),
+        }
+    }
+
     fn apply_built_candidate(&mut self, candidate: Document) -> Result<(), String> {
         if self.doc_id != candidate.doc_id
             || self.document_instance_id != candidate.document_instance_id
@@ -445,7 +540,20 @@ async fn rebuild(app: &tauri::AppHandle, doc: &mut Document) {
         doc.error = None;
         return;
     }
-    match worker_call(app, "build", doc.build_params(), doc.revision).await {
+    let result = async {
+        if !doc.snap.parts.is_empty() {
+            let resolved = worker_call(app, "resolve_parameters", json!({
+                "parts": doc.snap.parts,
+                "expressions": doc.snap.expressions,
+            }), doc.revision).await?;
+            doc.snap.parts = serde_json::from_value(resolved["parts"].clone())
+                .map_err(|error| geo_err("bad_parameters", error.to_string()))?;
+            doc.snap.expressions = serde_json::from_value(resolved["expressions"].clone())
+                .map_err(|error| geo_err("bad_parameters", error.to_string()))?;
+        }
+        worker_call(app, "build", doc.build_params(), doc.revision).await
+    }.await;
+    match result {
         Ok(result) => {
             doc.stats = result.get("stats").cloned();
             doc.mesh = result.get("mesh").cloned();
@@ -461,29 +569,30 @@ async fn rebuild(app: &tauri::AppHandle, doc: &mut Document) {
     }
 }
 
-async fn rebuild_active(app: &tauri::AppHandle) {
-    let mut guard = STORE.lock().await;
-    if let Some(store) = guard.as_mut() {
-        let doc = active_doc(store);
-        rebuild(app, doc).await;
-    }
-}
-
-fn rollback_failed_commit(doc: &mut Document) {
-    if doc.error.is_none() || doc.index == 0 || doc.index + 1 != doc.history.len() {
-        return;
-    }
-    let error = doc.error.clone();
-    doc.history.pop();
-    doc.index -= 1;
-    doc.snap = doc.history[doc.index].clone();
-    doc.error = error;
-    doc.dirty = true;
-}
-
-async fn rebuild_committed_active(app: &tauri::AppHandle) {
-    rebuild_active(app).await;
-    with_store(|store| rollback_failed_commit(active_doc(store))).await;
+async fn edit_snapshot(
+    app: &tauri::AppHandle,
+    edit: impl FnOnce(&mut Snapshot) -> Result<(), String>,
+) -> Result<Value, String> {
+    let _task = DocumentTask::begin();
+    let (slot, mut candidate) = with_store(|store| {
+        if CLOSE_CONFIRMED.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(geo_err("application_closing", "Приложение закрывается."));
+        }
+        let slot = store.active.clone();
+        let document = active_doc(store);
+        let mut snapshot = document.snap.clone();
+        edit(&mut snapshot)?;
+        Ok::<_, String>((slot, document.candidate(snapshot)))
+    }).await?;
+    rebuild(app, &mut candidate).await;
+    with_store(|store| {
+        if store.active != slot {
+            return Err(geo_err("document_changed", "Активный документ изменился перед применением операции."));
+        }
+        let document = active_doc(store);
+        document.apply_built_candidate(candidate)?;
+        Ok(document.state(&slot))
+    }).await
 }
 
 // ---------- команды IPC ----------
@@ -521,18 +630,15 @@ async fn doc_create(
         return Err(geo_err("unknown_template", format!("Неизвестный шаблон: {template}")));
     }
     let part = make_part(1, &template, params.unwrap_or_default());
-    with_store(|s| {
-        let doc = active_doc(s);
-        doc.commit(Snapshot {
+    edit_snapshot(&app, |snapshot| {
+        *snapshot = Snapshot {
             parts: vec![part],
             expressions: BTreeMap::new(),
             operations: vec![],
             part_n: 1,
-        });
-    })
-    .await;
-    rebuild_committed_active(&app).await;
-    Ok(current_state().await)
+        };
+        Ok(())
+    }).await
 }
 
 #[tauri::command]
@@ -544,63 +650,28 @@ async fn doc_add_part(
     if !TEMPLATES.contains(&template.as_str()) {
         return Err(geo_err("unknown_template", format!("Неизвестный шаблон: {template}")));
     }
-    let has_model = with_store(|s| !active_doc(s).snap.parts.is_empty()).await;
+    let has_model = with_store(|store| {
+        let snapshot = &active_doc(store).snap;
+        !snapshot.parts.is_empty() || snapshot.operations.iter().any(|operation| operation["op"] == "step_source")
+    }).await;
     if !has_model {
         return Err(geo_err("no_model", "Сначала создайте деталь из шаблона."));
     }
-    with_store(|s| {
-        let doc = active_doc(s);
-        let mut next = doc.snap.clone();
-        next.part_n += 1;
-        next.parts.push(make_part(next.part_n, &template, params.clone().unwrap_or_default()));
-        doc.commit(next);
-    })
-    .await;
-    rebuild_committed_active(&app).await;
-    Ok(current_state().await)
+    edit_snapshot(&app, |snapshot| {
+        snapshot.part_n += 1;
+        snapshot.parts.push(make_part(snapshot.part_n, &template, params.unwrap_or_default()));
+        Ok(())
+    }).await
 }
 
 async fn apply_op(app: &tauri::AppHandle, op: Value) -> Result<Value, String> {
-    with_store(|s| {
-        let doc = active_doc(s);
-        let mut next = doc.snap.clone();
-        next.operations.push(op);
-        doc.commit(next);
-    })
-    .await;
-    rebuild_committed_active(app).await;
-    Ok(current_state().await)
+    apply_atomic_op(app, op).await
 }
 
 async fn apply_atomic_op(app: &tauri::AppHandle, op: Value) -> Result<Value, String> {
-    let (slot, mut candidate) = with_store(|store| {
-        let slot = store.active.clone();
-        let doc = active_doc(store);
-        let mut snap = doc.snap.clone();
-        snap.operations.push(op);
-        (slot, Document {
-            doc_id: doc.doc_id,
-            document_instance_id: doc.document_instance_id,
-            snap,
-            history: vec![],
-            index: 0,
-            dirty: false,
-            path: None,
-            revision: doc.revision,
-            stats: None,
-            mesh: None,
-            error: None,
-            applied_actions: HashMap::new(),
-        })
-    }).await;
-    rebuild(app, &mut candidate).await;
-    with_store(|store| {
-        if store.active != slot {
-            return Err(geo_err("document_changed", "Активный документ изменился перед применением операции."));
-        }
-        let doc = active_doc(store);
-        doc.apply_built_candidate(candidate)?;
-        Ok(doc.state(&slot))
+    edit_snapshot(app, |snapshot| {
+        snapshot.operations.push(op);
+        Ok(())
     }).await
 }
 
@@ -676,17 +747,15 @@ async fn doc_set_parameter(
     expression: Option<String>,
     part_id: Option<String>,
 ) -> Result<Value, String> {
-    if !value.is_finite() || value <= 0.0 {
+    if !value.is_finite() {
         return Err(geo_err("bad_value",
-            format!("Значение параметра «{name}» должно быть положительным числом.")));
+            format!("Значение параметра «{name}» должно быть конечным числом.")));
     }
     let has_model = with_store(|s| !active_doc(s).snap.parts.is_empty()).await;
     if !has_model {
         return Err(geo_err("no_model", "Сначала создайте деталь."));
     }
-    with_store(|s| {
-        let doc = active_doc(s);
-        let mut next = doc.snap.clone();
+    edit_snapshot(&app, |next| {
         let pid = part_id.clone().or_else(|| {
             next.parts.first().and_then(|p| p.get("part_id")).and_then(Value::as_str).map(String::from)
         });
@@ -695,7 +764,7 @@ async fn doc_set_parameter(
         }) {
             part["params"][&name] = json!(value);
         } else {
-            return;
+            return Err(geo_err("bad_ref", "Целевая деталь не существует."));
         }
         let key = format!("{}.{}", pid.unwrap_or_default(), name);
         match &expression {
@@ -706,11 +775,8 @@ async fn doc_set_parameter(
                 next.expressions.remove(&key);
             }
         }
-        doc.commit(next);
-    })
-    .await;
-    rebuild_committed_active(&app).await;
-    Ok(current_state().await)
+        Ok(())
+    }).await
 }
 
 #[tauri::command]
@@ -1326,6 +1392,7 @@ fn apply_plan_ops(snap: &mut Snapshot, ops: &[Value]) -> Result<(), String> {
                     p.get("part_id").and_then(Value::as_str) == Some(tid)
                 }).ok_or_else(|| geo_err("plan_invalid", "Целевая деталь не существует."))?;
                 part["params"][name] = json!(value);
+                snap.expressions.remove(&format!("{tid}.{name}"));
             }
             "op.fillet" => {
                 let radius = params.get("radius").and_then(Value::as_f64).unwrap_or(0.0);
@@ -1354,6 +1421,7 @@ async fn doc_transaction(
     action_id: Option<String>,
     mode: Option<String>,
 ) -> Result<Value, String> {
+    let _task = DocumentTask::begin();
     let (doc_id, instance_id, revision, snap) = with_store(|s| {
         let doc = active_doc(s);
         (doc.doc_id, doc.document_instance_id, doc.revision, doc.snap.clone())
@@ -1444,7 +1512,7 @@ async fn doc_transaction(
                     return Ok(state);
                 }
             }
-            doc.commit(candidate);
+            doc.commit(tmp.snap);
             doc.revision = tmp.revision;
             doc.stats = tmp.stats;
             doc.mesh = tmp.mesh;
@@ -1625,42 +1693,56 @@ async fn doc_clear_error() -> Result<Value, String> {
 
 #[tauri::command]
 async fn doc_undo(app: tauri::AppHandle) -> Result<Value, String> {
-    let changed = with_store(|s| {
-        let doc = active_doc(s);
-        if doc.index > 0 {
-            doc.index -= 1;
-            doc.snap = doc.history[doc.index].clone();
-            doc.dirty = true;
-            true
-        } else {
-            false
-        }
-    })
-    .await;
-    if changed {
-        rebuild_active(&app).await;
-    }
-    Ok(current_state().await)
+    restore_history(&app, false).await
 }
 
 #[tauri::command]
 async fn doc_redo(app: tauri::AppHandle) -> Result<Value, String> {
-    let changed = with_store(|s| {
-        let doc = active_doc(s);
-        if doc.index + 1 < doc.history.len() {
-            doc.index += 1;
-            doc.snap = doc.history[doc.index].clone();
-            doc.dirty = true;
-            true
-        } else {
-            false
-        }
-    })
-    .await;
-    if changed {
-        rebuild_active(&app).await;
+    restore_history(&app, true).await
+}
+
+fn apply_history_candidate(document: &mut Document, candidate: Document, index: usize) -> Result<(), String> {
+    if document.document_instance_id != candidate.document_instance_id || document.revision + 1 != candidate.revision {
+        return Err(geo_err("document_changed", "Документ изменился во время отмены или повтора."));
     }
-    Ok(current_state().await)
+    if candidate.error.is_some() {
+        document.error = candidate.error;
+        return Ok(());
+    }
+    document.snap = candidate.snap;
+    document.index = index;
+    document.revision = candidate.revision;
+    document.stats = candidate.stats;
+    document.mesh = candidate.mesh;
+    document.error = None;
+    document.dirty = true;
+    Ok(())
+}
+
+async fn restore_history(app: &tauri::AppHandle, redo: bool) -> Result<Value, String> {
+    let _task = DocumentTask::begin();
+    let pending = with_store(|store| {
+        let slot = store.active.clone();
+        let document = active_doc(store);
+        let index = if redo {
+            (document.index + 1 < document.history.len()).then_some(document.index + 1)
+        } else {
+            document.index.checked_sub(1)
+        }?;
+        Some((slot, index, document.candidate(document.history[index].clone())))
+    }).await;
+    let Some((slot, index, mut candidate)) = pending else {
+        return Ok(current_state().await);
+    };
+    rebuild(app, &mut candidate).await;
+    with_store(|store| {
+        if store.active != slot {
+            return Err(geo_err("document_changed", "Активный документ изменился во время отмены или повтора."));
+        }
+        let document = active_doc(store);
+        apply_history_candidate(document, candidate, index)?;
+        Ok(document.state(&slot))
+    }).await
 }
 
 #[tauri::command]
@@ -1878,6 +1960,9 @@ async fn doc_get_imported_mesh_binary(
 }
 
 fn document_schema_version(doc: &Document) -> u32 {
+    if doc.snap.operations.iter().any(|operation| operation["op"] == "step_source") {
+        return 5;
+    }
     if doc.snap.parts.iter().any(|part| {
         matches!(part.get("template").and_then(Value::as_str), Some("box" | "cylinder" | "sphere"))
     }) || doc.snap.operations.iter().any(|operation| {
@@ -1924,6 +2009,7 @@ fn save_document(doc: &Document, target: &PathBuf) -> Result<(), String> {
 
 #[tauri::command]
 async fn doc_save(path: String) -> Result<Value, String> {
+    let _task = DocumentTask::begin();
     let target = PathBuf::from(&path);
     with_store(|s| {
         let doc = active_doc(s);
@@ -1937,7 +2023,112 @@ async fn doc_save(path: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn doc_save_main(path: String) -> Result<Value, String> {
+    let _task = DocumentTask::begin();
+    with_store(|store| {
+        let document = &mut store.main;
+        let target = PathBuf::from(path);
+        save_document(document, &target)?;
+        document.path = Some(target);
+        document.dirty = false;
+        Ok(document.state("main"))
+    }).await
+}
+
+fn document_is_busy() -> bool {
+    DOCUMENT_TASKS.load(std::sync::atomic::Ordering::SeqCst) > 0
+        || GEOMETRY_TASK.lock().map(|task| task.is_some()).unwrap_or(true)
+        || ai::has_active_tasks()
+}
+
+fn confirm_close_document(
+    document: &Document,
+    expected_instance: u64,
+    expected_revision: u64,
+    discard: bool,
+    busy: bool,
+) -> Result<(), String> {
+    if busy {
+        return Err(geo_err("document_busy", "Дождитесь завершения или отмените текущее вычисление перед закрытием."));
+    }
+    if document.document_instance_id != expected_instance || document.revision != expected_revision {
+        return Err(geo_err("document_changed", "Документ изменился. Повторите закрытие после проверки изменений."));
+    }
+    if document.dirty && !discard {
+        return Err(geo_err("document_unsaved", "Сначала сохраните текущий документ."));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn doc_confirm_close(
+    app: tauri::AppHandle,
+    expected_document_instance_id: u64,
+    expected_revision: u64,
+    discard: bool,
+) -> Result<(), String> {
+    with_store(|store| {
+        confirm_close_document(
+            &store.main, expected_document_instance_id, expected_revision, discard, document_is_busy(),
+        )?;
+        CLOSE_CONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok::<(), String>(())
+    }).await?;
+    app.exit(0);
+    Ok(())
+}
+
+fn request_application_close(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        if document_is_busy() {
+            let _ = app.emit("printforge-close-blocked", json!({
+                "message": "Дождитесь завершения или отмените текущее вычисление перед закрытием.",
+            }));
+            return;
+        }
+        let pending = with_store(|store| {
+            if document_is_busy() {
+                return Err(geo_err("document_busy", "Дождитесь завершения или отмените текущее вычисление перед закрытием."));
+            }
+            if store.main.dirty {
+                Ok(Some(store.main.state("main")))
+            } else {
+                CLOSE_CONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(None)
+            }
+        }).await;
+        match pending {
+            Ok(Some(document)) => { let _ = app.emit("printforge-close-requested", document); }
+            Ok(None) => app.exit(0),
+            Err(error) => {
+                let detail: Value = serde_json::from_str(&error).unwrap_or_else(|_| json!({"message": error}));
+                let _ = app.emit("printforge-close-blocked", json!({"message": detail["message"]}));
+            }
+        }
+    });
+}
+
+fn replace_built_document(
+    current: &mut Document,
+    mut candidate: Document,
+    expected_instance: u64,
+    expected_revision: u64,
+) -> Result<(), String> {
+    if current.document_instance_id != expected_instance || current.revision != expected_revision {
+        return Err(geo_err("document_changed", "Документ изменился во время открытия файла."));
+    }
+    if let Some(error) = candidate.error.as_ref() {
+        return Err(error.to_string());
+    }
+    candidate.commit(candidate.snap.clone());
+    candidate.dirty = false;
+    *current = candidate;
+    Ok(())
+}
+
+#[tauri::command]
 async fn doc_open(app: tauri::AppHandle, path: String) -> Result<Value, String> {
+    let _task = DocumentTask::begin();
     let file = std::fs::File::open(&path).map_err(|e| format!("открытие файла: {e}"))?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|_| geo_err("bad_file", "Это не файл проекта PrintForge."))?;
@@ -1979,7 +2170,9 @@ async fn doc_open(app: tauri::AppHandle, path: String) -> Result<Value, String> 
     };
     if let Some(parts) = doc_json.get("parts").and_then(Value::as_array) {
         snap.parts = parts.clone();
-        snap.part_n = parts.len() as u64;
+        snap.part_n = parts.iter().filter_map(|part| {
+            part["part_id"].as_str()?.strip_prefix("part-")?.parse::<u64>().ok()
+        }).max().unwrap_or(parts.len() as u64);
     }
     if snap.parts.is_empty() && snap.operations.is_empty() && template.is_some() {
         let mut params = BTreeMap::new();
@@ -2000,17 +2193,23 @@ async fn doc_open(app: tauri::AppHandle, path: String) -> Result<Value, String> 
             }
         }
     }
-    let p = PathBuf::from(&path);
-    with_store(|s| {
-        let doc = active_doc(s);
-        *doc = document_id.map(Document::with_document_id).unwrap_or_else(Document::new);
-        doc.commit(snap.clone());
-        doc.path = Some(p.clone());
-        doc.dirty = false;
-    })
-    .await;
-    rebuild_active(&app).await;
-    Ok(current_state().await)
+    let (slot, expected_instance, expected_revision) = with_store(|store| {
+        let slot = store.active.clone();
+        let document = active_doc(store);
+        (slot, document.document_instance_id, document.revision)
+    }).await;
+    let mut candidate = document_id.map(Document::with_document_id).unwrap_or_else(Document::new);
+    candidate.snap = snap;
+    candidate.path = Some(PathBuf::from(path));
+    rebuild(&app, &mut candidate).await;
+    with_store(|store| {
+        if store.active != slot {
+            return Err(geo_err("document_changed", "Активный документ изменился во время открытия файла."));
+        }
+        let document = active_doc(store);
+        replace_built_document(document, candidate, expected_instance, expected_revision)?;
+        Ok(document.state(&slot))
+    }).await
 }
 
 #[tauri::command]
@@ -2053,6 +2252,48 @@ async fn doc_import(
     format: String,
     unit_scale: Option<f64>,
 ) -> Result<Value, String> {
+    if format.eq_ignore_ascii_case("step") {
+        let _task = DocumentTask::begin();
+        let source_path = PathBuf::from(&path);
+        let metadata = std::fs::metadata(&source_path)
+            .map_err(|error| geo_err("file_read_failed", format!("Не удалось прочитать STEP: {error}")))?;
+        if metadata.len() > 25 * 1024 * 1024 {
+            return Err(geo_err("step_too_large", "STEP source превышает лимит 25 MiB."));
+        }
+        let source = std::fs::read(&source_path)
+            .map_err(|error| geo_err("file_read_failed", format!("Не удалось прочитать STEP: {error}")))?;
+        if source.len() > 25 * 1024 * 1024 {
+            return Err(geo_err("step_too_large", "STEP source превышает лимит 25 MiB."));
+        }
+        let source_name = source_path.file_name().map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "import.step".into());
+        let operation = json!({
+            "op": "step_source",
+            "source_sha256": mesh_sha256(&source),
+            "source_base64": BASE64_STANDARD.encode(source),
+            "source_name": source_name,
+        });
+        let (slot, expected_instance, expected_revision) = with_store(|store| {
+            let slot = store.active.clone();
+            let document = active_doc(store);
+            (slot, document.document_instance_id, document.revision)
+        }).await;
+        let mut candidate = Document::new();
+        candidate.snap.operations.push(operation);
+        rebuild(&app, &mut candidate).await;
+        return with_store(|store| {
+            if store.active != slot {
+                return Err(geo_err("document_changed", "Активный документ изменился во время импорта STEP."));
+            }
+            let document = active_doc(store);
+            replace_built_document(document, candidate, expected_instance, expected_revision)?;
+            document.dirty = true;
+            Ok(json!({
+                "mode": "brep", "stats": document.stats, "mesh": document.mesh,
+                "document": document.state(&slot),
+            }))
+        }).await;
+    }
     let revision = with_store(|s| active_doc(s).revision).await;
     let mut call = json!({"path": path, "format": format});
     if let Some(sc) = unit_scale {
@@ -2097,16 +2338,15 @@ async fn doc_mesh_import_apply(
         "unit_scale": unit_scale.unwrap_or(1.0),
         "source_name": source_name,
     });
-    with_store(|store| {
-        active_doc(store).commit(Snapshot {
+    edit_snapshot(&app, |snapshot| {
+        *snapshot = Snapshot {
             parts: vec![],
             expressions: BTreeMap::new(),
             operations: vec![operation],
             part_n: 0,
-        });
-    }).await;
-    rebuild_committed_active(&app).await;
-    Ok(current_state().await)
+        };
+        Ok(())
+    }).await
 }
 
 async fn apply_mesh_op(app: &tauri::AppHandle, operation: Value) -> Result<Value, String> {
@@ -2202,6 +2442,31 @@ fn image_relief_operation(
     }), source_sha256))
 }
 
+async fn image_settings_sha256(
+    app: &tauri::AppHandle,
+    path: &str,
+    operation: &Value,
+    source_sha256: &str,
+    revision: u64,
+) -> Result<String, String> {
+    let mut settings = operation.as_object().cloned().unwrap_or_default();
+    for key in ["op", "format", "source_base64", "source_name"] {
+        settings.remove(key);
+    }
+    settings.insert("path".into(), json!(path));
+    settings.insert("source_sha256".into(), json!(source_sha256));
+    let result = worker_call(app, "image_relief_settings_hash", Value::Object(settings), revision).await?;
+    result["settings_sha256"].as_str().map(String::from)
+        .ok_or_else(|| geo_err("image_preview_invalid", "Не удалось проверить настройки предпросмотра."))
+}
+
+fn validate_image_settings_hash(expected: &str, actual: &str) -> Result<(), String> {
+    if expected.is_empty() || expected != actual {
+        return Err(geo_err("image_settings_changed", "Настройки изменились после preview. Выполните preview повторно."));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn image_relief_preview(
     app: tauri::AppHandle,
@@ -2219,10 +2484,12 @@ async fn image_relief_preview(
         &path, &model, seed, width_mm, relief_height, base_thickness,
         samples, noise_strength, invert, None)?;
     let revision = with_store(|store| active_doc(store).revision).await;
+    let settings_sha256 = image_settings_sha256(&app, &path, &operation, &source_sha256, revision).await?;
     let mut params = operation.as_object().cloned().unwrap_or_default();
     params.remove("op");
     let mut result = worker_call(&app, "image_relief_preview", Value::Object(params), revision).await?;
     result["source_sha256"] = json!(source_sha256);
+    result["settings_sha256"] = json!(settings_sha256);
     Ok(result)
 }
 
@@ -2239,20 +2506,23 @@ async fn doc_image_relief_apply(
     noise_strength: f64,
     invert: bool,
     expected_sha256: String,
+    expected_settings_sha256: String,
 ) -> Result<Value, String> {
-    let (operation, _) = image_relief_operation(
+    let (operation, source_sha256) = image_relief_operation(
         &path, &model, seed, width_mm, relief_height, base_thickness,
         samples, noise_strength, invert, Some(&expected_sha256))?;
-    with_store(|store| {
-        active_doc(store).commit(Snapshot {
+    let revision = with_store(|store| active_doc(store).revision).await;
+    let actual_settings_sha256 = image_settings_sha256(&app, &path, &operation, &source_sha256, revision).await?;
+    validate_image_settings_hash(&expected_settings_sha256, &actual_settings_sha256)?;
+    edit_snapshot(&app, |snapshot| {
+        *snapshot = Snapshot {
             parts: vec![],
             expressions: BTreeMap::new(),
             operations: vec![operation],
             part_n: 0,
-        });
-    }).await;
-    rebuild_committed_active(&app).await;
-    Ok(current_state().await)
+        };
+        Ok(())
+    }).await
 }
 
 #[tauri::command]
@@ -2392,7 +2662,7 @@ fn spawn_autosave() {
         loop {
             interval.tick().await;
             let _ = with_store(|s| {
-                for doc in [&mut s.main, &mut s.tutorial] {
+                for doc in [&mut s.main] {
                     if doc.dirty {
                         if let Some(path) = doc.path.clone() {
                             if save_document(doc, &path).is_ok() {
@@ -2409,10 +2679,24 @@ fn spawn_autosave() {
 
 fn main() {
     tauri::Builder::default()
+        .menu(application_menu)
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == QUIT_MENU_ID {
+                request_application_close(app.clone());
+            }
+        })
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && !CLOSE_CONFIRMED.load(std::sync::atomic::Ordering::SeqCst) {
+                    api.prevent_close();
+                    request_application_close(window.app_handle().clone());
+                }
+            }
+        })
         .setup(|app| {
             if let Ok(config_dir) = app.path().app_config_dir() {
                 ai::initialize(&config_dir);
@@ -2473,6 +2757,8 @@ fn main() {
             doc_get_imported_mesh,
             doc_get_imported_mesh_binary,
             doc_save,
+            doc_save_main,
+            doc_confirm_close,
             doc_open,
             doc_export,
             doc_export_stl,
@@ -2493,8 +2779,16 @@ fn main() {
             native_e2e_config,
             native_e2e_report,
         ])
-        .run(tauri::generate_context!())
-        .expect("ошибка запуска PrintForge");
+        .build(tauri::generate_context!())
+        .expect("ошибка запуска PrintForge")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if !CLOSE_CONFIRMED.load(std::sync::atomic::Ordering::SeqCst) {
+                    api.prevent_exit();
+                    request_application_close(app.clone());
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -2556,23 +2850,110 @@ mod mesh_tests {
     }
 
     #[test]
-    fn failed_committed_rebuild_restores_confirmed_snapshot() {
+    fn every_failed_candidate_preserves_redo_and_saved_state() {
         let mut document = Document::new();
         let mut confirmed = Snapshot::default();
         confirmed.parts.push(json!({"part_id": "part-1", "params": {"length": 80}}));
         confirmed.part_n = 1;
         document.commit(confirmed);
 
-        let mut pending = document.snap.clone();
-        pending.parts[0]["params"]["length"] = json!(120);
-        document.commit(pending);
-        document.error = Some(json!({"code": "geometry_cancelled"}));
-        rollback_failed_commit(&mut document);
+        document.commit(document.snap.clone());
+        document.index -= 1;
+        document.snap = document.history[document.index].clone();
+        document.dirty = false;
+        document.revision = 7;
+        document.path = Some(PathBuf::from("confirmed.printforge"));
+        document.stats = Some(json!({"volume": 24000}));
+        document.mesh = Some(json!({"path": "confirmed.mesh"}));
+        for operation in ["vector_extrude", "mesh_repair", "mesh_decimate", "profile_extrude", "transform", "parameter.set"] {
+            document.error = None;
+            let before = document.state("main");
+            let mut candidate = document.candidate(document.snap.clone());
+            candidate.snap.operations.push(json!({"op": operation}));
+            candidate.revision += 1;
+            candidate.error = Some(json!({"code": "geometry_error"}));
+            document.apply_built_candidate(candidate).unwrap();
+            let mut after = document.state("main");
+            after["error"] = Value::Null;
+            assert_eq!(after, before, "{operation}");
+            assert_eq!(document.history.len(), 3);
+            assert_eq!(document.index, 1);
+        }
+    }
 
-        assert_eq!(document.snap.parts[0]["params"]["length"], 80);
-        assert_eq!(document.index, 1);
+    #[test]
+    fn opening_invalid_geometry_is_atomic_and_valid_open_changes_instance() {
+        let mut document = Document::new();
+        document.snap.parts.push(json!({"part_id": "part-1", "params": {"length": 55}}));
+        document.commit(document.snap.clone());
+        document.revision = 9;
+        document.stats = Some(json!({"volume": 33000}));
+        let before = document.state("main");
+        let instance = document.document_instance_id;
+        let mut invalid = Document::new();
+        invalid.snap.parts.push(json!({"params": {"length": -10}}));
+        invalid.error = Some(json!({"code": "bad_params"}));
+        assert!(replace_built_document(&mut document, invalid, instance, 9).is_err());
+        assert_eq!(document.state("main"), before);
+        let mut valid = Document::new();
+        valid.snap.parts.push(json!({"params": {"length": 40}}));
+        valid.stats = Some(json!({"volume": 24000}));
+        valid.revision = 1;
+        valid.path = Some(PathBuf::from("opened.printforge"));
+        replace_built_document(&mut document, valid, instance, 9).unwrap();
+        assert_ne!(document.document_instance_id, instance);
+        assert!(!document.dirty);
+        assert_eq!(document.stats.unwrap()["volume"], 24000);
+    }
+
+    #[test]
+    fn close_confirmation_requires_saved_or_explicit_discard_and_current_identity() {
+        let mut document = Document::new();
+        document.dirty = true;
+        let instance = document.document_instance_id;
+        assert!(confirm_close_document(&document, instance, 0, false, false).unwrap_err().contains("document_unsaved"));
+        assert!(confirm_close_document(&document, instance, 0, true, false).is_ok());
+        assert!(confirm_close_document(&document, instance + 1, 0, true, false).is_err());
+        assert!(confirm_close_document(&document, instance, 1, true, false).is_err());
+        assert!(confirm_close_document(&document, instance, 0, true, true).unwrap_err().contains("document_busy"));
+        document.dirty = false;
+        assert!(confirm_close_document(&document, instance, 0, false, false).is_ok());
+        assert!(confirm_close_document(&document, instance, 0, false, true).unwrap_err().contains("document_busy"));
+    }
+
+    #[test]
+    fn image_apply_requires_the_actual_preview_settings_hash() {
+        assert!(validate_image_settings_hash("", "current").is_err());
+        assert!(validate_image_settings_hash("old", "current").unwrap_err().contains("image_settings_changed"));
+        assert!(validate_image_settings_hash("current", "current").is_ok());
+    }
+
+    #[test]
+    fn failed_undo_preserves_history_and_successful_undo_keeps_redo_branch() {
+        let mut document = Document::new();
+        let mut snapshot = Snapshot::default();
+        snapshot.parts.push(json!({"part_id": "part-1", "params": {"length": 40}}));
+        document.commit(snapshot);
+        document.revision = 3;
+        document.dirty = false;
+        document.stats = Some(json!({"volume": 24000}));
+        let before = document.state("main");
+        let mut failed = document.candidate(document.history[0].clone());
+        failed.revision = 4;
+        failed.error = Some(json!({"code": "geometry_cancelled"}));
+        apply_history_candidate(&mut document, failed, 0).unwrap();
+        let mut after = document.state("main");
+        after["error"] = Value::Null;
+        assert_eq!(after, before);
+        let mut valid = document.candidate(document.history[0].clone());
+        valid.revision = 4;
+        valid.stats = None;
+        valid.mesh = None;
+        apply_history_candidate(&mut document, valid, 0).unwrap();
+        assert_eq!(document.index, 0);
         assert_eq!(document.history.len(), 2);
-        assert_eq!(document.error.as_ref().unwrap()["code"], "geometry_cancelled");
+        assert_eq!(document.state("main")["can_redo"], true);
+        assert_eq!(document.revision, 4);
     }
 
     #[test]
@@ -2593,6 +2974,8 @@ mod mesh_tests {
             document.snap.parts[0]["template"] = json!(template);
             assert_eq!(document_schema_version(&document), 4);
         }
+        document.snap.operations.push(json!({"op": "step_source"}));
+        assert_eq!(document_schema_version(&document), 5);
     }
 
     #[test]

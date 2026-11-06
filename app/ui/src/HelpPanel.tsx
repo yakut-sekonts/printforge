@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { HelpArticle, HelpIndex, Lesson, CommandDef } from "./types";
 import { Markdown, highlight } from "./markdown";
 import { IconBack, IconClose, IconSearch } from "./icons";
+import type { CommandRevealResult } from "./revealCommand";
 
 export type TooltipMode = "teaching" | "brief" | "off";
 
@@ -14,7 +15,7 @@ interface Props {
   tooltipMode: TooltipMode;
   onTooltipMode: (m: TooltipMode) => void;
   openArticleRequest: { helpId: string; seq: number } | null;
-  highlightCommand: (commandId: string) => void;
+  highlightCommand: (commandId: string) => CommandRevealResult | Promise<CommandRevealResult> | void;
 }
 
 type View = { kind: "toc" } | { kind: "article"; article: HelpArticle };
@@ -26,19 +27,28 @@ export function HelpPanel(props: Props) {
   const [view, setView] = useState<View>({ kind: "toc" });
   const [history, setHistory] = useState<View[]>([]);
   const [width, setWidth] = useState(380);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [commandMessage, setCommandMessage] = useState("");
+  const handledArticle = useRef<number | null>(null);
+  const resizeCleanup = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let alive = true;
+    setLoadFailed(false);
+    setIndex(null);
     fetch("/help/index.json")
       .then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
       .then((d: HelpIndex) => { if (alive) setIndex({ articles: Array.isArray(d?.articles) ? d.articles : [] }); })
       .catch(() => { if (alive) { setLoadFailed(true); setIndex({ articles: [] }); } });
     return () => { alive = false; };
-  }, []);
+  }, [loadAttempt]);
+
+  useEffect(() => () => resizeCleanup.current?.(), []);
 
   const openArticle = (a: HelpArticle) => {
     setHistory((h) => [...h, view]);
     setView({ kind: "article", article: a });
+    setCommandMessage("");
   };
 
   const openById = (helpId: string) => {
@@ -47,7 +57,11 @@ export function HelpPanel(props: Props) {
   };
 
   useEffect(() => {
-    if (props.openArticleRequest) openById(props.openArticleRequest.helpId);
+    if (props.openArticleRequest && handledArticle.current !== props.openArticleRequest.seq
+      && index?.articles.some((article) => article.help_id === props.openArticleRequest?.helpId)) {
+      handledArticle.current = props.openArticleRequest.seq;
+      openById(props.openArticleRequest.helpId);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.openArticleRequest?.seq, index]);
 
@@ -72,25 +86,41 @@ export function HelpPanel(props: Props) {
 
   const startResize = (e: React.PointerEvent) => {
     e.preventDefault();
+    resizeCleanup.current?.();
     const startX = e.clientX;
     const startW = width;
     const move = (ev: PointerEvent) => {
-      const w = Math.min(560, Math.max(380, startW + (startX - ev.clientX)));
+      const w = Math.min(560, window.innerWidth - 16, Math.max(240, startW + (startX - ev.clientX)));
       setWidth(w);
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      window.removeEventListener("blur", up);
+      resizeCleanup.current = null;
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    window.addEventListener("blur", up);
+    resizeCleanup.current = up;
+  };
+
+  const showCommand = async (commandId: string) => {
+    try {
+      const result = await props.highlightCommand(commandId);
+      setCommandMessage(result?.message ?? "Проверьте выделенную команду в интерфейсе. Действие не выполнялось.");
+    } catch {
+      setCommandMessage("Не удалось показать команду. Условия выбора и расположение описаны в этой статье.");
+    }
   };
 
   const articleCommands = (a: HelpArticle) =>
     a.commands.map((id) => props.commands.find((c) => c.command_id === id)).filter(Boolean) as CommandDef[];
 
   return (
-    <aside className="help-panel" style={{ width }} aria-label="Справочник">
+    <aside className="help-panel" style={{ width, maxWidth: "calc(100% - 16px)" }} aria-label="Справочник">
       <div className="help-resize" onPointerDown={startResize} aria-hidden />
       <header className="help-header">
         {history.length > 0 && (
@@ -117,7 +147,7 @@ export function HelpPanel(props: Props) {
             />
           </div>
 
-          {query ? (
+          {query.trim() ? (
             <section>
               {results.length === 0 && <p className="help-empty">Ничего не найдено{loadFailed ? " (индекс справки недоступен)" : ""}.</p>}
               {results.map((a) => {
@@ -140,8 +170,11 @@ export function HelpPanel(props: Props) {
                 <h3 className="help-section">Оглавление</h3>
                 {index === null && <p className="help-empty">Загрузка…</p>}
                 {index?.articles.length === 0 && (
-                  <p className="help-empty">Статьи ещё не добавлены — справочник заполняется.</p>
+                  <p className="help-empty" role={loadFailed ? "alert" : undefined}>
+                    {loadFailed ? "Индекс справки недоступен. Локальные материалы не загрузились." : "Статьи ещё не добавлены — справочник заполняется."}
+                  </p>
                 )}
+                {loadFailed && <button className="btn" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>Повторить загрузку справки</button>}
                 <ul className="help-toc">
                   {index?.articles.map((a) => (
                     <li key={a.help_id}>
@@ -191,12 +224,13 @@ export function HelpPanel(props: Props) {
           {articleCommands(view.article).length > 0 && (
             <div className="help-show-ui">
               {articleCommands(view.article).map((c) => (
-                <button key={c.command_id} className="btn" onClick={() => props.highlightCommand(c.command_id)}>
+                <button key={c.command_id} className="btn" onClick={() => void showCommand(c.command_id)}>
                   Показать в интерфейсе: {c.title}
                 </button>
               ))}
             </div>
           )}
+          {commandMessage && <p className="help-command-message" role="status">{commandMessage}</p>}
           {view.article.related.length > 0 && (
             <div className="help-related">
               <h3 className="help-section">См. также</h3>

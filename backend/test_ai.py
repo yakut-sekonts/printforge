@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from worker import handle_resolve_parameters
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import ai_planner  # noqa: E402
 import dev_shim  # noqa: E402
@@ -332,8 +334,12 @@ def test_ai_transaction_single_undo_clears_derived_geometry(monkeypatch):
     monkeypatch.setitem(dev_shim.DOCS, "main", document)
     monkeypatch.setitem(dev_shim.DOCS, "tutorial", dev_shim.Doc())
     dev_shim.ACTIVE[0] = "main"
+    worker_methods = []
 
     def fake_worker_call(method, params, revision=0):
+        worker_methods.append(method)
+        if method == "resolve_parameters":
+            return handle_resolve_parameters(params)
         assert method == "build"
         return {
             "stats": {
@@ -362,6 +368,10 @@ def test_ai_transaction_single_undo_clears_derived_geometry(monkeypatch):
     })
     assert applied["stats"]["volume"] == 1143.5
     assert applied["can_undo"] is True
+    assert applied["history_len"] == 2
+    assert applied["parts"][0]["params"] == {
+        "outer_diameter": 20, "inner_diameter": 6, "height": 4,
+    }
 
     undone = dev_shim.cmd_doc_undo({})
     assert undone["parts"] == []
@@ -369,3 +379,4 @@ def test_ai_transaction_single_undo_clears_derived_geometry(monkeypatch):
     assert undone["can_undo"] is False
     assert undone["can_redo"] is True
     assert undone["revision"] == 2
+    assert worker_methods == ["resolve_parameters", "build"]

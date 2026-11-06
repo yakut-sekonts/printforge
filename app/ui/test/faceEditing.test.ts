@@ -87,6 +87,20 @@ test("якоря face feature и bend считаются относительн�
   assert.equal(resolveFaceFeatureTarget(mesh, 1, "box-a", [1]), null);
 });
 
+test("центральная верхняя грань остаётся доступной для следующего изгиба после подъёма фланца", () => {
+  const mesh = boxScene([
+    { min: [-20, -20, 0], max: [20, 20, 6] },
+    { min: [20, -20, 0], max: [26, 20, 30] },
+  ]);
+  const target = resolveSheetBendTarget(mesh, 1, "plate", [0, 1]);
+  assert.ok(target);
+  assert.equal(target.atBoundary, false);
+  assert.equal(target.axis, "z");
+  assert.equal(target.side, 1);
+  assert.equal(resolveFaceFeatureTarget(mesh, 1, "plate", [0, 1]), null);
+  assert.equal(resolveSheetBendTarget(mesh, 0, "plate", [0, 1]), null);
+});
+
 test("bounds включают все solids выбранной детали", () => {
   const mesh = boxScene([
     { min: [0, 0, 0], max: [10, 10, 5] },

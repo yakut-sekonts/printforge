@@ -3,7 +3,7 @@
   "lessons": [
     {
       "lesson_id": "navigation",
-      "content_version": 2,
+      "content_version": 3,
       "title": "Навигация по сцене",
       "goal": "Научиться вращать, приближать и выбирать деталь",
       "skills": [
@@ -49,14 +49,15 @@
           "id": "n5",
           "text": "Щёлкните по верхней плоской стороне: это грань. Она подсветится, а рядом с моделью появятся действия для выбранной области.",
           "check": {
-            "type": "face_selected"
+            "type": "face_selected",
+            "normal": [0, 0, 1]
           }
         }
       ]
     },
     {
       "lesson_id": "first-part",
-      "content_version": 2,
+      "content_version": 3,
       "title": "Первая модель из простой формы",
       "goal": "Выбрать параллелепипед, изменить его грань и переместить тело на сцене",
       "skills": [
@@ -85,7 +86,8 @@
           "id": "p2",
           "text": "Щёлкните по верхней грани. В подсказке у модели появятся доступные действия, а оранжевая стрелка позволит изменить высоту.",
           "check": {
-            "type": "face_selected"
+            "type": "face_selected",
+            "normal": [0, 0, 1]
           }
         },
         {
@@ -93,7 +95,11 @@
           "text": "У выбранной верхней грани задайте «Смещение грани» 5 мм и примените: верх поднимется на 5 мм, высота станет 25 мм. Грань также можно тянуть оранжевой стрелкой, наблюдая размер на сцене.",
           "check": {
             "type": "operation",
-            "op": "face_offset"
+            "op": "face_offset",
+            "distance": 5,
+            "normal": [0, 0, 1],
+            "bbox_size": [40, 30, 25],
+            "volume": 30000
           }
         },
         {
@@ -101,7 +107,9 @@
           "text": "В действиях у модели нажмите «Переместить тело» и потяните любую стрелку X, Y или Z. При движении показано смещение в миллиметрах. Отпустите мышь, чтобы применить.",
           "check": {
             "type": "operation",
-            "op": "transform"
+            "op": "transform",
+            "nonzero_translate": true,
+            "bbox_size": [40, 30, 25]
           }
         },
         {
@@ -109,14 +117,16 @@
           "text": "Нажмите «Отменить» (Cmd/Ctrl+Z) один раз. Тело вернётся на прежнее место, а высота 25 мм сохранится: каждое подтверждённое действие отменяется отдельно.",
           "check": {
             "type": "command",
-            "command_id": "op.undo"
+            "command_id": "op.undo",
+            "bbox": [-20, -15, 0, 20, 15, 25],
+            "volume": 30000
           }
         }
       ]
     },
     {
       "lesson_id": "save-export",
-      "content_version": 2,
+      "content_version": 3,
       "title": "Сохранение, открытие и экспорт",
       "goal": "Сохранить проект, открыть его заново и выгрузить STL для слайсера",
       "skills": [
@@ -142,30 +152,46 @@
           "id": "s2",
           "text": "Нажмите «Сохранить проект» (Cmd/Ctrl+S) и подтвердите путь учебного файла. Другой путь можно указать в группе «Файл проекта и экспорт» справа.",
           "check": {
-            "type": "saved"
+            "type": "saved",
+            "bbox_size": [40, 30, 20]
           }
         },
         {
           "id": "s3",
-          "text": "Выберите верхнюю грань и задайте смещение 5 мм: высота станет 25 мм. Затем откройте сохранённый проект заново (Cmd/Ctrl+O): вернётся высота 20 мм.",
+          "text": "Выберите верхнюю грань и задайте смещение 5 мм: высота станет 25 мм. Пока не сохраняйте изменённую модель поверх учебного файла.",
+          "check": {
+            "type": "operation",
+            "op": "face_offset",
+            "distance": 5,
+            "normal": [0, 0, 1],
+            "bbox_size": [40, 30, 25]
+          }
+        },
+        {
+          "id": "s4",
+          "text": "Откройте ранее сохранённый учебный проект (Cmd/Ctrl+O), указав тот же путь: должен вернуться габарит 40 × 30 × 20 мм. Учебный слот не перезаписывает файл автоматически.",
           "check": {
             "type": "reopened",
+            "same_saved_path": true,
+            "bbox_size": [40, 30, 20],
             "params": {
               "height": 20
             }
           }
         },
         {
-          "id": "s4",
+          "id": "s5",
           "text": "Нажмите «Экспортировать STL» и подтвердите путь. Проверьте сообщение о размере файла и объёме.",
           "check": {
-            "type": "exported"
+            "type": "exported",
+            "format": "stl"
           }
         }
       ]
     },
     {
       "lesson_id": "washer",
+      "content_version": 2,
       "title": "Втулка и шайба",
       "goal": "Создать шайбу с заданными диаметрами и высотой",
       "skills": [
@@ -195,14 +221,17 @@
             "type": "params",
             "params": {
               "outer_diameter": 24,
-              "inner_diameter": 6
-            }
+              "inner_diameter": 6,
+              "height": 4
+            },
+            "bbox_size": [24, 24, 4]
           }
         }
       ]
     },
     {
       "lesson_id": "case-lid",
+      "content_version": 2,
       "title": "Корпус с крышкой",
       "goal": "Собрать корпус и крышку с зазором 0,2 мм",
       "skills": [
@@ -220,6 +249,8 @@
             "template": "case_with_lid",
             "params": {
               "length": 100,
+              "width": 60,
+              "height": 30,
               "wall": 2,
               "bottom": 2
             }
@@ -227,9 +258,10 @@
         },
         {
           "id": "c2",
-          "text": "Проверьте зазор: он задан как 0,2 мм на одну сторону. Найдите крышку в списке деталей.",
+          "text": "Раскройте размеры корпуса и проверьте зазор 0,2 мм на сторону. В списке виден один составной объект «Корпус», содержащий два тела: корпус и крышку. После проверки нажмите «Подтвердить проверку» в панели урока.",
           "check": {
-            "type": "params",
+            "type": "inspection",
+            "solid_count": 2,
             "params": {
               "gap": 0.2
             }
@@ -243,13 +275,16 @@
             "params": {
               "length": 120,
               "gap": 0.2
-            }
+            },
+            "bbox_size": [120, 60, 32],
+            "solid_count": 2
           }
         }
       ]
     },
     {
       "lesson_id": "fillet-fix",
+      "content_version": 2,
       "title": "Скругление и исправление ошибки",
       "goal": "Скруглить ребро и справиться с невозможным радиусом",
       "skills": [
@@ -270,24 +305,28 @@
         },
         {
           "id": "f2",
-          "text": "Нажмите «Скруглить» и выберите длинное вертикальное ребро стойки. Задайте радиус 2 мм.",
+          "text": "Нажмите «Скруглить ребро», выберите длинное внешнее вертикальное ребро стойки (30 мм), задайте радиус 2 мм и нажмите «Применить». После операции инструмент закрывается, а ребро нужно выбирать заново.",
           "check": {
             "type": "operation",
             "op": "fillet",
-            "radius": 2
+            "radius": 2,
+            "bbox_size": [40, 30, 30],
+            "volume": 10974.2477796077
           }
         },
         {
           "id": "f3",
-          "text": "Теперь задайте радиус 50 мм. Прочитайте сообщение об ошибке: прежняя модель сохранилась.",
+          "text": "Снова нажмите «Скруглить ребро» и выберите другое прямое ребро. Задайте радиус 50 мм и примените. Прочитайте отказ и убедитесь, что прежняя модель осталась на сцене.",
           "check": {
             "type": "error_shown",
-            "code": "fillet_failed"
+            "code": "fillet_failed",
+            "radius": 50,
+            "volume": 10974.2477796077
           }
         },
         {
           "id": "f4",
-          "text": "Верните радиус 2 мм и примените — ошибка исчезнет.",
+          "text": "Нажмите «Закрыть ошибку», снова включите «Скруглить ребро» и выберите подходящее прямое ребро. Введите 2 мм и примените: новое скругление должно успешно построиться.",
           "check": {
             "type": "operation",
             "op": "fillet",
@@ -298,6 +337,7 @@
     },
     {
       "lesson_id": "import",
+      "content_version": 2,
       "title": "Импорт STEP и STL",
       "goal": "Открыть чужую модель и понять различия форматов",
       "skills": [
@@ -309,24 +349,27 @@
       "steps": [
         {
           "id": "i1",
-          "text": "Импортируйте STL (например, ~/plate.stl из урока 3). Посмотрите габарит и подтвердите единицы — миллиметры.",
+          "text": "В группе «Импорт модели» откройте закрытый STL, например файл из урока 3. Проверьте габарит и нажмите «Единицы — миллиметры»: сетка должна быть применена к учебному документу.",
           "check": {
-            "type": "imported",
-            "mode": "mesh"
+            "type": "mesh_source_applied",
+            "mesh_mode": true,
+            "boundary_edges": 0
           }
         },
         {
           "id": "i2",
-          "text": "Найдите в левой панели пометку «сетка»: точные операции для неё не предлагаются.",
+          "text": "Найдите группу «Работа с сеткой» справа: исходник встроен в проект, открытых рёбер должно быть 0. Это mesh, а не точное BRep-тело. Нажмите «Подтвердить проверку» в панели урока; повторно импортировать файл не нужно.",
           "check": {
-            "type": "imported",
-            "mode": "mesh"
+            "type": "mesh_inspected",
+            "mesh_mode": true,
+            "boundary_edges": 0
           }
         }
       ]
     },
     {
       "lesson_id": "print-check",
+      "content_version": 2,
       "title": "Проверка печати",
       "goal": "Проверить модель и понять статус «Не проверено»",
       "skills": [
@@ -342,7 +385,10 @@
           "check": {
             "type": "check_result",
             "id": "bed_fit",
-            "status": "fail"
+            "status": "fail",
+            "params": {
+              "length": 230
+            }
           }
         },
         {
@@ -351,22 +397,25 @@
           "check": {
             "type": "check_result",
             "id": "bed_fit",
-            "status": "pass"
+            "status": "pass",
+            "params": {
+              "length": 200
+            }
           }
         },
         {
           "id": "k3",
-          "text": "Найдите проверку «Минимальная стенка»: её статус — «Не проверено», а не зелёная галочка.",
+          "text": "Найдите результат «Минимальная стенка»: он должен оставаться «Не проверено», а не зелёной галочкой. Затем нажмите «Подтвердить проверку» в панели урока.",
           "check": {
-            "type": "check_result",
-            "id": "wall_thickness",
-            "status": "unknown"
+            "type": "inspection",
+            "required_check": {"id": "wall_thickness", "status": "unknown"}
           }
         }
       ]
     },
     {
       "lesson_id": "ai-assistant",
+      "content_version": 2,
       "title": "AI-помощник: первый план",
       "goal": "Создать деталь по текстовому запросу и отменить её одним действием",
       "skills": [
@@ -381,13 +430,15 @@
           "id": "a1",
           "text": "Откройте панель AI-помощника и попросите: «Создай шайбу: наружный диаметр 20 мм, внутренний 6 мм, высота 4 мм». Проверьте план и предпросмотр (объём 1 143,5 мм³), затем нажмите «Применить».",
           "check": {
-            "type": "params",
+            "type": "ai_applied",
             "template": "washer",
             "params": {
               "outer_diameter": 20,
               "inner_diameter": 6,
               "height": 4
-            }
+            },
+            "solid_count": 1,
+            "volume": 1143.5397259066847
           }
         },
         {
@@ -395,13 +446,15 @@
           "text": "Нажмите ⌘Z один раз: вся AI-операция отменена, деталь исчезла.",
           "check": {
             "type": "command",
-            "command_id": "op.undo"
+            "command_id": "op.undo",
+            "solid_count": 0
           }
         }
       ]
     },
     {
       "lesson_id": "advanced-bodies",
+      "content_version": 2,
       "title": "Расширенные тела M4",
       "goal": "Создать operation-only тело по эскизу, добавить оболочку и отменить только последнюю операцию",
       "skills": [
@@ -414,22 +467,23 @@
         {
           "id": "m4-1",
           "text": "В правой панели раскройте «Другие способы создания», выберите «Эскиз → выдавливание», оставьте 40 × 20 × 5 мм и отверстие Ø10, затем нажмите «Создать по эскизу».",
-          "check": {"type": "operation", "op": "sketch_extrude"}
+          "check": {"type": "operation", "op": "sketch_extrude", "bbox_size": [40, 20, 5], "solid_count": 1, "volume": 3607.300918301276}
         },
         {
           "id": "m4-2",
           "text": "Выберите «Цилиндрическая оболочка» и создайте preset R10, высотой 20 мм, со стенкой 2 мм и дном 3 мм.",
-          "check": {"type": "operation", "op": "shell"}
+          "check": {"type": "operation", "op": "shell", "bbox_size": [40, 20, 20], "solid_count": 2}
         },
         {
           "id": "m4-3",
           "text": "Нажмите ⌘Z один раз. Оболочка исчезнет, а первое эскизное тело останется в документе.",
-          "check": {"type": "command", "command_id": "op.undo"}
+          "check": {"type": "command", "command_id": "op.undo", "bbox_size": [40, 20, 5], "solid_count": 1}
         }
       ]
     },
     {
       "lesson_id": "constraint-solver",
+      "content_version": 2,
       "title": "Ограничения эскиза",
       "goal": "Проверить степени свободы и применить полностью определённый эскиз",
       "skills": ["Constraint preview", "Residual и DOF", "Одна транзакция"],
@@ -438,22 +492,23 @@
         {
           "id": "cs-1",
           "text": "Раскройте «Другие способы создания» справа. Выберите «Эскиз с ограничениями», оставьте 40 × 20 мм и нажмите «Проверить ограничения». Убедитесь, что показано 0 DOF.",
-          "check": {"type": "command", "command_id": "op.sketch.solve"}
+          "check": {"type": "sketch_solved", "degrees_of_freedom": 0, "solid_count": 0}
         },
         {
           "id": "cs-2",
           "text": "Нажмите «Создать тело»: решённый эскиз выдавится одной операцией.",
-          "check": {"type": "operation", "op": "constrained_sketch_extrude"}
+          "check": {"type": "operation", "op": "constrained_sketch_extrude", "bbox_size": [40, 20, 5], "solid_count": 1, "volume": 4000}
         },
         {
           "id": "cs-3",
           "text": "Нажмите ⌘Z один раз, чтобы отменить всё тело.",
-          "check": {"type": "command", "command_id": "op.undo"}
+          "check": {"type": "command", "command_id": "op.undo", "solid_count": 0}
         }
       ]
     },
     {
       "lesson_id": "mesh-repair",
+      "content_version": 2,
       "title": "Ремонт STL mesh",
       "goal": "Встроить STL с отверстием, закрыть поддерживаемый дефект и проверить Undo",
       "skills": ["Embedded mesh source", "Boundary diagnostics", "Mesh Undo"],
@@ -462,22 +517,23 @@
         {
           "id": "mr-1",
           "text": "Раскройте «Импорт модели» справа. Импортируйте STL с одним квадратным отверстием, выберите исходные единицы и примените его как mesh-документ.",
-          "check": {"type": "operation", "op": "mesh_source"}
+          "check": {"type": "mesh_source_applied", "mesh_mode": true, "boundary_edges": 4}
         },
         {
           "id": "mr-2",
           "text": "В группе «Работа с сеткой» нажмите «Закрыть поддерживаемое отверстие» и проверьте, что число открытых рёбер стало 0.",
-          "check": {"type": "operation", "op": "mesh_repair"}
+          "check": {"type": "operation", "op": "mesh_repair", "mesh_mode": true, "boundary_edges": 0}
         },
         {
           "id": "mr-3",
           "text": "Нажмите ⌘Z: исходная сетка с дефектом вернётся.",
-          "check": {"type": "command", "command_id": "op.undo"}
+          "check": {"type": "command", "command_id": "op.undo", "mesh_mode": true, "boundary_edges": 4}
         }
       ]
     },
     {
       "lesson_id": "image-relief",
+      "content_version": 2,
       "title": "Декоративный relief",
       "goal": "Построить preview по изображению, применить mesh и экспортировать STL",
       "skills": ["Image limits", "Preview и Apply", "Mesh-only export"],
@@ -485,18 +541,18 @@
       "steps": [
         {
           "id": "ir-1",
-          "text": "Раскройте «Рельеф по изображению» справа, укажите PNG/JPEG/WebP и нажмите Preview. Документ на этом шаге не меняется.",
-          "check": {"type": "command", "command_id": "op.image_relief.preview"}
+          "text": "Раскройте «Рельеф по изображению» справа и выберите градиент 64 × 32 px. Задайте ширину 40 мм, рельеф 4 мм, основание 2 мм, samples 64 и noise 0, затем Preview. Документ на этом шаге не меняется.",
+          "check": {"type": "image_preview", "preview": true, "bbox_size": [40, 20, 6]}
         },
         {
           "id": "ir-2",
           "text": "Проверьте размеры, model/seed и нажмите Apply.",
-          "check": {"type": "operation", "op": "image_relief_source"}
+          "check": {"type": "operation", "op": "image_relief_source", "mesh_mode": true, "bbox_size": [40, 20, 6], "boundary_edges": 0}
         },
         {
           "id": "ir-3",
           "text": "Экспортируйте decorative mesh в STL или 3MF. STEP для mesh-only документа недоступен.",
-          "check": {"type": "exported"}
+          "check": {"type": "exported", "formats": ["stl", "3mf"]}
         }
       ]
     }

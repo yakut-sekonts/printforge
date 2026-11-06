@@ -6,7 +6,8 @@
 
 ```jsonc
 {
-  "doc_id": "doc-3",           // меняется при open/new (страж устаревших ответов — по паре doc_id+revision)
+  "doc_id": "doc-3",
+  "document_instance_id": 12,
   "revision": 3, "dirty": true,
   "path": "/…/case.printforge" | null,
   "slot": "main" | "tutorial",
@@ -28,6 +29,8 @@
   "history_len": 3, "history_index": 2
 }
 ```
+
+`doc_id` — идентичность проекта, сохраняемая как `document_id` в файле; повторное открытие может сохранить этот ID. `document_instance_id` — идентичность текущего runtime-экземпляра: меняется при открытии/создании документа, не восстанавливается из файла. Ответ с меньшей `revision` отклоняется только внутри совпадающего `(slot, doc_id, document_instance_id)`. Новый экземпляр принимается даже с меньшей revision: старое состояние сцены не должно подменять вновь открытый файл. Измерения, previews, выбор и результаты печатных проверок инвалидируются при смене экземпляра или revision.
 
 Коды ошибок: `bad_value`, `bad_params`, `no_model`, `fillet_failed`, `chamfer_failed`, `dome_failed`, `bend_failed`, `reselect_required` (нужен повторный выбор ребра или грани), `bad_file`, `worker_terminated`, `geometry_error`.
 
@@ -66,20 +69,47 @@
 - Native Tauri: `doc_get_mesh_meta()` → `{bytes, sha256, vertex_count, triangle_count, face_ranges}`, затем `doc_get_mesh_binary({expected_sha256})` → raw `ArrayBuffer`. SHA-256 связывает обе фазы и исключает выдачу устаревшего ресурса при перестроении модели; повреждённые, усечённые и расширенные buffers отклоняются.
 - Native import: `doc_get_imported_mesh_binary({path, expected_sha256})` → raw `ArrayBuffer`; path берётся только из результата `doc_import`, содержимое обязательно проверяется по SHA-256.
 - Binary mesh layout little-endian: `u32 vertex_count`, `u32 triangle_count`, затем `vertex_count × 3` значений `f32` и `triangle_count × 3` индексов `u32`. В WebView данные декодируются в typed-array views без JSON-раздувания; преобразование CAD → Three.js выполняется только для positions.
-- `doc_save({path})` / `doc_open({path})` → DocState. Формат v3 (parts+operations), читает прежние template-документы и operation-only M4-документы.
+- `MeshResource`: выданная пара `path`/`sha256` описывает неизменяемые bytes. Preview, candidate build, импорт и переключение main/tutorial не перезаписывают ресурс старого descriptor. Клиент считает path непрозрачным: не конструирует его из имени модели и всегда проверяет заявленный SHA-256. Session resources адресуются содержимым и дедуплицируются по SHA; старые ресурсы сохраняются для main/tutorial и восстановления подтверждённых состояний. GC вне текущего scope: ресурс нельзя удалять, пока на него ссылается существующий `DocState`; descriptor не обещает вечного хранения вне сессии.
+- `doc_save({path})` / `doc_open({path})` → DocState. Читает прежние template- и operation-only документы, схемы до 5 включительно. Открытие строит candidate до замены активного документа; ошибка оставляет прежнюю модель. Возвращённый после open экземпляр имеет новый `document_instance_id`, путь открытого файла и `dirty: false`.
 - `doc_export({path, format: "stl"|"step"|"3mf", linear_deflection?})` → `{path, bytes, format, stats}`.
-- `doc_import({path, format: "step"|"stl", unit_scale?})` → `{stats, mesh, mode: "brep"|"mesh"}`. Для STL `unit_scale` задаётся после показа габарита пользователю.
+- `doc_import({path, format: "step"|"stl", unit_scale?})` → `{stats, mesh, mode: "brep"|"mesh", document?: DocState}`. STEP — Open/New, не временный viewport preview и не добавление к старому проекту: после успешного построения атомарно заменяет активный слот новым документом с `step_source`, новым ID/instance, `path: null`, `dirty: true`; возвращает `mode: "brep"` и обязательный `document`. UI перед заменой dirty-документа запрашивает Save/Discard/Cancel. Native проверяет неизменность активного слота, instance и revision перед commit (`document_changed` при гонке). Неудачный импорт сохраняет прежний документ. Для STL `unit_scale` задаётся после показа габарита пользователю; применение сетки выполняет отдельный `doc_mesh_import_apply`.
 - `doc_mesh_import_apply({path, format: "stl"|"obj"|"ply", unit_scale})` → DocState. Встраивает source bytes и начинает отдельную mesh-history без симуляции параметрического BRep.
 - `doc_mesh_transform({translate, rotate_deg, scale})`, `doc_mesh_repair({action:"fill_holes"})`, `doc_mesh_decimate({target_ratio, minimum_ratio?, maximum_ratio?, volume_tolerance?})` → DocState. Repair закрывает только поддерживаемый boundary loop; decimation сохраняет компоненты/Euler number и публикует только sampled vertex error, не глобальный Hausdorff bound.
-- `image_relief_preview({path, model, seed, width_mm, relief_height, base_thickness, samples, noise_strength, invert})` → `{stats, mesh, source_sha256}` без commit. `doc_image_relief_apply({...settings, expected_sha256})` повторно проверяет source hash и создаёт experimental mesh-document одной транзакцией.
+- `image_relief_preview({path, model, seed, width_mm, relief_height, base_thickness, samples, noise_strength, invert})` → `{stats, mesh, source_sha256, settings_sha256}` без commit. `doc_image_relief_apply({...settings, expected_sha256, expected_settings_sha256})` → DocState одной транзакцией. Клиент передаёт `source_sha256` из Preview как `expected_sha256`, а `settings_sha256` — как `expected_settings_sha256`; сервер повторно вычисляет оба binding до изменения документа. Изменённый источник даёт `image_changed`; пустой/несовпадающий settings hash — `image_settings_changed`, необходим новый Preview. Внутренний worker RPC `image_relief_settings_hash` вычисляет SHA-256 канонического JSON с абсолютным нормализованным путём, source hash, model, seed, width_mm, relief_height, base_thickness, samples, noise_strength и invert; это не отдельная frontend-команда. Локальный UI `settings_key` — только ранняя проверка устаревшего Preview, не замена серверному binding.
 - `print_check({printer: {x, y, z}})` → `{checks: [{id, title, status: "pass"|"fail"|"unknown", detail?}]}`.
 - `doc_new_tutorial()` / `doc_switch_slot({slot})` → DocState.
 
 Обратная совместимость M1: `doc_create_plate`, `doc_export_stl` работают.
 
+## Формат проекта и embedded STEP
+
+`.printforge` — ZIP с `manifest.json` и `document.json`; source bytes находятся внутри операций, а не по внешним абсолютным путям. Схема выбирается по используемым возможностям: `step_source` → 5; box/cylinder/sphere, face_offset или split с separate=true → 4; остальные документы → 3. Обе JSON-записи содержат выбранный `schema_version`. Неизвестная более новая схема отклоняется как `unsupported_project_version`.
+
+Минимальный STEP-документ содержит пустые `parts`/`expressions` и операцию:
+
+```json
+{
+  "op": "step_source",
+  "source_base64": "…",
+  "source_sha256": "…",
+  "source_name": "source.step"
+}
+```
+
+Decoded source должен быть непустым, не более 25 MiB, с корректным base64 и совпадающим SHA-256. Нарушение целостности даёт `step_source_invalid`; native превышение файлового лимита до чтения — `step_too_large`. Ядро принимает только валидный STEP с замкнутыми объёмными BRep-телами (`step_invalid` при отказе). STEP-единицы интерпретирует CAD-ядро; ручной STL `unit_scale` к этому workflow не относится. Полученная геометрия участвует в штатных measure/print/export и последующих операциях. Save/reopen восстанавливает её из embedded bytes без исходного файла; авторская история чужой CAD не восстанавливается.
+
 ## Файловые диалоги
 
-В .app используется `tauri-plugin-dialog` (save/open с фильтрами). В браузерном dev-режиме — ручной ввод пути (как в M1).
+Native содержит `dialog_save_path`/`dialog_open_path` через `tauri-plugin-dialog`; наличие RPC не означает, что каждая кнопка UI открывает системный диалог. Текущие формы сохранения/открытия и защитный диалог принимают явный путь. В браузерном dev-режиме также используется ручной ввод пути.
+
+## Native закрытие и Quit
+
+- Window `CloseRequested` и application `ExitRequested` перехватываются до выхода. При активном document/geometry/AI task отправляется событие `printforge-close-blocked` с `{message}`, приложение остаётся открытым. При чистом основном документе разрешён выход без диалога.
+- При dirty основном документе событие `printforge-close-requested` передаёт его `DocState`, даже если активен tutorial. Frontend показывает Save/Discard/Cancel; рабочий интерфейс временно inert, Escape/«Отмена» закрывают только диалог без RPC подтверждения выхода.
+- `doc_save_main({path})` → DocState основного слота. Сохраняет именно main независимо от активного слота, возвращает актуальные instance/revision, устанавливает path и очищает dirty. Ошибка сохранения не разрешает выход.
+- `doc_confirm_close({expected_document_instance_id, expected_revision, discard})` → `void`, затем `app.exit(0)`. Сверяет идентичность и revision основного документа и отсутствие активных задач. `discard: false` требует уже сохранённый документ; `discard: true` разрешает отказаться от несохранённых изменений, но не обходит identity/busy guards. Отказы: `document_busy`, `document_changed`, `document_unsaved`.
+- Save передаёт в подтверждение instance/revision из результата `doc_save_main` и `discard: false`; Discard передаёт snapshot из close-event и `discard: true`. Frontend adapter `backend.docSaveMain`/`backend.docConfirmClose` преобразует snake_case поля в camelCase Tauri invoke arguments. Эти close RPC/events — native-only, не browser dev-shim API.
+- Автосохранение каждые 30 секунд относится только к dirty main с заданным path. Tutorial не перезаписывает сохранённый учебный пример автоматически. Отдельное crash recovery безымянного документа этим контрактом не обещается.
 
 ## Geometry worker recovery
 

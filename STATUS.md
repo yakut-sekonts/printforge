@@ -1,6 +1,17 @@
 # STATUS.md — статус PrintForge
 
-Обновлено: 2026-11-03. M5 interaction-first CAD реализован для v0.4.0. M4 сохраняет открытые расширенные задачи: все группы `EXT-001…EXT-012` имеют рабочий partial slice, оставшиеся generic/direct-editing clauses перечислены в `docs/testing/TEST_GAPS.md`.
+Обновлено: 2026-11-06. Подготовлен v0.4.1 с исправлениями после FULL QA. M5 interaction-first CAD реализован для v0.4.0. M4 сохраняет открытые расширенные задачи: все группы `EXT-001…EXT-012` имеют рабочий partial slice, оставшиеся generic/direct-editing clauses перечислены в `docs/testing/TEST_GAPS.md`.
+
+## Release v0.4.1 — исправления после QA
+
+- Исправлены причины 36 подтверждённых записей; ещё одна запись снята по исходным AX-доказательствам как ошибка интерпретации отчёта. Записи не равны числу независимых bugs.
+- Атомарные open/candidate commits, сохранность Redo, instance-aware reopen, persistent STEP/schema 5, защита несохранённого main-документа при закрытии окна и Quit/CmdQ.
+- Пересчёт выражений и русские aliases, defaults выбранной детали, сохранение draft-полей и допустимый min=0 из каталога.
+- Исправлены Compound volume, case/lid 3MF, SVG physical units, вход в последовательные изгибы, Tauri measurement IPC и свежесть print/measure/relief результатов.
+- Mesh resources immutable и content-addressed: Preview, tutorial, import и неприменённый candidate больше не перезаписывают ресурс подтверждённой модели. Уникальные payload сохраняются в session cache; GC не реализован.
+- What-mode, адаптивная справка, раскрытие скрытых команд и lesson engine проверяются отдельно; skip не считается освоением, учебный документ исключён из автосохранения.
+- Финальный connected stage: **425 уникальных PASS = 353 Python + 50 Node + 22 Rust**. Новый sidecar: 12/12 smoke; native cancellation/signature: 3/3 gates. Browser/native сценарии и ограничения перечислены в [QA_0.4.1.md](docs/testing/QA_0.4.1.md).
+- Hosted release matrix должна отдельно собрать macOS Apple Silicon, macOS Intel и Windows x64; локальные macOS-проверки не заменяют Windows installer gate или полный updater install/relaunch.
 
 ## M5 — ручной CAD v0.4.0
 
@@ -18,7 +29,7 @@
 
 - Четыре шаблона с точными размерами и зависимостями: пластина с отверстиями, шайба/втулка, L-кронштейн, корпус с крышкой (явный зазор «на одну сторону», пересчёт при изменении корпуса).
 - Скругление выбранного ребра (список рёбер, подсветка в сцене линией с маркерами концов), честная ошибка при невозможном радиусе с сохранением прежней модели; повторный выбор при потере ребра.
-- Изменение параметров с отменой/повтором (одно действие = одна транзакция), сохранение/открытие `.printforge` (v2, читает v1), автосохранение каждые 30 с (в .app), файловые диалоги macOS (в .app).
+- Изменение параметров с отменой/повтором (одно действие = одна транзакция), сохранение/открытие `.printforge` (читает схемы до 5), автосохранение именованного main-документа каждые 30 с, файловые диалоги macOS.
 - Экспорт STL/STEP/3MF; импорт STEP и persistent STL mesh-document с embedded source, transform, hole repair и topology-aware decimation.
 - Constraint solver показывает residual/DOF, отличает conflict от compatible redundancy, поддерживает constrained drag и применяет extrusion одной транзакцией.
 - Experimental image relief: PNG/JPEG/WebP preview без commit, hash-bound Apply, фиксированный model/seed/settings и mesh-only export.

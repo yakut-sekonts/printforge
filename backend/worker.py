@@ -17,15 +17,19 @@
 
 Прочее: export_stl/step/3mf, import_step/stl, print_check.
 """
+import base64
 import hashlib
 import json
 import math
 import os
+import re
 import struct
 import sys
 import tempfile
 import traceback
 from pathlib import Path
+
+from parameter_expressions import resolve_parts
 
 SCHEMA_VERSION = 1
 _session_dir = Path(tempfile.mkdtemp(prefix="printforge-geo-"))
@@ -316,6 +320,20 @@ def face_offset_reference(face, solid_index):
     }
 
 
+def _binary_mesh_resource(blob, name):
+    digest = hashlib.sha256(blob).hexdigest()
+    path = _session_dir / f"{name}-{digest}.bin"
+    if not path.exists():
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{name}-", suffix=".tmp", dir=_session_dir)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(blob)
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    return {"path": str(path), "bytes": len(blob), "sha256": digest}
+
+
 def mesh_resource(part, name, tol=0.1):
     positions, indices, face_ranges = [], [], []
     v_off = 0
@@ -337,10 +355,7 @@ def mesh_resource(part, name, tol=0.1):
     blob = struct.pack("<II", len(positions) // 3, len(indices) // 3)
     blob += struct.pack(f"<{len(positions)}f", *positions)
     blob += struct.pack(f"<{len(indices)}I", *indices)
-    path = _session_dir / f"{name}.bin"
-    path.write_bytes(blob)
-    return {"path": str(path), "bytes": len(blob),
-            "sha256": hashlib.sha256(blob).hexdigest(),
+    return {**_binary_mesh_resource(blob, name),
             "vertex_count": len(positions) // 3,
             "triangle_count": len(indices) // 3,
             "face_ranges": face_ranges}
@@ -357,11 +372,8 @@ def _trimesh_resource(mesh, name):
     indices = np.asarray(mesh.faces, dtype="uint32")
     blob = struct.pack("<II", len(positions), len(indices))
     blob += positions.tobytes() + indices.tobytes()
-    path = _session_dir / f"{name}.bin"
-    path.write_bytes(blob)
     return {
-        "path": str(path), "bytes": len(blob),
-        "sha256": hashlib.sha256(blob).hexdigest(),
+        **_binary_mesh_resource(blob, name),
         "vertex_count": int(len(positions)),
         "triangle_count": int(len(indices)),
         "face_ranges": [],
@@ -797,10 +809,14 @@ def _export_trimesh_3mf(mesh, path):
         archive.writestr("3D/3dmodel.model", model_bytes)
 
 
+def shape_volume(part):
+    return sum(solid.volume for solid in part.solids())
+
+
 def stats_of(part, extra=None, with_edges=True):
     bb = part.bounding_box()
     st = {
-        "volume": part.volume,
+        "volume": shape_volume(part),
         "solid_count": len(part.solids()),
         "face_count": len(part.faces()),
         "bbox": [bb.min.X, bb.min.Y, bb.min.Z, bb.max.X, bb.max.Y, bb.max.Z],
@@ -2466,7 +2482,7 @@ def _sketch_faces(profile, plane_name="XY", offset=0):
 
 
 def _validated_generated_shape(shape, operation_name):
-    if shape is None or not shape.is_valid or not shape.solids() or shape.volume <= 1e-8:
+    if shape is None or not shape.is_valid or not shape.solids() or shape_volume(shape) <= 1e-8:
         raise GeometryError(
             "extended_operation_failed",
             f"Операция «{operation_name}» не создала корректное объёмное тело.")
@@ -2488,6 +2504,36 @@ def _generated_part(parts, operation, shape, default_id, default_name, metadata=
     }
     if metadata:
         parts[result_id]["metadata"] = metadata
+
+
+def _apply_step_source(parts, operation, operation_index):
+    from build123d import import_step
+    encoded = operation.get("source_base64")
+    source_limit = 25 * 1024 * 1024
+    if not isinstance(encoded, str) or len(encoded) > ((source_limit + 2) // 3) * 4:
+        raise GeometryError("step_source_invalid", "Встроенный STEP отсутствует или превышает 25 MiB.")
+    try:
+        source = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as error:
+        raise GeometryError("step_source_invalid", "Встроенный STEP повреждён.") from error
+    if not source or len(source) > source_limit:
+        raise GeometryError("step_source_invalid", "STEP должен быть непустым и не превышать 25 MiB.")
+    source_hash = hashlib.sha256(source).hexdigest()
+    if source_hash != operation.get("source_sha256"):
+        raise GeometryError("step_source_invalid", "Контрольная сумма встроенного STEP не совпадает.")
+    path = _session_dir / f"source-{source_hash}.step"
+    if not path.is_file():
+        path.write_bytes(source)
+    try:
+        shape = import_step(path)
+        _validated_generated_shape(shape, "Импорт STEP")
+    except Exception as error:
+        raise GeometryError("step_invalid", "STEP не содержит корректных замкнутых объёмных тел.") from error
+    _generated_part(
+        parts, operation, shape, f"part-step-{operation_index + 1}", "Импортированный STEP",
+        {"format": "step", "embedded_source": True, "source_sha256": source_hash,
+         "source_name": operation.get("source_name", "source.step")},
+    )
 
 
 def _apply_sketch_extrude(parts, operation, operation_index):
@@ -2765,6 +2811,17 @@ def _validate_svg(source):
             local_name = name.rsplit("}", 1)[-1].lower()
             if local_name == "href" and value and not value.startswith("#"):
                 raise GeometryError("vector_unsafe", "SVG не должен загружать внешние ресурсы.")
+    factors = {"mm": 1, "cm": 10, "in": 25.4, "pt": 25.4 / 72, "pc": 25.4 / 6, "q": 0.25}
+    length_attributes = {"width", "height", "x", "y", "x1", "x2", "y1", "y2", "r", "rx", "ry", "stroke-width"}
+    length_pattern = re.compile(r"\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(mm|cm|in|pt|pc|q)\s*", re.IGNORECASE)
+    for element in root.iter():
+        for name, value in list(element.attrib.items()):
+            if name.rsplit("}", 1)[-1] not in length_attributes:
+                continue
+            match = length_pattern.fullmatch(value)
+            if match:
+                element.set(name, format(float(match[1]) * factors[match[2].lower()], ".17g"))
+    return ElementTree.tostring(root, encoding="unicode")
 
 
 def _vector_faces(shapes):
@@ -2815,7 +2872,7 @@ def _apply_vector_extrude(parts, operation, operation_index):
     source = _source_text(operation)
     vector_format = str(operation.get("format", "")).lower()
     if vector_format == "svg":
-        _validate_svg(source)
+        source = _validate_svg(source)
         try:
             shapes = list(import_svg(StringIO(source), flip_y=False))
         except Exception as exc:
@@ -3213,7 +3270,9 @@ def apply_part_operations(parts, operations):
     for operation_index, op in enumerate(operations or []):
         kind = op.get("op")
         pid = op.get("part_id")
-        if kind == "sketch_extrude":
+        if kind == "step_source":
+            _apply_step_source(parts, op, operation_index)
+        elif kind == "sketch_extrude":
             _apply_sketch_extrude(parts, op, operation_index)
         elif kind == "constrained_sketch_extrude":
             _apply_constrained_sketch_extrude(parts, op, operation_index)
@@ -3424,7 +3483,8 @@ def apply_part_operations(parts, operations):
                 if any(not solid.is_valid or solid.volume <= 1e-8 for solid in halves):
                     raise GeometryError("split_failed", "Разделение создаёт некорректную геометрию.")
                 total_volume = sum(solid.volume for solid in halves)
-                if abs(total_volume - base.volume) > max(1e-4, abs(base.volume) * 1e-6):
+                base_volume = shape_volume(base)
+                if abs(total_volume - base_volume) > max(1e-4, abs(base_volume) * 1e-6):
                     raise GeometryError("split_failed", "Разделение изменяет объём детали. Выберите другую плоскость.")
                 halves.sort(key=lambda solid: tuple(round(value, 7) for value in solid.center()))
                 generated_ids = [
@@ -3469,7 +3529,7 @@ def handle_build_v3(params):
     compound = Compound(children=[p["shape"] for p in parts.values()])
     extra = {"parts": [{
         "part_id": pid, "name": p["name"],
-        "volume": p["shape"].volume,
+        "volume": shape_volume(p["shape"]),
         "solid_count": len(p["shape"].solids()),
         **({"metadata": p["metadata"]} if p.get("metadata") else {}),
     } for pid, p in parts.items()]}
@@ -3501,7 +3561,7 @@ def handle_build(params):
         extra["parts"] = [{"part_id": "part-1",
                            "name": (params or {}).get("template",
                                                      "plate_with_holes"),
-                           "volume": part.volume,
+                           "volume": shape_volume(part),
                            "solid_count": len(part.solids())}]
     return {"stats": stats_of(part, extra),
             "mesh": mesh_resource(part, "model")}
@@ -3513,9 +3573,40 @@ def handle_solve_sketch(params):
         float(params.get("tolerance", 1e-7)))
 
 
+def handle_resolve_parameters(params):
+    try:
+        return resolve_parts(params.get("parts") or [], params.get("expressions") or {},
+                             {name: values[1] for name, values in TEMPLATES.items()})
+    except ValueError as error:
+        raise GeometryError("bad_params", str(error)) from error
+
+
 def handle_image_relief_preview(params):
     operation = {**params, "op": "image_relief_source"}
     return handle_build({"parts": [], "operations": [operation]})
+
+
+def handle_image_relief_settings_hash(params):
+    try:
+        source_hash = params["source_sha256"]
+        if not isinstance(source_hash, str) or re.fullmatch(r"[a-f0-9]{64}", source_hash) is None:
+            raise ValueError("Контрольная сумма изображения повреждена.")
+        settings = {
+            "path": str(Path(params["path"]).expanduser().resolve()),
+            "source_sha256": source_hash,
+            "model": params.get("model", "heightmap-luminance-v1"),
+            "seed": int(params.get("seed", 0)),
+            "width_mm": float(params.get("width_mm", 50)),
+            "relief_height": float(params.get("relief_height", 3)),
+            "base_thickness": float(params.get("base_thickness", 1.5)),
+            "samples": int(params.get("samples", 96)),
+            "noise_strength": float(params.get("noise_strength", 0.015)),
+            "invert": bool(params.get("invert", False)),
+        }
+        payload = json.dumps(settings, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise GeometryError("bad_params", "Не удалось проверить настройки preview изображения.") from error
+    return {"settings_sha256": hashlib.sha256(payload).hexdigest()}
 
 
 def handle_export(params):
@@ -3550,7 +3641,8 @@ def handle_export(params):
     elif fmt == "3mf":
         from build123d import Mesher
         m = Mesher()
-        m.add_shape(part)
+        for solid in part.solids():
+            m.add_shape(solid)
         m.write(path)
     else:
         raise GeometryError("bad_params", f"неизвестный формат: {fmt}")
@@ -3577,8 +3669,6 @@ def handle_import(params):
         indices = mesh.faces.astype("uint32")
         blob = struct.pack("<II", len(positions), len(indices))
         blob += positions.tobytes() + indices.tobytes()
-        rpath = _session_dir / "import.bin"
-        rpath.write_bytes(blob)
         ext = mesh.bounding_box.extents * scale
         return {"stats": {
                     "volume": float(mesh.volume) * scale ** 3 if mesh.is_watertight else None,
@@ -3589,8 +3679,7 @@ def handle_import(params):
                     "is_valid": bool(mesh.is_watertight),
                     "triangle_count": int(len(indices)),
                 },
-                "mesh": {"path": str(rpath), "bytes": len(blob),
-                         "sha256": hashlib.sha256(blob).hexdigest(),
+                "mesh": {**_binary_mesh_resource(blob, "import"),
                          "vertex_count": len(positions),
                          "triangle_count": len(indices),
                          "face_ranges": []},
@@ -3624,8 +3713,8 @@ def handle_print_check(params):
                    "status": "pass" if len(solids) >= 1 else "fail",
                    "detail": f"{len(solids)} шт."})
     checks.append({"id": "volume", "title": "Положительный объём",
-                   "status": "pass" if part.volume > 0 else "fail",
-                   "detail": f"{part.volume:.1f} мм³"})
+                   "status": "pass" if shape_volume(part) > 0 else "fail",
+                   "detail": f"{shape_volume(part):.1f} мм³"})
     profile = params.get("printer") or {}
     bx = (bb.max.X - bb.min.X, bb.max.Y - bb.min.Y, bb.max.Z - bb.min.Z)
     limits = (profile.get("x"), profile.get("y"), profile.get("z"))
@@ -3697,7 +3786,7 @@ def handle_measure(params):
                 "size": [bb.max.X - bb.min.X, bb.max.Y - bb.min.Y,
                          bb.max.Z - bb.min.Z]}
     if kind == "volume":
-        return {"source": "brep", "volume": part.volume,
+        return {"source": "brep", "volume": shape_volume(part),
                 "solid_count": len(part.solids())}
     if kind == "face_diameter":
         fi = int(params["face_index"])
@@ -3710,7 +3799,11 @@ def handle_measure(params):
                 "bad_ref", "Выбранная грань не цилиндрическая — диаметр не определён.")
         return {"source": "brep", "diameter": 2 * f.radius}
     if kind == "distance":
-        p0, p1 = params["p0"], params["p1"]
+        p0, p1 = params.get("p0"), params.get("p1")
+        if any(not isinstance(point, (list, tuple)) or len(point) != 3 or
+               any(not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) for value in point)
+               for point in (p0, p1)):
+            raise GeometryError("bad_params", "Координаты обеих точек должны быть тремя конечными числами.")
         return {"source": "brep", "distance": math.dist(p0, p1)}
     raise GeometryError("bad_params", f"неизвестное измерение: {kind}")
 
@@ -3721,7 +3814,9 @@ HANDLERS = {
                                            "params": p}),
     "build": handle_build,
     "solve_sketch": handle_solve_sketch,
+    "resolve_parameters": handle_resolve_parameters,
     "image_relief_preview": handle_image_relief_preview,
+    "image_relief_settings_hash": handle_image_relief_settings_hash,
     "export": handle_export,
     "export_stl": lambda p: handle_export({**p, "format": "stl",
                                            "template": "plate_with_holes",

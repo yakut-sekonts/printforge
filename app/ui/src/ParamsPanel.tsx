@@ -1,4 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { faceMeasurementIsCurrent, imageReliefSettingsKey } from "./documentState";
+import { parameterText, parameterValues, reconcileParameterDrafts, validateParameterValue } from "./parameterEditing";
+import { parseMillimeters } from "./sceneSelection";
 import type {
   ClearanceCalibrationArgs, ConstrainedSketch, ConstrainedSketchExtrudeArgs, DocState, DraftPrismArgs,
   EdgeFeatureKind, GeoError, TemplateDef, EdgeRef, FaceDomeArgs,
@@ -34,6 +37,7 @@ export interface PushPullUi {
 
 interface Props {
   doc: DocState | null;
+  busy: boolean;
   templates: TemplateDef[];
   selectedFace: number | null;
   faceArea: number | null;
@@ -85,6 +89,7 @@ interface Props {
   onArrayCircular: (count: number, angle: number, center: [number, number, number]) => void;
   onAlign: (axis: "x" | "y" | "z", align: "center" | "min" | "max", value: number) => void;
   measureResult: {
+    faceIndex?: number;
     source?: string; bbox?: number[]; volume?: number;
     faceDiameter?: number; faceError?: string; distance?: number;
   } | null;
@@ -92,6 +97,7 @@ interface Props {
   onMeasure: () => void;
   onMeasureFace: () => void;
   onMeasureDistance: (p0: [number, number, number], p1: [number, number, number]) => void;
+  onInvalidateMeasurements: () => void;
   // обработка рёбер
   edgeTool: EdgeToolUi;
   onStartEdgeTool: (kind: EdgeFeatureKind) => void;
@@ -105,6 +111,7 @@ interface Props {
   printChecks: PrintCheck[] | null;
   printBusy: boolean;
   onPrintCheck: (printer: { x: number; y: number; z: number }) => void;
+  onInvalidatePrintChecks: () => void;
   // импорт
   importPreview: ImportResult | null;
   importBusy: boolean;
@@ -155,7 +162,12 @@ function InspectorSection({ title, children, reveal = false, className = "" }: {
 function loadPrinter(): { x: string; y: string; z: string } {
   try {
     const raw = localStorage.getItem(PRINTER_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const stored = JSON.parse(raw);
+      if (stored && typeof stored === "object") return {
+        x: String(stored.x ?? "220"), y: String(stored.y ?? "220"), z: String(stored.z ?? "250"),
+      };
+    }
   } catch { /* игнор */ }
   return { x: "220", y: "220", z: "250" };
 }
@@ -265,15 +277,13 @@ export function ParamsPanel(props: Props) {
   const activePart = selectedPartId
     ? doc?.parts?.find((part) => part.part_id === selectedPartId) ?? null
     : doc?.parts?.[0] ?? null;
-  const isFirstPart = !activePart || doc?.parts?.[0]?.part_id === activePart.part_id;
   const template = templates.find((candidate) => candidate.template_id ===
     (selectedPartId ? activePart?.template : activePart?.template ?? doc?.template)) ?? null;
-  const paramSource: Record<string, number> = activePart?.params ?? doc?.params ?? {};
+  const paramSource = doc ? parameterValues(doc, template, activePart?.part_id) : {};
   const exprFor = (name: string, def: number): string => {
-    if (isFirstPart && doc?.expressions?.[name]) return doc.expressions[name];
-    const v = paramSource[name];
-    return v != null ? String(v) : String(def);
+    return doc ? parameterText(doc, activePart?.part_id, name, paramSource[name] ?? def) : String(def);
   };
+  const draftBaseline = useRef<{ context: string; values: Record<string, string> } | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [exprError, setExprError] = useState<string | null>(null);
   const [multiHint, setMultiHint] = useState(false);
@@ -370,7 +380,11 @@ export function ParamsPanel(props: Props) {
     if (!doc || !template) return;
     const next: Record<string, string> = {};
     for (const p of template.params) next[p.name] = exprFor(p.name, p.default);
-    setValues(next);
+    const context = JSON.stringify([doc.slot, doc.doc_id, doc.document_instance_id, activePart?.part_id, template.template_id]);
+    const previous = draftBaseline.current;
+    setValues((current) => previous?.context === context
+      ? reconcileParameterDrafts(current, previous.values, next) : next);
+    draftBaseline.current = { context, values: next };
     setMultiHint(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc, template, selectedPartId]);
@@ -399,8 +413,8 @@ export function ParamsPanel(props: Props) {
   const applyOne = (name: string, raw: string) => {
     const vars: Record<string, number> = { ...paramSource };
     try {
-      const v = evalExpression(raw.trim(), vars);
-      if (v <= 0) { setExprError(`Значение должно быть больше нуля`); return; }
+      const value = evalExpression(raw.trim(), vars);
+      validateParameterValue(value, template?.params.find((parameter) => parameter.name === name));
       setExprError(null);
       setMultiHint(false);
       props.onApplyField(name, raw.trim(), activePart?.part_id);
@@ -775,8 +789,27 @@ export function ParamsPanel(props: Props) {
 
   const savePrinter = (p: { x: string; y: string; z: string }) => {
     setPrinter(p);
+    props.onInvalidatePrintChecks();
     localStorage.setItem(PRINTER_KEY, JSON.stringify(p));
   };
+
+  const pointCoordinates = [...Object.values(distP0), ...Object.values(distP1)].map(parseMillimeters);
+  const coordinatesValid = pointCoordinates.every((value) => value != null);
+  const printerDimensions = { x: parseMillimeters(printer.x), y: parseMillimeters(printer.y), z: parseMillimeters(printer.z) };
+  const printerValid = Object.values(printerDimensions).every((value) => value != null && value > 0);
+  const imageNumbers = [imageWidth, imageReliefHeight, imageBaseThickness, imageSamples, imageSeed, imageNoise].map(parseMillimeters);
+  const imageValid = imageNumbers.every((value) => value != null) &&
+    imageNumbers.slice(0, 3).every((value) => value! > 0) &&
+    Number.isInteger(imageNumbers[3]) && imageNumbers[3]! >= 8 && imageNumbers[3]! <= 192 &&
+    Number.isSafeInteger(imageNumbers[4]) && imageNumbers[4]! >= 0 &&
+    imageNumbers[5]! >= 0 && imageNumbers[5]! <= 0.2;
+  const imageSettings: ImageReliefSettings = {
+    path: imagePath, model: "heightmap-luminance-v1", seed: imageNumbers[4] ?? 0,
+    width_mm: imageNumbers[0] ?? 0, relief_height: imageNumbers[1] ?? 0,
+    base_thickness: imageNumbers[2] ?? 0, samples: imageNumbers[3] ?? 0,
+    noise_strength: imageNumbers[5] ?? -1, invert: imageInvert,
+  };
+  const imagePreviewCurrent = imageValid && props.imageReliefPreview?.settings_key === imageReliefSettingsKey(imageSettings);
 
   const previewBbox = props.importPreview?.stats?.bbox;
   const previewExt = props.importPreview?.stats?.bbox_mesh;
@@ -807,15 +840,9 @@ export function ParamsPanel(props: Props) {
               {detailOpen && <pre className="error-detail">{err.detail}</pre>}
             </>
           )}
-          {isEdgeError ? (
-            <button className="btn" data-cmd="error.close" aria-label="Закрыть ошибку" onClick={props.onClearError}>
-              Закрыть
-            </button>
-          ) : (
-            <button className="btn" data-cmd="op.undo" aria-label="Отменить изменение" onClick={props.onClearError}>
-              Отменить изменение
-            </button>
-          )}
+          <button className="btn" data-cmd="error.close" aria-label="Закрыть ошибку" onClick={props.onClearError}>
+            Закрыть
+          </button>
         </div>
       )}
 
@@ -842,7 +869,7 @@ export function ParamsPanel(props: Props) {
             </div>
           ))}
           {exprError && <div className="error-inline" role="alert">{exprError}</div>}
-          {multiHint && <div className="param-hint">Изменено несколько полей — применяйте каждое поле клавишей Enter.</div>}
+          {(multiHint || changedFields.length > 1) && <div className="param-hint" role="status">Изменено несколько полей — применяйте каждое поле клавишей Enter. Остальной ввод сохранится.</div>}
           <button
             className="btn btn-primary"
             data-cmd="parameter.set"
@@ -911,7 +938,7 @@ export function ParamsPanel(props: Props) {
           <div className="op-row">
             <button
               className="btn" data-cmd="op.sketch.solve"
-              disabled={num(extendedValues.width) <= 0 || num(extendedValues.height) <= 0}
+              disabled={props.busy || num(extendedValues.width) <= 0 || num(extendedValues.height) <= 0}
               onClick={() => props.onSketchSolve(constrainedRectangleSketch(num(extendedValues.width), num(extendedValues.height)))}
             >Проверить ограничения</button>
             <button
@@ -1970,10 +1997,10 @@ export function ParamsPanel(props: Props) {
         >
           Диаметр грани
         </button>
-        {props.measureResult?.faceDiameter != null && (
+        {faceMeasurementIsCurrent(props.measureResult, props.selectedFace) && props.measureResult?.faceDiameter != null && (
           <p className="measure-result">Диаметр грани {props.selectedFace}: {fmtNum(props.measureResult.faceDiameter)} мм</p>
         )}
-        {props.measureResult?.faceError && (
+        {faceMeasurementIsCurrent(props.measureResult, props.selectedFace) && props.measureResult?.faceError && (
           <p className="error-inline" role="alert">{props.measureResult.faceError}</p>
         )}
         <div className="op-block">
@@ -1981,7 +2008,7 @@ export function ParamsPanel(props: Props) {
           <div className="op-row">
             {(["x", "y", "z"] as const).map((a) => (
               <div className="param-input op-field" key={`p0-${a}`}>
-                <input inputMode="decimal" value={distP0[a]} aria-label={`Точка 1, ${a.toUpperCase()}, мм`} onChange={(e) => setDistP0({ ...distP0, [a]: e.target.value })} />
+                <input inputMode="decimal" value={distP0[a]} aria-label={`Точка 1, ${a.toUpperCase()}, мм`} onChange={(e) => { setDistP0({ ...distP0, [a]: e.target.value }); props.onInvalidateMeasurements(); }} />
                 <span className="param-unit">{a.toUpperCase()}₁</span>
               </div>
             ))}
@@ -1989,21 +2016,22 @@ export function ParamsPanel(props: Props) {
           <div className="op-row">
             {(["x", "y", "z"] as const).map((a) => (
               <div className="param-input op-field" key={`p1-${a}`}>
-                <input inputMode="decimal" value={distP1[a]} aria-label={`Точка 2, ${a.toUpperCase()}, мм`} onChange={(e) => setDistP1({ ...distP1, [a]: e.target.value })} />
+                <input inputMode="decimal" value={distP1[a]} aria-label={`Точка 2, ${a.toUpperCase()}, мм`} onChange={(e) => { setDistP1({ ...distP1, [a]: e.target.value }); props.onInvalidateMeasurements(); }} />
                 <span className="param-unit">{a.toUpperCase()}₂</span>
               </div>
             ))}
           </div>
           <button
             className="btn" data-cmd="measure.run" aria-label="Измерить расстояние"
-            disabled={!doc?.stats?.is_valid || props.measureBusy}
+            disabled={!doc?.stats?.is_valid || props.measureBusy || !coordinatesValid}
             onClick={() => props.onMeasureDistance(
-              [num(distP0.x), num(distP0.y), num(distP0.z)],
-              [num(distP1.x), num(distP1.y), num(distP1.z)]
+              pointCoordinates.slice(0, 3) as [number, number, number],
+              pointCoordinates.slice(3) as [number, number, number]
             )}
           >
             Измерить расстояние
           </button>
+          {!coordinatesValid && <p className="error-inline" role="alert">Введите конечные числовые координаты. Допустимы точка и запятая.</p>}
           {props.measureResult?.distance != null && (
             <p className="measure-result">Расстояние: {fmtNum(props.measureResult.distance)} мм</p>
           )}
@@ -2025,15 +2053,15 @@ export function ParamsPanel(props: Props) {
         </div>
         <button
           className="btn" data-cmd="check.print" aria-label="Проверить перед печатью"
-          disabled={!doc?.stats?.is_valid || props.printBusy}
+          disabled={!doc?.stats?.is_valid || props.printBusy || !printerValid}
           onClick={() => props.onPrintCheck({
-            x: Number(printer.x.replace(",", ".")) || 220,
-            y: Number(printer.y.replace(",", ".")) || 220,
-            z: Number(printer.z.replace(",", ".")) || 250,
+            x: printerDimensions.x!, y: printerDimensions.y!, z: printerDimensions.z!,
           })}
         >
           {props.printBusy ? "Проверка…" : "Проверить"}
         </button>
+        {!printerValid && <p className="error-inline" role="alert">Габариты принтера должны быть положительными конечными числами.</p>}
+        <p className="check-note">Проверяется размер детали, а не её положение на столе или высота над Z=0.</p>
         {props.printChecks && (
           <>
             <ul className="check-list">
@@ -2139,25 +2167,17 @@ export function ParamsPanel(props: Props) {
         {props.imageReliefPreview && <div className="param-hint" role="status">
           Preview: {props.imageReliefPreview.stats.triangle_count} треугольников; model heightmap-luminance-v1; source {props.imageReliefPreview.source_sha256.slice(0, 12)}…
         </div>}
+        {props.imageReliefPreview && !imagePreviewCurrent && <p className="error-inline" role="alert">Настройки изменились. Обновите Preview перед применением.</p>}
         <div className="op-row">
           <button
             className="btn" data-cmd="op.image_relief.preview"
-            disabled={num(imageWidth) <= 0 || num(imageReliefHeight) <= 0 || num(imageBaseThickness) <= 0 || num(imageSamples) < 8 || num(imageSamples) > 192 || num(imageNoise) < 0 || num(imageNoise) > 0.2}
-            onClick={() => props.onImageReliefPreview({
-              path: imagePath, model: "heightmap-luminance-v1", seed: Math.trunc(num(imageSeed)),
-              width_mm: num(imageWidth), relief_height: num(imageReliefHeight),
-              base_thickness: num(imageBaseThickness), samples: Math.trunc(num(imageSamples)),
-              noise_strength: num(imageNoise), invert: imageInvert,
-            })}
+            disabled={!imageValid}
+            onClick={() => props.onImageReliefPreview(imageSettings)}
           >Preview</button>
           {props.imageReliefPreview && <button
             className="btn btn-primary" data-cmd="op.image_relief.apply"
-            onClick={() => props.onImageReliefApply({
-              path: imagePath, model: "heightmap-luminance-v1", seed: Math.trunc(num(imageSeed)),
-              width_mm: num(imageWidth), relief_height: num(imageReliefHeight),
-              base_thickness: num(imageBaseThickness), samples: Math.trunc(num(imageSamples)),
-              noise_strength: num(imageNoise), invert: imageInvert,
-            }, props.imageReliefPreview!.source_sha256)}
+            disabled={!imagePreviewCurrent}
+            onClick={() => props.onImageReliefApply(imageSettings, props.imageReliefPreview!.source_sha256)}
           >Apply</button>}
           {props.imageReliefPreview && <button className="btn" onClick={props.onCancelImageReliefPreview}>Отмена</button>}
         </div>
@@ -2166,11 +2186,11 @@ export function ParamsPanel(props: Props) {
       <InspectorSection title="Файл проекта и экспорт" className="io-forms">
         <div className="io-row">
           <input value={props.savePath} aria-label="Путь сохранения проекта" onChange={(e) => props.setSavePath(e.target.value)} />
-          <button className="btn" data-cmd="doc.save" aria-label="Сохранить проект" disabled={!doc} onClick={props.onSave}>Сохранить</button>
+          <button className="btn" data-cmd="doc.save" aria-label="Сохранить проект" disabled={!doc || props.busy} onClick={props.onSave}>Сохранить</button>
         </div>
         <div className="io-row">
           <input value={props.openPath} aria-label="Путь открытия проекта" onChange={(e) => props.setOpenPath(e.target.value)} />
-          <button className="btn" data-cmd="doc.open" aria-label="Открыть проект" onClick={props.onOpen}>Открыть</button>
+          <button className="btn" data-cmd="doc.open" aria-label="Открыть проект" disabled={props.busy} onClick={props.onOpen}>Открыть</button>
         </div>
         <h3 className="panel-section">Экспорт</h3>
         <div className="io-row">
@@ -2181,7 +2201,7 @@ export function ParamsPanel(props: Props) {
             <button
               key={f} className="btn" data-cmd={`export.${f}`}
               aria-label={`Экспортировать ${f.toUpperCase()}`}
-              disabled={!doc?.stats?.is_valid || (f === "step" && !!doc?.stats?.mesh_mode)}
+              disabled={props.busy || !doc?.stats?.is_valid || (f === "step" && !!doc?.stats?.mesh_mode)}
               onClick={() => props.onExport(f)}
             >
               {f.toUpperCase()}

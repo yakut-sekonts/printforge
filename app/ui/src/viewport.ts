@@ -591,35 +591,37 @@ export class Viewport {
     this.buildGrid();
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.12;
-    this.controls.mouseButtons = {
-      LEFT: THREE.MOUSE.ROTATE,
-      MIDDLE: THREE.MOUSE.DOLLY,
-      RIGHT: THREE.MOUSE.PAN,
-    };
-    this.controls.addEventListener("change", () => this.render());
-
-    let lastInteraction = "";
+    this.configureControls();
     const wheelHandler = () => this.events.onCameraZoomed();
     this.renderer.domElement.addEventListener("wheel", wheelHandler, { passive: true });
-    this.controls.addEventListener("start", () => {
-      lastInteraction = "rotate";
-    });
-    this.controls.addEventListener("end", () => {
-      if (lastInteraction === "rotate") this.events.onCameraRotated();
-      lastInteraction = "";
-    });
 
     this.renderer.domElement.addEventListener("pointermove", (e) => this.onPointerMove(e));
     this.renderer.domElement.addEventListener("pointerdown", (e) => this.onPointerDown(e), true);
     this.renderer.domElement.addEventListener("pointerup", (e) => this.onPointerUp(e), true);
     this.renderer.domElement.addEventListener("pointercancel", (e) => this.onPointerCancel(e), true);
+    this.renderer.domElement.addEventListener("lostpointercapture", (e) => this.onPointerCancel(e), true);
     this.renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
 
     this.resizeObs = new ResizeObserver(() => this.onResize());
     this.resizeObs.observe(this.container);
     this.animate();
+  }
+
+  private configureControls() {
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.12;
+    this.controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN,
+    };
+    this.controls.addEventListener("change", () => this.render());
+    let initialRotation: THREE.Quaternion | null = null;
+    this.controls.addEventListener("start", () => { initialRotation = this.camera.quaternion.clone(); });
+    this.controls.addEventListener("end", () => {
+      if (initialRotation && initialRotation.angleTo(this.camera.quaternion) > 1e-5) {
+        this.events.onCameraRotated();
+      }
+      initialRotation = null;
+    });
   }
 
   private buildGrid() {
@@ -939,17 +941,18 @@ export class Viewport {
 
   private onPointerCancel(e: PointerEvent) {
     if (this.transformDrag && e.pointerId === this.transformDrag.pointerId) {
-      this.transformDrag = null;
+      const axis = this.transformDrag.axis;
       this.controls.enabled = true;
       this.renderer.domElement.style.cursor = "default";
       this.cancelTransformPreview();
+      this.events.onPartMovePreview(axis, 0);
       return;
     }
     if (!this.pushPullDrag || e.pointerId !== this.pushPullDrag.pointerId) return;
-    this.pushPullDrag = null;
     this.controls.enabled = true;
     this.renderer.domElement.style.cursor = "default";
     this.cancelPushPullPreview();
+    this.events.onPushPullPreview(0);
   }
 
   private onClick(e: PointerEvent) {
@@ -1658,11 +1661,9 @@ export class Viewport {
     const target = this.controls.target.clone();
     this.controls.dispose();
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.12;
-    this.controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+    this.configureControls();
     this.controls.target.copy(target);
-    this.controls.addEventListener("change", () => this.render());
+    this.controls.update();
     this.render();
     return this.orthoMode;
   }

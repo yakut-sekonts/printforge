@@ -207,7 +207,7 @@ export function resolveSheetBendTarget(
   solidIndices?: number[],
 ): FaceFeatureTarget | null {
   const face = analyzeFace(mesh, faceIndex, solidIndices);
-  if (!face?.planar || !face.axis || !face.atBoundary) return null;
+  if (!face?.planar || !face.axis || (face.axis !== "z" && !face.atBoundary)) return null;
   if (face.axis === "z" && face.side !== 1) return null;
 
   const bounds = meshBounds(mesh, solidIndices);

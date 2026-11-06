@@ -498,6 +498,7 @@ export interface ImportResult {
   stats: DocStats;
   mesh: MeshResource;
   mode: "brep" | "mesh";
+  document?: DocState;
 }
 
 export interface ImageReliefSettings {
@@ -516,6 +517,8 @@ export interface ImageReliefPreview {
   stats: DocStats;
   mesh: MeshResource;
   source_sha256: string;
+  settings_sha256: string;
+  settings_key?: string;
 }
 
 export interface PrintCheck {
@@ -656,6 +659,21 @@ export interface LessonCheck {
   id?: string;
   status?: string;
   mode?: string;
+  format?: string;
+  formats?: string[];
+  normal?: Point3;
+  distance?: number;
+  nonzero_translate?: boolean;
+  bbox_size?: Point3;
+  bbox?: [number, number, number, number, number, number];
+  volume?: number;
+  solid_count?: number;
+  mesh_mode?: boolean;
+  boundary_edges?: number;
+  degrees_of_freedom?: number;
+  preview?: boolean;
+  same_saved_path?: boolean;
+  required_check?: { id: string; status: string };
 }
 
 export interface LessonStep {

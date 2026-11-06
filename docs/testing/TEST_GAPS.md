@@ -2,6 +2,8 @@
 
 Этот список — не quarantine и не `pass`. Обязательные M0–M3 пробелы блокируют заявление о полной приёмке соответствующего этапа.
 
+Актуальный срез исправлений v0.4.1 и границы реальных UI-повторов: [QA_0.4.1.md](QA_0.4.1.md). Исторические milestone gaps ниже не заменяются общим числом успешных тестов.
+
 ## Native и UI
 
 - **M1–M3 / B:** нет browser component/E2E набора для пользовательских состояний, доступности, tooltip/search/«Что это?» и AI panel.
@@ -16,7 +18,7 @@
 - F-06 неполон: нет versioned предыдущего проекта, future-version и portable imported asset fixture.
 - Save/reopen identity и базовая геометрия покрыты через production shim; bounded worker recovery имеет deterministic real-process test, но induced-crash через настоящий Tauri sidecar, crash recovery проекта, autosave и tutorial isolation не имеют сквозного native evidence.
 - Cancel control flow дополнительно покрыт native `.app`: отмена во время AI CAD preview реально завершает sidecar, не меняет документ и допускает следующий CAD build. Timeout длительной OCP-операции и общий late-result сценарий вне AI cancellation всё ещё требуют native E2E.
-- Help registry и девять shipped lessons проверяются структурно; прохождение уроков, сохранность несохранённой работы и offline UX требуют browser/native сценариев.
+- Help registry и 13 shipped lessons проверяются структурно и lesson-engine тестами; navigation, save-export и import повторены в UI. Это не полный native/offline прогон всех уроков и всех отрицательных вариантов.
 
 ## M3 AI
 

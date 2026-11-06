@@ -48,6 +48,8 @@ def groups(run_dir):
                 "backend/test_document_integration.py",
                 "backend/test_face_offset.py",
                 "backend/test_split_bodies.py",
+                "backend/test_full_regressions.py",
+                "backend/test_parameter_expressions.py",
             ], run_dir / "pytest-cad.xml"),
             "junit": str(run_dir / "pytest-cad.xml"),
         }],
@@ -133,8 +135,14 @@ def impact_groups(paths):
     for path in paths:
         if path.startswith(("scripts/ai_planner.py", "scripts/dev_shim.py", "backend/test_ai", "tests/live_eval/")):
             selected.add("ai")
-        if path.startswith(("scripts/dev_shim.py", "backend/worker.py", "backend/test_worker", "backend/test_templates.py", "backend/test_extended_modeling.py", "backend/test_document", "backend/test_face_offset.py", "backend/test_split_bodies.py", "tests/fixtures/")):
+        if path.startswith(("scripts/dev_shim.py", "backend/worker.py", "backend/test_worker", "backend/test_templates.py", "backend/test_extended_modeling.py", "backend/test_document", "backend/test_face_offset.py", "backend/test_split_bodies.py", "backend/test_full_regressions.py", "backend/test_parameter_expressions.py", "backend/parameter_expressions.py", "tests/fixtures/")):
             selected.add("cad")
+        if path in {"backend/worker.py", "backend/parameter_expressions.py", "backend/test_parameter_expressions.py", "backend/test_full_regressions.py"}:
+            selected.update({"ai", "cad"})
+        if path in {"app/ui/src/documentState.ts", "app/ui/src/parameterEditing.ts", "app/ui/src/expr.ts"}:
+            selected.update({"ai", "cad", "ui"})
+        if path.startswith(("app/ui/src/lessonEngine", "app/ui/src/tooltipController", "app/ui/src/revealCommand", "app/ui/src/HelpPanel", "app/ui/src/Tooltips", "app/ui/test/lessonEngine", "app/ui/test/tooltipController")):
+            selected.update({"help", "ui"})
         if path.startswith(("docs/help/", "app/shared/commands", "app/shared/lessons", "app/ui/public/help", "app/ui/public/lessons", "app/ui/src/helpSearch", "app/ui/test/helpSearch", "backend/test_help")):
             selected.update({"help", "ui"})
         if path.startswith(("app/src-tauri/src/ai.rs",)):

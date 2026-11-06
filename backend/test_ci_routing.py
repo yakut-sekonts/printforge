@@ -100,3 +100,19 @@ def test_direct_edit_changes_select_cad_group_and_the_real_kernel_tests(path, tm
 def test_document_shim_checks_cad_connections_and_manifest_checks_release_version():
     assert run_test_stage.impact_groups(["scripts/dev_shim.py"]) == ["ai", "cad"]
     assert run_test_stage.impact_groups(["app/package.json"]) == ["release"]
+
+
+@pytest.mark.parametrize("path", ["backend/worker.py", "backend/parameter_expressions.py", "backend/test_full_regressions.py"])
+def test_shared_geometry_and_expression_changes_cover_ai_consumers(path):
+    assert run_test_stage.impact_groups([path]) == ["ai", "cad"]
+
+
+def test_focused_cad_stage_includes_full_regression_fixes(tmp_path):
+    command = run_test_stage.groups(tmp_path)["cad"][0]["command"]
+    assert "backend/test_parameter_expressions.py" in command
+    assert "backend/test_full_regressions.py" in command
+
+
+@pytest.mark.parametrize("path", ["app/ui/src/lessonEngine.ts", "app/ui/src/tooltipController.ts", "app/ui/src/revealCommand.ts"])
+def test_lesson_help_components_cover_workflow_and_ui(path):
+    assert run_test_stage.impact_groups([path]) == ["help", "ui"]

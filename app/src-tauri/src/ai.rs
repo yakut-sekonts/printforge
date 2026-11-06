@@ -46,6 +46,10 @@ fn tasks_lock() -> &'static Mutex<HashMap<String, watch::Sender<bool>>> {
     AI_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+pub fn has_active_tasks() -> bool {
+    !tasks_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty()
+}
+
 pub fn register_task(task_id: &str) -> Result<watch::Receiver<bool>, String> {
     if task_id.is_empty()
         || task_id.len() > 128
@@ -257,6 +261,7 @@ pub fn configure(
     settings.provider = provider;
     settings.base_url = base_url;
     settings.model = model;
+    settings = normalize_settings(settings, false)?;
     if clear_api_key {
         delete_api_key()?;
         settings.api_key_stored = false;
@@ -264,7 +269,6 @@ pub fn configure(
         store_api_key(&value)?;
         settings.api_key_stored = true;
     }
-    let settings = normalize_settings(settings, false)?;
     save_settings(config_dir, &settings)?;
     replace_settings(settings);
     Ok(provider_info())
@@ -724,32 +728,35 @@ pub async fn test_connection() -> Result<Value, String> {
     if !status.is_success() {
         return Err(format!("Провайдер вернул {status} при проверке /models."));
     }
+    Ok(connection_report(&data, &settings.model))
+}
+
+fn connection_report(data: &Value, selected_model: &str) -> Value {
     let models: Vec<String> = data
         .get("data")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|item| item.get("id").and_then(Value::as_str).map(String::from))
-        .take(20)
         .collect();
-    let model_found = models.is_empty() || models.iter().any(|model| model == &settings.model);
+    let model_found = models.iter().any(|model| model == selected_model);
     let message = if model_found {
         format!(
             "Соединение установлено. Модель «{}» доступна.",
-            settings.model
+            selected_model
         )
     } else {
         format!(
             "Соединение установлено, но модель «{}» отсутствует в ответе /models.",
-            settings.model
+            selected_model
         )
     };
-    Ok(json!({
+    json!({
         "ok": true,
         "message": message,
         "model_found": model_found,
         "models": models,
-    }))
+    })
 }
 
 pub fn system_prompt(
@@ -1168,6 +1175,29 @@ pub fn plan_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_report_distinguishes_empty_absent_and_twenty_first_model() {
+        assert_eq!(connection_report(&json!({"data": []}), "test-model")["model_found"], false);
+        assert_eq!(connection_report(&json!({"data": [{"id": "other"}]}), "test-model")["model_found"], false);
+        let mut models: Vec<Value> = (0..20).map(|index| json!({"id": format!("other-{index}")})).collect();
+        models.push(json!({"id": "test-model"}));
+        let result = connection_report(&json!({"data": models}), "test-model");
+        assert_eq!(result["model_found"], true);
+        assert_eq!(result["models"].as_array().unwrap().len(), 21);
+    }
+
+    #[test]
+    fn invalid_configuration_is_rejected_before_secret_or_settings_persistence() {
+        let previous = current_settings();
+        let path = std::env::temp_dir().join(format!("printforge-invalid-ai-config-{}", std::process::id()));
+        let invalid = configure(&path, "ollama".into(), "https://example.com/v1".into(), "test-model".into(), Some("qa-never-persist-key".into()), false);
+        assert!(invalid.unwrap_err().contains("локаль"));
+        let missing_model = configure(&path, "openai".into(), "http://127.0.0.1:1/v1".into(), String::new(), Some("qa-never-persist-key".into()), false);
+        assert!(missing_model.unwrap_err().contains("модел"));
+        assert_eq!(serde_json::to_value(current_settings()).unwrap(), serde_json::to_value(previous).unwrap());
+        assert!(!path.exists());
+    }
 
     fn valid_plan() -> Value {
         json!({

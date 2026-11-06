@@ -286,9 +286,11 @@ def test_connection():
             f"Провайдер вернул HTTP {error.code} при проверке /models.") from error
     except urllib.error.URLError as error:
         raise ValueError(f"Провайдер AI недоступен: {error.reason}") from error
-    models = [item.get("id") for item in data.get("data", [])
-              if isinstance(item, dict) and isinstance(item.get("id"), str)][:20]
-    model_found = not models or config["model"] in models
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        raise ValueError("Провайдер вернул некорректный список /models.")
+    models = [item["id"] for item in data["data"]
+              if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip()]
+    model_found = config["model"] in models
     if model_found:
         message = f"Соединение установлено. Модель «{config['model']}» доступна."
     else:

@@ -34,6 +34,14 @@ class ProviderServer:
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                owner.requests.append({"path": self.path, "headers": dict(self.headers)})
+                status, payload = owner.responses.popleft()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
+
             def do_POST(self):
                 length = int(self.headers.get("content-length", "0"))
                 body = self.rfile.read(length)
@@ -97,6 +105,33 @@ def _valid_plan():
         }],
         "summary": "Изменить длину",
     }
+
+
+@pytest.mark.parametrize("models,expected", [
+    ([], False),
+    ([{"id": "other"}], False),
+    ([{"id": f"other-{index}"} for index in range(20)] + [{"id": "test-model"}], True),
+    ([None, {}, {"id": 123}, {"id": ""}], False),
+])
+def test_connection_checks_actual_complete_model_list(monkeypatch, models, expected):
+    with ProviderServer([(200, {"data": models})]) as server:
+        _configure(monkeypatch, server)
+        result = ai_planner.test_connection()
+        assert result["ok"] is True
+        assert result["model_found"] is expected
+        if expected:
+            assert result["models"][20] == "test-model"
+        else:
+            assert "отсутствует" in result["message"]
+        assert server.requests[0]["path"] == "/v1/models"
+
+
+@pytest.mark.parametrize("payload", [None, [], {}, {"data": {}}, {"data": "test-model"}])
+def test_connection_rejects_malformed_model_list(monkeypatch, payload):
+    with ProviderServer([(200, payload)]) as server:
+        _configure(monkeypatch, server)
+        with pytest.raises(ValueError, match="список /models"):
+            ai_planner.test_connection()
 
 
 def test_transport_routes_to_selected_provider_without_secret_in_body(monkeypatch):
