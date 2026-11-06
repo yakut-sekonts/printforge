@@ -16,7 +16,7 @@ def main():
     responses = queue.Queue()
     cases = []
     process = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                               stderr=subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1)
 
     def read():
         for line in process.stdout:
@@ -88,8 +88,8 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report = {"status": "PASS", "scope": "packaged sidecar protocol; not native UI",
               "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "cases": cases}
-    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
-    print(f"Packaged designer sidecar: {len(cases)} PASS → {args.output}")
+    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Packaged designer sidecar: {len(cases)} PASS -> {args.output}")
 
 
 if __name__ == "__main__":
