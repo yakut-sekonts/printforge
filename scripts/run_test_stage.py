@@ -201,7 +201,9 @@ def run_command(spec, run_dir):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env={**os.environ, "PYTHONHASHSEED": "0"},
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "PYTHONHASHSEED": "0", "PYTHONUTF8": "1"},
         )
         assert process.stdout is not None
         for line in process.stdout:
@@ -255,6 +257,7 @@ def declared_gates():
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--scope",

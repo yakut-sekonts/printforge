@@ -116,3 +116,14 @@ def test_focused_cad_stage_includes_full_regression_fixes(tmp_path):
 @pytest.mark.parametrize("path", ["app/ui/src/lessonEngine.ts", "app/ui/src/tooltipController.ts", "app/ui/src/revealCommand.ts"])
 def test_lesson_help_components_cover_workflow_and_ui(path):
     assert run_test_stage.impact_groups([path]) == ["help", "ui"]
+
+
+def test_runner_preserves_utf8_subprocess_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_test_stage, "ROOT", tmp_path)
+    spec = {
+        "name": "utf8",
+        "command": [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes([0xd0, 0x90]))"],
+    }
+    result = run_test_stage.run_command(spec, tmp_path)
+    assert result["status"] == "passed"
+    assert (tmp_path / "utf8.log").read_text(encoding="utf-8") == "А"
