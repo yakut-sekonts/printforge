@@ -18,7 +18,7 @@ STAGE_ORDER = {"M0": 0, "M1": 1, "M2": 2, "M3": 3, "M4": 4}
 
 
 def source_ids(root=ROOT):
-    product = set(SOURCE_PATTERN.findall((root / "REQUIREMENTS.md").read_text()))
+    product = set(SOURCE_PATTERN.findall((root / "REQUIREMENTS.md").read_text(encoding="utf-8")))
     return product | {f"EXT-{number:03d}" for number in range(1, 13)}
 
 
@@ -27,7 +27,7 @@ def nodeid_exists(root, nodeid):
     path = root / path_text
     if not separator or not path.is_file() or path.suffix != ".py":
         return False
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name
         for node in ast.walk(tree)
@@ -104,8 +104,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--strict-stage", action="store_true")
     args = parser.parse_args()
-    manifest = json.loads(MANIFEST.read_text())
-    catalog = json.loads(CATALOG.read_text())
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
     errors, warnings = validate(manifest, catalog, strict_stage=args.strict_stage)
     if errors:
         print("Traceability: errors")

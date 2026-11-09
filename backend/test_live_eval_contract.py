@@ -21,7 +21,7 @@ def _result(gate, passed=True, *, unchanged=True, repairs=0):
 
 
 def test_live_eval_dataset_has_twenty_prompts_and_three_runs():
-    data = json.loads((ROOT / "tests/live_eval/prompts.json").read_text())
+    data = json.loads((ROOT / "tests/live_eval/prompts.json").read_text(encoding="utf-8"))
     assert run_live_ai_eval.validate_dataset(data) == []
     assert data["runs_per_prompt"] == 3
     assert len(data["prompts"]) == 20

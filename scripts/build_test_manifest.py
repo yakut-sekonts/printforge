@@ -172,11 +172,11 @@ def natural_key(requirement_id):
 
 
 def main():
-    source_ids = sorted(set(SOURCE_PATTERN.findall(SOURCE.read_text())), key=natural_key)
+    source_ids = sorted(set(SOURCE_PATTERN.findall(SOURCE.read_text(encoding="utf-8"))), key=natural_key)
     if len(source_ids) != 85:
         raise SystemExit(f"Ожидалось 85 source requirement ID, найдено {len(source_ids)}")
     ext_ids = [f"EXT-{number:03d}" for number in range(1, 13)]
-    catalog = json.loads(CATALOG.read_text())
+    catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
     tests = {item["test_id"]: item for item in catalog["tests"]}
     entries = []
     for requirement_id in source_ids + ext_ids:
@@ -221,7 +221,7 @@ def main():
         "requirements": entries,
     }
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    OUTPUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"Manifest: {len(source_ids)} source + {len(ext_ids)} EXT = {len(entries)} entries")
 
 

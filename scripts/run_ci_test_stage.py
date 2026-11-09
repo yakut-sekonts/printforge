@@ -50,7 +50,7 @@ def stage_arguments(event_name: str, event: dict, head: str) -> list[str]:
 
 def main() -> int:
     event_path = os.environ.get("GITHUB_EVENT_PATH")
-    event = json.loads(Path(event_path).read_text()) if event_path else {}
+    event = json.loads(Path(event_path).read_text(encoding="utf-8")) if event_path else {}
     arguments = stage_arguments(
         os.environ.get("GITHUB_EVENT_NAME", ""),
         event,

@@ -316,10 +316,10 @@ def main():
         "declared_gates": declared_gates(),
     }
     report_path = run_dir / "test-report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     latest = ROOT / "artifacts/test-report.json"
     latest.parent.mkdir(parents=True, exist_ok=True)
-    latest.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    latest.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"\nTest stage: {status}; report: {report_path.relative_to(ROOT)}")
     return 0 if status == "passed" else 1
 

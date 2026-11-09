@@ -15,8 +15,8 @@ pytestmark = [pytest.mark.contract, pytest.mark.release]
 
 
 def test_tauri_updater_and_bundle_contract():
-    config = json.loads((ROOT / "app/src-tauri/tauri.conf.json").read_text())
-    release = json.loads((ROOT / "app/src-tauri/tauri.release.conf.json").read_text())
+    config = json.loads((ROOT / "app/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+    release = json.loads((ROOT / "app/src-tauri/tauri.release.conf.json").read_text(encoding="utf-8"))
     updater = config["plugins"]["updater"]
 
     assert release["bundle"]["createUpdaterArtifacts"] is True
@@ -32,8 +32,8 @@ def test_geometry_sidecar_bundles_fixed_text_font():
     font = (
         ROOT / "design-sources/impeccable/ui/component-review/fonts/jetbrainsmono.ttf")
     license_path = font.with_name("jetbrainsmono-OFL.txt")
-    build_script = (ROOT / "scripts/build_sidecar.py").read_text()
-    worker = (ROOT / "backend/worker.py").read_text()
+    build_script = (ROOT / "scripts/build_sidecar.py").read_text(encoding="utf-8")
+    worker = (ROOT / "backend/worker.py").read_text(encoding="utf-8")
 
     digest = hashlib.sha256(font.read_bytes()).hexdigest()
     assert digest == "48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda"
@@ -41,11 +41,11 @@ def test_geometry_sidecar_bundles_fixed_text_font():
     assert '"--add-data"' in build_script
     assert "jetbrainsmono.ttf" in build_script
     assert "assets" in build_script
-    assert "SIL Open Font License, Version 1.1" in license_path.read_text()
+    assert "SIL Open Font License, Version 1.1" in license_path.read_text(encoding="utf-8")
 
 
 def test_release_workflow_declares_all_supported_desktop_targets():
-    workflow = (ROOT / ".github/workflows/release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     assert "macos-15" in workflow
     assert "macos-15-intel" in workflow
     assert "windows-latest" in workflow
@@ -131,6 +131,6 @@ def test_windows_release_performance_recording_does_not_rename_failed_gate():
 
 
 def test_repository_license_is_apache_2_0():
-    license_text = (ROOT / "LICENSE").read_text()
+    license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
     assert "Apache License\n" in license_text[:100]
     assert "Version 2.0, January 2004" in license_text[:150]

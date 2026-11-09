@@ -13,8 +13,8 @@ pytestmark = pytest.mark.contract
 
 
 def _data():
-    manifest = json.loads((ROOT / "docs/testing/requirements.yaml").read_text())
-    catalog = json.loads((ROOT / "tests/test_catalog.json").read_text())
+    manifest = json.loads((ROOT / "docs/testing/requirements.yaml").read_text(encoding="utf-8"))
+    catalog = json.loads((ROOT / "tests/test_catalog.json").read_text(encoding="utf-8"))
     return manifest, catalog
 
 

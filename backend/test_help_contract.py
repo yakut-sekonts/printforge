@@ -17,11 +17,11 @@ def test_help_registry_integrity():
 
 
 def test_shipped_help_and_lessons_match_authoritative_sources():
-    shared_commands = json.loads((ROOT / "app/shared/commands.json").read_text())
-    public_commands = json.loads((ROOT / "app/ui/public/commands.json").read_text())
-    shared_lessons = json.loads((ROOT / "app/shared/lessons.json").read_text())
-    public_lessons = json.loads((ROOT / "app/ui/public/lessons.json").read_text())
-    help_index = json.loads((ROOT / "app/ui/public/help/index.json").read_text())
+    shared_commands = json.loads((ROOT / "app/shared/commands.json").read_text(encoding="utf-8"))
+    public_commands = json.loads((ROOT / "app/ui/public/commands.json").read_text(encoding="utf-8"))
+    shared_lessons = json.loads((ROOT / "app/shared/lessons.json").read_text(encoding="utf-8"))
+    public_lessons = json.loads((ROOT / "app/ui/public/lessons.json").read_text(encoding="utf-8"))
+    help_index = json.loads((ROOT / "app/ui/public/help/index.json").read_text(encoding="utf-8"))
 
     assert public_commands == shared_commands
     assert public_lessons == shared_lessons
@@ -40,15 +40,15 @@ def test_shipped_help_and_lessons_match_authoritative_sources():
 
 
 def test_lesson_checks_reference_supported_actions_and_parameters():
-    lessons = json.loads((ROOT / "app/shared/lessons.json").read_text())["lessons"]
+    lessons = json.loads((ROOT / "app/shared/lessons.json").read_text(encoding="utf-8"))["lessons"]
     commands = {
         command["command_id"]
-        for command in json.loads((ROOT / "app/shared/commands.json").read_text())["commands"]
+        for command in json.loads((ROOT / "app/shared/commands.json").read_text(encoding="utf-8"))["commands"]
     }
     commands.update({"view.fit", "view.top", "view.front", "view.side", "view.iso", "view.proj"})
     templates = {
         template["template_id"]: {parameter["name"] for parameter in template["params"]}
-        for template in json.loads((ROOT / "app/shared/templates.json").read_text())["templates"]
+        for template in json.loads((ROOT / "app/shared/templates.json").read_text(encoding="utf-8"))["templates"]
     }
     check_types = {
         "camera_rotated", "camera_zoomed", "command", "face_selected", "params",
@@ -80,7 +80,7 @@ def test_lesson_checks_reference_supported_actions_and_parameters():
 
 
 def test_first_lesson_teaches_primitive_selection_and_direct_editing():
-    lessons = json.loads((ROOT / "app/shared/lessons.json").read_text())["lessons"]
+    lessons = json.loads((ROOT / "app/shared/lessons.json").read_text(encoding="utf-8"))["lessons"]
     lesson = next(item for item in lessons if item["lesson_id"] == "first-part")
     assert lesson["content_version"] >= 2
     creation, selection, dimension, movement, undo = [step["check"] for step in lesson["steps"]]
@@ -106,7 +106,7 @@ def test_first_lesson_teaches_primitive_selection_and_direct_editing():
 def test_lessons_require_distinct_actions_and_observable_results():
     lessons = {
         lesson["lesson_id"]: lesson
-        for lesson in json.loads((ROOT / "app/shared/lessons.json").read_text())["lessons"]
+        for lesson in json.loads((ROOT / "app/shared/lessons.json").read_text(encoding="utf-8"))["lessons"]
     }
     assert all(lesson["content_version"] >= 1 for lesson in lessons.values())
     assert all(lesson["content_version"] >= 2 for name, lesson in lessons.items() if name != "precise-canvas")
