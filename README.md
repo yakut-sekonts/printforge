@@ -109,7 +109,7 @@ Target-specific sidecar не хранится в Git. Результат native-
 
 Первый baseline выполняется полностью, последующие локальные прогоны — по impact mapping:
 
-Срез v0.6.0: **540 уникальных automated-тестов PASS** (429 Python, 87 Node, 24 Rust); отдельно 17 packaged-sidecar geometry gates, browser walkthrough и настоящий native crash/relaunch/restore. Полный каталог из 179 сценариев не объявляется пройденным повторно: границы и BLOCKED описаны в [QA-отчёте](docs/testing/QA_0.6.0.md). В release matrix packaged geometry проверяется на каждой платформе до публикации. Исторический срез v0.5.0: 511 automated и 10 packaged gates.
+Срез v0.6.0: **540 уникальных automated-тестов PASS** (429 Python, 87 Node, 24 Rust); отдельно 17 packaged-sidecar geometry gates, browser walkthrough и настоящий native crash/relaunch/restore. Полный каталог из 179 сценариев не объявляется пройденным повторно: границы и BLOCKED описаны в [QA-отчёте](docs/testing/QA_0.6.0.md). В опубликованной release matrix packaged geometry прошла 17/17 проверок на каждой платформе. Windows hosted stress-тест показал минимум 26,33 FPS при цели 30; это неблокирующее замечание, а не performance PASS. Исторический срез v0.5.0: 511 automated и 10 packaged gates.
 
 Windows runner: в stress-сцене 20 тел/100 операций минимум 26,0 FPS при цели 30. Это `failed/non-blocking` performance observation, не полный performance PASS; installer/payload и startup/memory gates проходят. Подробности — в release notes и QA-отчёте.
 

@@ -10,7 +10,7 @@
 - Новые real-kernel тесты проверяют provenance отверстия/скругления и transform/resize, отступы и равные диаметры, invalid/cyclic refs, arc solver/extrusion, вырез на локальной грани, plane/axis mates, запрет циклов/дубликатов, JSON/export без утечки OCP-объектов, абсолютные границы/толщину и schema 7/Preview/Undo/Redo/save/reopen через production shim.
 - Node: infer/snap/arc geometry/контуры и отверстия, локальные изменения без мутации источника, bounded проверенный подбор размера, cycling перекрытий и скрытие без изменения mesh indices. Новый урок проверяется отдельной реальной последовательностью событий движка.
 - Rust: версия формата и запись безымянного recovery snapshot без присвоения пути документу; валидация имён recovery, старые atomicity/close/identity contracts.
-- Packaged sidecar: **17 blocking gates** на текущем macOS ARM binary, включая новые зависимости, arc Sketcher, mate, отказы и thin-wall markers. Перед публикацией те же gates обязательны для каждой платформы release matrix. Это проверка executable/protocol, не native UI.
+- Packaged sidecar: **17 blocking gates** на текущем macOS ARM binary, включая новые зависимости, arc Sketcher, mate, отказы и thin-wall markers. Hosted release workflow [42584890455](https://github.com/yakut-sekonts/printforge/actions/runs/42584890455): 17/17 gates прошли на каждой из трёх платформ. Это проверка executable/protocol, не native UI.
 
 ## Browser smoke — изолированная среда
 
@@ -42,4 +42,7 @@ Frontend на 5175 и отдельный dev-shim на 8788; пользоват�
 
 ## Поставка
 
-До публикации: согласованная версия 0.6.0, исходный код и tests, актуальная offline-справка, macOS ARM/Intel + Windows x64 matrix, 17 packaged gates на каждой платформе, подписанный updater feed. Ключ updater и policy отсутствия Apple notarization/Windows Authenticode не меняются. Историческое Windows v0.5.0 наблюдение 26 FPS при цели 30 не объявляется исправленным без нового evidence.
+- PASS: полный [GitHub CI 42583440118](https://github.com/yakut-sekonts/printforge/actions/runs/42583440118) и [release matrix 42584890455](https://github.com/yakut-sekonts/printforge/actions/runs/42584890455); 17/17 packaged geometry gates на каждой платформе.
+- PASS: Windows x64 NSIS установка, запуск, комплектность и удаление. Startup p95 4,72 с и пик RSS 923 684 864 bytes прошли бюджеты.
+- FAILED / non-blocking: Windows Server 2025 hosted runner, сцена 20 тел/100 операций, минимум 26,33 FPS при цели каждого прогона не менее 30. Это не performance PASS и не измерение физического ПК.
+- PASS: публичный updater feed отдаёт 0.6.0 для macOS ARM/Intel и Windows x64; SHA-256 трёх updater assets совпадают с GitHub, подписи Minisign проверены встроенным ключом, изменение payload отклонено. macOS archives содержат 0.6.0 и ожидаемые архитектуры arm64/x86_64. Apple notarization и Windows Authenticode отсутствуют по политике open-source выпуска.

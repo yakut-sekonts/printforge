@@ -10,7 +10,7 @@
 - [x] Native recovery безымянного main-документа и безопасное первое Save
 - [x] Schema 7, offline-справка и новый урок; 17 packaged geometry gates
 - [x] Итоговый stage (540 PASS), финальный macOS native smoke и crash recovery
-- [ ] Публикация полной платформенной matrix и проверка public updater assets
+- [x] Публикация полной платформенной matrix и проверка public updater assets
 
 ## M0 — техническая реализуемость (текущий)
 - [x] Прочитать требования и закреплённые источники дизайна
