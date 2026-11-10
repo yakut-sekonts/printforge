@@ -6,7 +6,9 @@
 
 Опенсорс настольное CAD-приложение для моделирования деталей под 3D-печать. Начните с простой фигуры, выберите нужную грань или ребро и задайте действие прямо в сцене. PrintForge объединяет точное CAD-ядро, русскоязычные подсказки, встроенное обучение и управляемого AI-помощника.
 
-Текущий стабильный выпуск — v0.6.0. Следующий кандидат v0.7.0 готовится: [изменения](docs/releases/v0.7.0.md) и [статус проверок](docs/testing/QA_0.7.0.md).
+Текущий стабильный выпуск — [v0.7.0](https://github.com/yakut-sekonts/printforge/releases/tag/v0.7.0): [изменения](docs/releases/v0.7.0.md) и [результаты проверок](docs/testing/QA_0.7.0.md).
+
+В v0.7.0 можно создать полую прямоугольную деталь по выбранной грани, менять радиус окружности мышью и строить контур из линий и дуг. Оболочка доступна для прямоугольных тел без отверстий, скруглений и наклона.
 
 ## Предсказуемое моделирование — v0.6.0
 
@@ -32,7 +34,7 @@
 
 ## Скачать
 
-[Скачать последний опубликованный релиз](https://github.com/yakut-sekonts/printforge/releases/latest) · изменения этой версии: **[PrintForge v0.6.0](docs/releases/v0.6.0.md)**.
+[Скачать последний опубликованный релиз](https://github.com/yakut-sekonts/printforge/releases/latest) · изменения этой версии: **[PrintForge v0.7.0](docs/releases/v0.7.0.md)**.
 
 - macOS Apple Silicon: DMG для Mac на M1/M2/M3/M4 и новее.
 - macOS Intel: DMG для Mac на Intel.
@@ -113,7 +115,7 @@ Target-specific sidecar не хранится в Git. Результат native-
 
 Срез v0.6.0: **540 уникальных automated-тестов PASS** (429 Python, 87 Node, 24 Rust); отдельно 17 packaged-sidecar geometry gates, browser walkthrough и настоящий native crash/relaunch/restore. Полный каталог из 179 сценариев не объявляется пройденным повторно: границы и BLOCKED описаны в [QA-отчёте](docs/testing/QA_0.6.0.md). В опубликованной release matrix packaged geometry прошла 17/17 проверок на каждой платформе. Windows hosted stress-тест показал минимум 26,33 FPS при цели 30; это неблокирующее замечание, а не performance PASS. Исторический срез v0.5.0: 511 automated и 10 packaged gates.
 
-Windows runner: в stress-сцене 20 тел/100 операций минимум 26,0 FPS при цели 30. Это `failed/non-blocking` performance observation, не полный performance PASS; installer/payload и startup/memory gates проходят. Подробности — в release notes и QA-отчёте.
+Срез v0.7.0: **577 automated-тестов PASS** (458 Python, 94 Node, 25 Rust), 19/19 packaged geometry gates на каждой из трёх платформ. Windows NSIS установка и удаление прошли; в stress-сцене 20 тел/100 операций минимум 25,73 FPS при цели 30 — `failed/non-blocking`, а не performance PASS. Подробности и ограничения — в [QA-отчёте](docs/testing/QA_0.7.0.md).
 
 ```bash
 backend/.venv/bin/python scripts/run_test_stage.py --scope full
