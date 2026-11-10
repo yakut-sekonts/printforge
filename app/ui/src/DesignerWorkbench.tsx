@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { DocState, MeshData, Point3, FaceFeatureProfile, FaceAxis, ConstrainedSketch, DimensionBindings, FaceRange, Operation } from "./types";
+import type { DocState, MeshData, Point3, FaceFeatureProfile, FaceAxis, ConstrainedSketch, DimensionBindings, FaceRange, FaceOffsetRef, Operation } from "./types";
 import { backend, parseIpcError } from "./backend";
 import { SketchCanvas } from "./SketchCanvas";
 import { changeLocalFeature, findSmallerFeature, localFeatureValue, localHandleEnabled } from "./localFeatures";
@@ -10,7 +10,7 @@ import { faceFeatureArgs } from "./faceEditing";
 import { constrainedSize, deformPositions, editableParameters, edgeDesignerAction, EDIT_FIELDS, operationName } from "./designer";
 import type { DesignerAction } from "./designer";
 
-type Mode = "dimensions" | "placement" | "sketch" | "advanced-sketch" | "sculpt" | "convert" | "history" | "history-list" | null;
+type Mode = "dimensions" | "face-shell" | "placement" | "sketch" | "advanced-sketch" | "sculpt" | "convert" | "history" | "history-list" | null;
 type Preview = (action: DesignerAction, done: (error: string | null) => void) => () => void;
 
 export function OperationHistory({ doc, onEdit, onSelect }: {
@@ -41,7 +41,7 @@ function ParameterFields({ value, onChange, prefix = "" }: {
 }) {
   const labels: Record<string, string> = { profile: "Профиль", gap: "Зазор / осевое смещение, мм", radius: "Радиус, мм", distance: "Расстояние, мм", size: "Габариты, мм",
     anchor: "Неподвижный угол", translate: "Перемещение, мм", rotate_deg: "Поворот, °", pivot: "Центр поворота, мм",
-    depth: "Глубина, мм", diameter: "Диаметр, мм", width: "Ширина, мм", height: "Высота, мм", center: "Центр, мм", delta: "Смещение, мм" };
+    depth: "Глубина, мм", diameter: "Диаметр, мм", width: "Ширина, мм", height: "Высота, мм", thickness: "Толщина, мм", center: "Центр, мм", delta: "Смещение, мм" };
   return <>{Object.entries(value).map(([key, current]) => {
     if (key === "dimension_bindings" || key === "sketch") return null;
     const label = `${prefix}${labels[key] ?? key}`;
@@ -99,6 +99,8 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   const [mode, setMode] = useState<Mode>(null);
   const [context, setContext] = useState<{ x: number; y: number } | null>(null);
   const [size, setSize] = useState<Point3>(originalSize);
+  const [shellThickness, setShellThickness] = useState(2);
+  const [shellTarget, setShellTarget] = useState<{ partId: string; faceRef: FaceOffsetRef } | null>(null);
   const [preserve, setPreserve] = useState(!!part?.parametric_resize);
   const [translation, setTranslation] = useState<Point3>([0, 0, 0]);
   const [rotation, setRotation] = useState<Point3>([0, 0, 0]);
@@ -175,6 +177,7 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
 
   let action: DesignerAction | null = null;
   if (mode === "dimensions" && part) action = { type: "append", operation: { op: preserve && part.parametric_resize ? "resize_parametric" : "resize_body", target_id: part.part_id, size, anchor: [-1, -1, -1] } };
+  if (mode === "face-shell" && shellTarget) action = { type: "append", operation: { op: "face_shell", target_id: shellTarget.partId, face_ref: shellTarget.faceRef, thickness: shellThickness } };
   if (mode === "placement" && part) action = { type: "append", operation: { op: isMesh ? "mesh_transform" : "transform", part_id: part.part_id, translate: translation, rotate_deg: rotation,
     pivot: bounds.slice(0, 3).map((value, axis) => (value + bounds[axis + 3]) / 2) } };
   if (mode === "sketch" && face && profile && !drawing) action = { type: "append", operation: { op: "face_feature", ...faceFeatureArgs(face, featureMode, profile, depth), ...(Object.keys(bindings).length ? { dimension_bindings: bindings } : {}) } };
@@ -285,7 +288,7 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
   };
   const policy = <label className="designer-field">Как менять габариты<select value={preserve && part?.parametric_resize ? "preserve" : "scale"} onChange={(event) => setPreserve(event.target.value === "preserve")}>
     <option value="preserve" disabled={!part?.parametric_resize}>Сохранять отверстия и радиусы</option><option value="scale">Масштабировать всё, включая отверстия</option></select></label>;
-  const title = mode === "dimensions" ? "Размеры детали" : mode === "placement" ? "Положение детали" : mode === "sketch" || mode === "advanced-sketch" ? "Эскиз на грани" : mode === "sculpt" ? "Мягкая форма · mesh" : mode === "history" ? operation ? operationName(operation) : "История" : mode === "history-list" ? "История операций" : mode === "convert" ? "Перейти в mesh?" : "Скругление / фаска";
+  const title = mode === "face-shell" ? "Полая деталь" : mode === "dimensions" ? "Размеры детали" : mode === "placement" ? "Положение детали" : mode === "sketch" || mode === "advanced-sketch" ? "Эскиз на грани" : mode === "sculpt" ? "Мягкая форма · mesh" : mode === "history" ? operation ? operationName(operation) : "История" : mode === "history-list" ? "История операций" : mode === "convert" ? "Перейти в mesh?" : "Скругление / фаска";
   const otherParts = (doc.stats?.parts ?? []).filter((candidate) => candidate.part_id !== part?.part_id && candidate.bbox);
   const snappingControls = <div className="designer-snapping"><label><input type="checkbox" checked={snap} onChange={(event) => setSnap(event.target.checked)} />Привязки</label><label>Шаг<input aria-label="Шаг сетки, мм" className="designer-grid" type="number" min="0.1" step="0.1" value={grid} onChange={(event) => setGrid(Number(event.target.value))} />мм</label></div>;
   return <>
@@ -293,6 +296,10 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
       {!isMesh && <button className="btn" data-cmd="op.dimensions" disabled={busy} onClick={() => open("dimensions")}>Размеры</button>}
       <button className="btn" data-cmd="op.placement" disabled={busy} onClick={() => open("placement")}>Положение</button>
       {!isMesh && <button className="btn" data-cmd="op.face_sketch" disabled={busy || !face} title={face ? "Нарисуйте на выбранной грани" : "Выберите внешнюю плоскую грань"} onClick={() => open("sketch")}>Рисовать на грани</button>}
+      {!isMesh && <button className="btn" data-cmd="op.face_shell" disabled={busy || inspectMode || !partId || !selectedRange?.face_ref} onClick={() => {
+        if (!partId || !selectedRange?.face_ref) return;
+        setShellTarget({ partId, faceRef: selectedRange.face_ref }); setShellThickness(2); open("face-shell");
+      }}>Полая деталь</button>}
       {!isMesh && <button className="btn" data-cmd="op.canvas_sketch" disabled={busy || !face || inspectMode} onClick={() => open("advanced-sketch")}>Эскиз с ограничениями</button>}
       <button className="btn" data-cmd="op.mesh_deform" disabled={busy} onClick={() => open(isMesh ? "sculpt" : "convert")}>Мягкая форма</button>
       <button className="btn" data-cmd="op.history_edit" disabled={busy} onClick={() => open("history-list")}>История</button>
@@ -308,6 +315,7 @@ export function DesignerWorkbench({ doc, mesh, viewport, partId, face, edge, bus
     </div>}
     {(mode || edgeActive) && <section className="designer-card" aria-label={title} data-cmd={mode === "history" ? "op.history_edit" : "op.designer"}>
       <header><strong>{title}</strong><button className="btn" aria-label="Закрыть инструмент" onClick={() => { close(); if (edgeActive) onEdgeCancel(); }}>×</button></header>
+      {mode === "face-shell" && <><NumberField label="Толщина стенки и дна, мм" value={shellThickness} min={0.1} onChange={setShellThickness} /><p>Выбранная грань станет открытой. Пока доступен параллелепипед без отверстий и скруглений, с гранями параллельно осям; точный Preview проверяет результат до применения.</p></>}
       {mode === "dimensions" && <>{policy}<div className="designer-vector">{size.map((value, axis) => <NumberField key={axis} label={`${"XYZ"[axis]}, мм`} value={value} min={0.01} onChange={(next) => {
         try { setSize(constrainedSize(size, axis, next, preserve && part?.parametric_resize ? part.size_constraint : "free")); } catch { setSize(size.map((old, index) => index === axis ? next : old) as Point3); }
       }} />)}</div><p>Минимальный угол неподвижен. Двойной щелчок по размеру в сцене открывает этот инструмент.</p>

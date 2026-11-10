@@ -6,6 +6,7 @@
     {"command_id": "op.local_feature", "title": "Изменить выбранный элемент", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
     {"command_id": "op.mate", "title": "Соединить по поверхности", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
     {"command_id": "op.place_on_bed", "title": "Разместить на центре стола", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
+    {"command_id": "op.face_shell", "title": "Полая деталь по выбранной грани", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
     {"command_id": "op.canvas_sketch", "title": "Эскиз с ограничениями", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
     {"command_id": "op.suggest_feature_size", "title": "Проверить меньший радиус или фаску", "help_id": "predskazuemoe-modelirovanie", "shortcut": null, "availability": "always", "params": []},
     {"command_id": "op.designer", "title": "Ручное проектирование", "help_id": "ruchnoe-proektirovanie", "shortcut": null, "availability": "always", "params": []},

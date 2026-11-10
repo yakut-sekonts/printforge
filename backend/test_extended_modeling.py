@@ -1,3 +1,4 @@
+import copy
 import base64
 import math
 from io import StringIO
@@ -694,4 +695,47 @@ def test_split_connector_pair_rejects_thin_wall_or_oversized_pin(overrides):
     }
     with pytest.raises(worker.GeometryError) as error:
         build({**operation, **overrides})
+    assert error.value.code == "bad_params"
+
+
+def test_circle_radius_drag_respects_constraints_without_mutating_sketch():
+    sketch = {
+        "entities": [
+            {"id": "first", "type": "circle", "center": [0, 0], "radius": 3},
+            {"id": "second", "type": "circle", "center": [15, 0], "radius": 3},
+        ],
+        "constraints": [
+            {"type": "fix", "point": ["first", "center"], "value": [0, 0]},
+            {"type": "equal", "a": "first", "b": "second"},
+        ],
+    }
+    before = copy.deepcopy(sketch)
+    result = worker.handle_solve_sketch({"sketch": sketch, "drag": {"entity": "first", "radius": 5}})
+    assert sketch == before
+    assert result["entities"][0]["center"] == pytest.approx([0, 0], abs=1e-7)
+    assert [entity["radius"] for entity in result["entities"]] == pytest.approx([5, 5], abs=1e-6)
+
+    sketch["constraints"].append({"type": "dimension", "kind": "radius", "entity": "first", "value": 3})
+    with pytest.raises(worker.GeometryError) as error:
+        worker.handle_solve_sketch({"sketch": sketch, "drag": {"entity": "first", "radius": 5}})
+    assert error.value.code == "constraint_conflict"
+
+
+def test_circle_radius_drag_rejects_fixed_entity_without_modifying_it():
+    sketch = {
+        "entities": [{"id": "circle", "type": "circle", "center": [0, 0], "radius": 3}],
+        "constraints": [{"type": "fix", "entity": "circle"}],
+    }
+    before = copy.deepcopy(sketch)
+    with pytest.raises(worker.GeometryError) as error:
+        worker.handle_solve_sketch({"sketch": sketch, "drag": {"entity": "circle", "radius": 5}})
+    assert error.value.code == "constraint_conflict"
+    assert sketch == before
+
+
+@pytest.mark.parametrize("radius", [0, -1, float("nan"), float("inf"), True, "5"])
+def test_circle_radius_drag_rejects_invalid_target(radius):
+    sketch = {"entities": [{"id": "circle", "type": "circle", "center": [0, 0], "radius": 3}], "constraints": []}
+    with pytest.raises(worker.GeometryError) as error:
+        worker.handle_solve_sketch({"sketch": sketch, "drag": {"entity": "circle", "radius": radius}})
     assert error.value.code == "bad_params"

@@ -166,10 +166,9 @@ export interface ConstrainedSketch {
   regions?: Array<{ outer: string[] | string; holes: Array<string[] | string> }>;
 }
 
-export interface SketchDrag {
-  point: SketchPointRef;
-  value: Point2;
-}
+export type SketchDrag =
+  | { point: SketchPointRef; value: Point2 }
+  | { entity: string; radius: number };
 
 export interface SketchSolveResult {
   status: "fully_constrained" | "under_constrained";

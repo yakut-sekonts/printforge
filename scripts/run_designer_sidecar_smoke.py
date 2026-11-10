@@ -102,6 +102,21 @@ def main():
         arc = call("build", {"parts": [], "operations": [{"op": "constrained_sketch_extrude", "sketch": sketch, "depth": 3}]})
         assert abs(arc["stats"]["volume"] - math.pi * 25 / 2 * 3) < 0.01
         passed("packaged arc solver and exact sketch extrusion")
+        circles = {"entities": [{"id": "first", "type": "circle", "center": [0, 0], "radius": 3},
+                                {"id": "second", "type": "circle", "center": [15, 0], "radius": 3}],
+                   "constraints": [{"type": "equal", "a": "first", "b": "second"}]}
+        resized_circles = call("solve_sketch", {"sketch": circles, "drag": {"entity": "first", "radius": 5}})
+        assert all(abs(entity["radius"] - 5) < 1e-5 for entity in resized_circles["entities"])
+        invalid_radius = call("solve_sketch", {"sketch": circles, "drag": {"entity": "first", "radius": 0}}, ok=False)
+        assert invalid_radius["code"] == "bad_params"
+        passed("packaged constrained circle radius drag and invalid target rejection")
+        shell_face = next(face["face_ref"] for face in initial["mesh"]["face_ranges"] if face.get("face_ref") and face["face_ref"]["normal"][2] > 0.99)
+        shell_action = {"type": "append", "operation": {"op": "face_shell", "target_id": "one", "face_ref": shell_face, "thickness": 2}}
+        shell_document = call("designer_action", {"document": source, "action": shell_action})
+        assert abs(call("build", shell_document)["stats"]["volume"] - 7152) < 0.01
+        shell_bad = call("build", {**source, "operations": [{**shell_action["operation"], "thickness": 100}]}, ok=False)
+        assert shell_bad["code"] == "bad_params"
+        passed("packaged selected-face box shell and invalid thickness rejection")
         top = next(face["surface_ref"] for face in initial["mesh"]["face_ranges"] if face["surface_ref"] and face["surface_ref"]["kind"] == "plane" and face["surface_ref"]["direction"][2] > 0.99)
         bottom = next(face["surface_ref"] for face in initial["mesh"]["face_ranges"] if face["surface_ref"] and face["surface_ref"]["kind"] == "plane" and face["surface_ref"]["direction"][2] < -0.99)
         assembly = {"parts": source["parts"] + [{"part_id": "two", "template": "box", "params": {}}], "operations": []}

@@ -19,7 +19,7 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::{watch, Mutex};
 
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 8;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const QUIT_MENU_ID: &str = "printforge.quit";
 
@@ -2027,6 +2027,7 @@ async fn doc_get_imported_mesh_binary(
 }
 
 fn document_schema_version(doc: &Document) -> u32 {
+    if doc.snap.operations.iter().any(|operation| operation["op"] == "face_shell") { return 8; }
     if doc.snap.operations.iter().any(|operation| operation["op"] == "mate" || operation.get("dimension_bindings").is_some()
         || operation.get("frame").is_some() || operation["sketch"]["entities"].as_array().is_some_and(|entities| entities.iter().any(|entity| entity["type"] == "arc"))) {
         return 7;
@@ -3114,6 +3115,13 @@ mod mesh_tests {
             document.snap.operations = vec![operation];
             assert_eq!(document_schema_version(&document), 6);
         }
+    }
+
+    #[test]
+    fn face_shell_requires_schema_eight() {
+        let mut document = Document::new();
+        document.snap.operations.push(json!({"op": "face_shell", "thickness": 2}));
+        assert_eq!(document_schema_version(&document), 8);
     }
 
     #[test]

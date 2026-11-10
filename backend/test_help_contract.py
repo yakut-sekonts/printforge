@@ -35,7 +35,7 @@ def test_shipped_help_and_lessons_match_authoritative_sources():
     assert "forma-myshyu" in help_ids
     assert "ai-pomoshchnik" in help_ids
     assert "ruchnoe-proektirovanie" in help_ids
-    assert len(public_commands["commands"]) == 76
+    assert len(public_commands["commands"]) == 77
     assert all(command["help_id"] in help_ids for command in public_commands["commands"])
 
 

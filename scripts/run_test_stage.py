@@ -47,6 +47,7 @@ def groups(run_dir):
                 "backend/test_extended_modeling.py",
                 "backend/test_document_integration.py",
                 "backend/test_face_offset.py",
+                "backend/test_face_shell.py",
                 "backend/test_split_bodies.py",
                 "backend/test_full_regressions.py",
                 "backend/test_body_resize.py",
@@ -138,7 +139,7 @@ def impact_groups(paths):
     for path in paths:
         if path.startswith(("scripts/ai_planner.py", "scripts/dev_shim.py", "backend/test_ai", "tests/live_eval/")):
             selected.add("ai")
-        if path.startswith(("scripts/dev_shim.py", "backend/worker.py", "backend/test_worker", "backend/test_templates.py", "backend/test_extended_modeling.py", "backend/test_document", "backend/test_face_offset.py", "backend/test_split_bodies.py", "backend/test_full_regressions.py", "backend/test_parameter_expressions.py", "backend/parameter_expressions.py", "tests/fixtures/")):
+        if path.startswith(("scripts/dev_shim.py", "backend/worker.py", "backend/test_worker", "backend/test_templates.py", "backend/test_extended_modeling.py", "backend/test_document", "backend/test_face_offset.py", "backend/test_face_shell.py", "backend/test_split_bodies.py", "backend/test_full_regressions.py", "backend/test_parameter_expressions.py", "backend/parameter_expressions.py", "tests/fixtures/")):
             selected.add("cad")
         if path in {"backend/test_body_resize.py", "backend/test_designer.py", "backend/designer_actions.py", "scripts/run_designer_sidecar_smoke.py"}:
             selected.add("cad")

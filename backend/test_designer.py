@@ -145,6 +145,36 @@ def test_preview_and_history_edit_are_atomic_undoable_and_persistent(document, t
         action(arguments, expected_revision=0)
 
 
+def test_face_shell_preview_history_undo_redo_and_schema_roundtrip(document, tmp_path):
+    import json
+    import zipfile
+
+    created = dev_shim.cmd_doc_create({"template": "box", "params": {}})
+    part_id = dev_shim.doc().parts[0]["part_id"]
+    face_ref = next(item["face_ref"] for item in dev_shim.doc().mesh["face_ranges"]
+                    if item.get("face_ref") and item["face_ref"]["normal"][2] > 0.99)
+    command = {"type": "append", "operation": {"op": "face_shell", "target_id": part_id,
+                                                "face_ref": face_ref, "thickness": 2}}
+    before = copy.deepcopy(dev_shim.doc().__dict__)
+    preview = action(command, preview=True)
+    assert preview["stats"]["volume"] == pytest.approx(7152)
+    assert dev_shim.doc().__dict__ == before
+    assert action(command)["stats"]["volume"] == pytest.approx(7152)
+    changed = action({"type": "edit", "index": 0, "changes": {"thickness": 3}})
+    assert changed["stats"]["volume"] == pytest.approx(24000 - 34 * 24 * 17)
+    assert dev_shim.cmd_doc_undo({})["stats"]["volume"] == pytest.approx(7152)
+    failure = action({"type": "edit", "index": 0, "changes": {"thickness": 30}})
+    assert failure["error"]
+    assert dev_shim.cmd_doc_redo({})["stats"]["volume"] == pytest.approx(24000 - 34 * 24 * 17)
+    destination = tmp_path / "shell.printforge"
+    dev_shim.cmd_doc_save({"path": str(destination)})
+    with zipfile.ZipFile(destination) as archive:
+        assert json.loads(archive.read("document.json"))["schema_version"] == 8
+    reopened = dev_shim.cmd_doc_open({"path": str(destination)})
+    assert reopened["stats"]["volume"] == pytest.approx(24000 - 34 * 24 * 17)
+    assert reopened["operations"][0]["face_ref"] == face_ref
+
+
 def test_mesh_conversion_is_undoable_and_cannot_export_step(document, tmp_path):
     dev_shim.cmd_doc_create({"template": "box", "params": {}})
     converted = action({"type": "convert_mesh"})

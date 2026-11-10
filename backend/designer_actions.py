@@ -5,6 +5,7 @@ EDITABLE_FIELDS = {
     "fillet": {"radius"},
     "chamfer": {"distance"},
     "face_offset": {"distance"},
+    "face_shell": {"thickness"},
     "face_feature": {"profile", "depth", "mode", "dimension_bindings"},
     "constrained_sketch_extrude": {"sketch", "depth", "mode"},
     "mate": {"gap"},
@@ -22,7 +23,7 @@ EDITABLE_FIELDS = {
 }
 
 APPEND_OPERATIONS = {
-    "fillet", "chamfer", "face_offset", "face_feature", "resize_body",
+    "fillet", "chamfer", "face_offset", "face_shell", "face_feature", "resize_body",
     "resize_parametric", "transform", "mesh_transform", "mesh_deform", "mate", "constrained_sketch_extrude",
 }
 

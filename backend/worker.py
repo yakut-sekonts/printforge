@@ -1234,6 +1234,37 @@ def _apply_face_offset(target, operation):
             detail=str(exc).split("\n")[0]) from exc
 
 
+def _apply_face_shell(target, operation):
+    from build123d import Compound
+
+    thickness = operation.get("thickness")
+    if isinstance(thickness, bool) or not isinstance(thickness, (int, float)) or not math.isfinite(thickness) or thickness <= 0:
+        raise GeometryError("bad_params", "Толщина стенки должна быть конечным числом больше нуля.")
+    solid_index, solid, face = _match_offset_face(target, operation.get("face_ref"))
+    bounds = solid.bounding_box()
+    size = [bounds.size.X, bounds.size.Y, bounds.size.Z]
+    normal = tuple(face.normal_at())
+    axis = max(range(3), key=lambda index: abs(normal[index]))
+    if (not solid.is_valid or len(solid.faces()) != 6 or
+            abs(abs(normal[axis]) - 1) > 1e-7 or
+            abs(solid.volume - math.prod(size)) > max(1e-5, solid.volume * 1e-7)):
+        raise GeometryError("shell_unsupported", "Пока оболочка доступна для прямоугольного тела без отверстий и скруглений.")
+    other = [size[index] for index in range(3) if index != axis]
+    if thickness >= size[axis] or any(2 * thickness >= dimension for dimension in other):
+        raise GeometryError("bad_params", "Толщина слишком велика для выбранного тела. Уменьшите её.")
+    expected_volume = solid.volume - (size[axis] - thickness) * math.prod(dimension - 2 * thickness for dimension in other)
+    try:
+        result = solid.hollow([face], -thickness)
+        if (not result.is_valid or len(result.solids()) != 1 or result.volume <= 0 or
+                abs(result.volume - expected_volume) > max(1e-4, expected_volume * 1e-6)):
+            raise ValueError("Unexpected shell geometry")
+        solids = list(target.solids())
+        solids[solid_index] = result
+        return result if len(solids) == 1 else Compound(children=solids)
+    except Exception as exc:
+        raise GeometryError("shell_failed", "Не удалось построить оболочку. Уменьшите толщину или выберите другую грань.", detail=str(exc).split("\n")[0]) from exc
+
+
 def _apply_face_feature(target, operation):
     from build123d import Plane
     face_ref = operation.get("face_ref") or {}
@@ -2504,11 +2535,17 @@ def _solve_constrained_sketch(sketch, drag=None, tolerance=1e-7):
             ranges.append((first_residual, len(residuals)))
         constraint_ranges[:] = ranges
         if drag:
-            actual = point(vector, drag.get("point"))
-            target = np.asarray(drag.get("value"), dtype=float)
-            if target.shape != (2,):
-                raise GeometryError("bad_params", "Drag требует value [x, y].")
-            residuals.extend(actual - target)
+            if "radius" in drag:
+                target = drag["radius"]
+                if isinstance(target, bool) or not isinstance(target, (int, float)) or not np.isfinite(target) or target <= 0:
+                    raise GeometryError("bad_params", "Drag требует положительный конечный радиус.")
+                residuals.append(circle(vector, drag.get("entity"))[1] - target)
+            else:
+                actual = point(vector, drag.get("point"))
+                target = np.asarray(drag.get("value"), dtype=float)
+                if target.shape != (2,) or not np.isfinite(target).all():
+                    raise GeometryError("bad_params", "Drag требует конечные координаты value [x, y].")
+                residuals.extend(actual - target)
         return np.asarray(residuals, dtype=float)
 
     def jacobian(vector, residual):
@@ -3650,6 +3687,11 @@ def apply_part_operations(parts, operations):
             if target_id not in parts:
                 raise GeometryError("bad_params", "Деталь для перемещения грани не найдена.")
             parts[target_id]["shape"] = _apply_face_offset(parts[target_id]["shape"], op)
+        elif kind == "face_shell":
+            target_id = op.get("target_id")
+            if target_id not in parts:
+                raise GeometryError("bad_params", "Деталь для оболочки не найдена.")
+            parts[target_id]["shape"] = _apply_face_shell(parts[target_id]["shape"], op)
         elif kind == "face_feature":
             target_id = op.get("target_id")
             if target_id not in parts:
